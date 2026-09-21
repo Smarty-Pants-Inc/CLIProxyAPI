@@ -54,7 +54,7 @@ func TestCodexDuplexInitialFailure(t *testing.T) {
 						succeeded.Add(1)
 						payloads = []string{
 							`{"type":"response.created","response":{"id":"healthy-response","output":[]}}`,
-							`{"type":"response.completed","response":{"id":"healthy-response","output":[]}}`,
+							`{"type":"response.completed","response":{"id":"healthy-response","model":"duplex-initial-failure-model","output":[]}}`,
 						}
 					}
 					for _, payload := range payloads {

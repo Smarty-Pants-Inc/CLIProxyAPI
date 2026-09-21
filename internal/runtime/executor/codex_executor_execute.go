@@ -132,6 +132,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	modelGuard := helps.NewCodexModelGuard(baseModel)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -285,7 +286,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventData := bytes.TrimSpace(line[5:])
 		eventData = helps.RestoreCodexMultiAgentV2Response(eventData, optimizeMultiAgentV2)
 		reporter.ObserveResponseModel(eventData)
+		modelErr := modelGuard.Observe(eventData)
 		eventType := ojson.GetBytesNoCopy(eventData, "type").String()
+		if modelErr != nil && eventType != "response.completed" && eventType != "response.incomplete" && eventType != "response.done" {
+			err = modelErr
+			return resp, err
+		}
 
 		if helps.HasMeaningfulCodexOutputDelta(eventData) {
 			sawOutputDelta = true
@@ -326,6 +332,14 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if helps.IsCodexTerminalEmptyIncomplete(eventData, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
 			err = newCodexEmptyIncompleteStreamError()
 			if detail, hasDetail := helps.ParseCodexUsageWithOutputItems(eventData, outputItemsByIndex, outputItemsFallback); hasDetail {
+				reporter.PublishFailureWithDetail(ctx, detail, err)
+			}
+			return resp, err
+		}
+
+		if modelErr != nil {
+			err = modelErr
+			if detail, ok := helps.ParseCodexUsageWithOutputItems(eventData, outputItemsByIndex, outputItemsFallback); ok {
 				reporter.PublishFailureWithDetail(ctx, detail, err)
 			}
 			return resp, err
@@ -388,6 +402,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			return resp, err
 		}
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+	}
+	if !modelGuard.Authoritative() {
+		err = modelGuard.Missing()
+		return resp, err
 	}
 	err = newCodexIncompleteStreamError()
 	return resp, err

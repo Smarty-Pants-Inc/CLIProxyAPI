@@ -53,6 +53,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	modelGuard := helps.NewCodexModelGuard(baseModel)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -174,10 +175,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
-	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
+	buffering := true
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
-	if buffering {
+	if buffering && e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 	}
 	// Start the bootstrap clock at response headers, before decoding may read body bytes.
@@ -266,6 +267,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if budgetExhausted {
+				if !modelGuard.Authoritative() {
+					closeBootstrapBody()
+					return nil, modelGuard.Missing()
+				}
 				helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap %s exhausted after %d lines / %d bytes / %v, releasing stream without overload probing", exhaustedReason, bufferedFrames, bufferedBytes, nowCodexBootstrap().Sub(bootstrapStart))
 				initialChunks = nil
 				streamStarted = true
@@ -282,6 +287,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data := bytes.TrimSpace(line[5:])
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
+				modelErr := modelGuard.Observe(data)
+				if modelErr != nil && ojson.GetBytesNoCopy(data, "type").String() != "response.completed" && ojson.GetBytesNoCopy(data, "type").String() != "response.incomplete" && ojson.GetBytesNoCopy(data, "type").String() != "response.done" {
+					closeBootstrapBody()
+					return nil, modelErr
+				}
 				translatedLine = append([]byte("data: "), data...)
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
@@ -362,7 +372,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
-			if isHandshake && !terminalSuccess {
+			if (!modelGuard.Authoritative() || isHandshake) && !terminalSuccess {
 				rawLineCount := scanner.RawLines()
 				frameBytes := scanner.RawBytes()
 				for i := range chunks {
@@ -372,6 +382,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
 				totalFrames := bufferedFrames + scanner.HeldLines() + rawLineCount
 				totalBytes := bufferedBytes + scanner.HeldBytes() + frameBytes
+				if !modelGuard.Authoritative() && (timeoutReached || totalFrames > codexBootstrapMaxBufferedFrames || totalBytes > codexBootstrapMaxBufferedBytes) {
+					closeBootstrapBody()
+					return nil, modelGuard.Missing()
+				}
 				if !timeoutReached && totalFrames <= codexBootstrapMaxBufferedFrames && totalBytes <= codexBootstrapMaxBufferedBytes {
 					bufferedFrames += rawLineCount
 					bufferedBytes += frameBytes
@@ -485,6 +499,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data := bytes.TrimSpace(line[5:])
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
+				modelErr := modelGuard.Observe(data)
+				if modelErr != nil {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: modelErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				translatedLine = append([]byte("data: "), data...)
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
