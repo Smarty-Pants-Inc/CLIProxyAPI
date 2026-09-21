@@ -2,12 +2,14 @@ name: pr-test-build
 
 on:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,3 +25,94 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+
+  artifact:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: amd64
+      GOFLAGS: '-mod=readonly -p=2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Build exact landed source and retain provenance
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          DEFINITION_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          test "$RUNNER_OS/$RUNNER_ARCH" = Linux/X64
+          test "$(go version)" = 'go version go1.26.8 linux/amd64'
+          cd "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          source_tree=$(git rev-parse HEAD^{tree})
+          output="$RUNNER_TEMP/cpa-artifact"
+          mkdir "$output" "$RUNNER_TEMP/cpa-empty-home"
+          finish() {
+            status=$?
+            trap - EXIT
+            {
+              printf 'post_head=%s\npost_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+              printf 'post_status_begin\n'
+              git status --porcelain
+              printf 'post_status_end\nreceipt_exit=%s\n' "$status"
+            } >> "$output/provenance.txt"
+            if [ "$status" -ne 0 ]; then rm -f "$output/cliproxyapi" "$output/SHA256SUMS"; fi
+            exit "$status"
+          }
+          trap finish EXIT
+          utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          flags="-X main.Version=smarty-model-integrity -X main.Commit=$SOURCE_SHA -X main.BuildDate=$utc"
+          {
+            printf 'cwd=%s\nsource=%s\ntree=%s\ndefinition=%s\n' "$PWD" "$SOURCE_SHA" "$source_tree" "$DEFINITION_SHA"
+            printf 'run=%s\nattempt=%s\njob=%s\nos=%s\narch=%s\nUTC=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" "$RUNNER_OS" "$RUNNER_ARCH" "$utc"
+            readlink -f "$(command -v go)"
+            go version
+            sha256sum "$(readlink -f "$(command -v go)")"
+            printf 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS=-mod=readonly,-p=2\n'
+            printf 'go build -trimpath -ldflags %q -o %q ./cmd/server\n' "$flags" "$output/cliproxyapi"
+          } > "$output/provenance.txt"
+          set +e
+          go build -trimpath -ldflags "$flags" -o "$output/cliproxyapi" ./cmd/server > "$output/build.log" 2>&1
+          status=$?
+          set -e
+          printf 'build_exit=%s\n' "$status" >> "$output/provenance.txt"
+          test "$status" = 0
+          test -z "$(git status --porcelain)"
+          go version -m "$output/cliproxyapi" >> "$output/provenance.txt"
+          set +e
+          (cd "$RUNNER_TEMP/cpa-empty-home"; HOME="$PWD" timeout --kill-after=5s 10s "$output/cliproxyapi" --help) > "$output/help.txt" 2>&1
+          help_status=$?
+          set -e
+          printf 'help_exit=%s\n' "$help_status" >> "$output/provenance.txt"
+          test "$help_status" = 0
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$source_tree"
+          test -z "$(git status --porcelain)"
+          stat -c 'bytes=%s' "$output/cliproxyapi" >> "$output/provenance.txt"
+          (cd "$output"; sha256sum cliproxyapi > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cliproxyapi-linux-amd64-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cpa-artifact/
+          if-no-files-found: error
+          retention-days: 7
