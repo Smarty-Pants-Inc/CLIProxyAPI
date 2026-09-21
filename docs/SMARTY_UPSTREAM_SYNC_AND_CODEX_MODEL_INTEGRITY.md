@@ -37,4 +37,15 @@ go test ./internal/runtime/executor/helps ./internal/runtime/executor
 go build -o test-output ./cmd/server && rm test-output
 ```
 
-Before landing, inspect the exact diff and run the product's protected checks on the final synced commit. Current patch/PR placeholders: `PATCH_COMMIT=<set after local commit>`, `PR=<set by integration owner>`. Integration owns protected landing and must verify the final tree against the sync receipt.
+Local verification evidence for patch commit `434f0ff405fee56708016d545fa3631a1bbaab6b` (tree `78d786baecd728a9c50647470dc988dbef496810`):
+
+- Go: `/home/paul/.local/share/smarty-dev/go/1.26.8/bin/go`; SHA256 `d9a2fa19c7ef8b57f420012c21f49f235c46f08a68c12077d9c753dbb6ccdc34`.
+- gofmt: `/home/paul/.local/share/smarty-dev/go/1.26.8/bin/gofmt`; SHA256 `b233484fae3a686bd1394f01535477992dbe574b31628b79f58dc272f3c4c597`.
+- The earlier combined `go test ./internal/runtime/executor/helps ./internal/runtime/executor` attempt exceeded the 600-second tool timeout after the helper package passed; no test process remained.
+- `go test ./internal/runtime/executor/helps`: passed.
+- The initial focused WebSocket run exposed legacy offline fixtures without `response.model`; it failed with the intended `model_mismatch` and produced fixture goroutine panics. Those fixtures were updated only where the tests intended same-model behavior.
+- Focused duplex rerun: passed with `-run 'TestCodexDuplex(InitialFailure|RejectedCreateMetadata|LaterInvalidSignatureClearsReplay|AutomaticSuccessorMetadata|SteeringLifecycle|AppendInheritsContextAndInstructions|StandaloneCreateDoesNotInheritParentID|QueuedCreateDoesNotBlockSubsequentSteer)$' -count=1 -timeout=3m`.
+- `git diff --check`: passed.
+- `go build -o /tmp/cliproxyapi-model-guard ./cmd/server`: passed.
+
+The supplied official Go SHA did not match the installed tool binaries above. These are local offline checks only, not CI-host qualification. Before landing, inspect the exact diff and run the product's protected checks on the final synced commit. PR creation and protected landing remain integration-owner work.
