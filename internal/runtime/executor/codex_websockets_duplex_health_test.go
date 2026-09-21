@@ -31,7 +31,7 @@ func TestCodexDuplexConnectionTimeoutDoesNotCoolHealthyAccount(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		for _, payload := range []string{`{"type":"response.created","response":{"id":"r1"}}`, `{"type":"response.completed","response":{"id":"r1","output":[]}}`} {
+		for _, payload := range []string{`{"type":"response.created","response":{"id":"r1","model":"gpt-6-astra"}}`, `{"type":"response.completed","response":{"id":"r1","model":"gpt-6-astra","output":[]}}`} {
 			if err = c.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
 				t.Error(err)
 				return

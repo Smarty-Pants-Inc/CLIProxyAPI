@@ -45,14 +45,14 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 								t.Error(e)
 							}
 						}
-						write(`{"type":"response.created","response":{"id":"started","output":[]}}`)
+						write(`{"type":"response.created","response":{"id":"started","model":"gpt-6-astra","output":[]}}`)
 						if queued {
 							if _, _, err = c.ReadMessage(); err != nil {
 								t.Error(err)
 								return
 							}
 						} else {
-							write(`{"type":"response.completed","response":{"id":"started","output":[]}}`)
+							write(`{"type":"response.completed","response":{"id":"started","model":"gpt-6-astra","output":[]}}`)
 						}
 						errorType := "authentication_error"
 						if status == 403 {

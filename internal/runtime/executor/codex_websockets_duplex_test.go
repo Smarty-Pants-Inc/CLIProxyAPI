@@ -414,7 +414,7 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 			t.Errorf("queued create type = %q, want response.create", got)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r2","model":"gpt-6-astra","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r2","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r2","model":"gpt-6-astra","output":[]}}`))
 		_, _, _ = conn.ReadMessage()
 	}))
 	defer server.Close()
