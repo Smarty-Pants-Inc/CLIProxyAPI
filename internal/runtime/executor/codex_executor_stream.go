@@ -38,6 +38,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	modelGuard := helps.NewCodexModelGuard(baseModel)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -138,10 +139,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
-	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
+	buffering := true
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
-	if buffering {
+	if buffering && e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
 	}
@@ -197,6 +198,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data := bytes.TrimSpace(line[5:])
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
+				modelErr := modelGuard.Observe(data)
+				if modelErr != nil && gjson.GetBytes(data, "type").String() != "response.completed" && gjson.GetBytes(data, "type").String() != "response.incomplete" && gjson.GetBytes(data, "type").String() != "response.done" {
+					closeBootstrapBody()
+					return nil, modelErr
+				}
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
@@ -272,13 +278,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
-			if isHandshake && !terminalSuccess {
+			if (!modelGuard.Authoritative() || isHandshake) && !terminalSuccess {
 				frameBytes := len(line)
 				for i := range chunks {
 					frameBytes += len(chunks[i])
 				}
 				timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 				timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
+				if !modelGuard.Authoritative() && (timeoutReached || bufferedFrames >= codexBootstrapMaxBufferedFrames || bufferedBytes+frameBytes > codexBootstrapMaxBufferedBytes) {
+					closeBootstrapBody()
+					return nil, modelGuard.Missing()
+				}
 				if !timeoutReached && bufferedFrames < codexBootstrapMaxBufferedFrames && bufferedBytes+frameBytes <= codexBootstrapMaxBufferedBytes {
 					bufferedFrames++
 					bufferedBytes += frameBytes
@@ -367,6 +377,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data := bytes.TrimSpace(line[5:])
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
+				modelErr := modelGuard.Observe(data)
+				if modelErr != nil {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: modelErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {

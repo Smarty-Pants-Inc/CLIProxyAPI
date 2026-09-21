@@ -57,19 +57,19 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 				if gjson.GetBytes(first, "type").String() != "response.create" {
 					t.Errorf("initial create: %s", first)
 				}
-				write([]byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`))
+				write([]byte(`{"type":"response.created","response":{"id":"r1","model":"gpt-6-astra","output":[]}}`))
 				if got := read(); !bytes.Equal(got, steer) {
 					t.Errorf("steer transformed: %s", got)
 				}
 				write(accepted)
 				write([]byte(fmt.Sprintf(`{"type":%q,"response":{"id":"r1","output":[],"incomplete_details":{"reason":"steered"}}}`, boundary)))
-				write([]byte(`{"type":"response.created","response":{"id":"r2","output":[]}}`))
+				write([]byte(`{"type":"response.created","response":{"id":"r2","model":"gpt-6-astra","output":[]}}`))
 				got := read()
 				if gjson.GetBytes(got, "type").String() != "response.steer" {
 					t.Errorf("second control: %s", got)
 				}
 				write([]byte(`{"type":"response.steer.accepted","steer":{"id":"s2","previous_response_id":"r2"}}`))
-				write([]byte(`{"type":"response.completed","response":{"id":"r2","output":[{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"}]}}`))
+				write([]byte(`{"type":"response.completed","response":{"id":"r2","model":"gpt-6-astra","output":[{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"}]}}`))
 				write(pending)
 				got = read()
 				if gjson.GetBytes(got, "type").String() != "response.create" || gjson.GetBytes(got, "previous_response_id").String() != "r2" || gjson.GetBytes(got, "input.0.call_id").String() != "c1" {
@@ -78,9 +78,9 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 				if gjson.GetBytes(got, "instructions").String() != "New settings" {
 					t.Errorf("explicit settings not applied: %s", got)
 				}
-				write([]byte(`{"type":"response.created","response":{"id":"r3","output":[]}}`))
+				write([]byte(`{"type":"response.created","response":{"id":"r3","model":"gpt-6-astra","output":[]}}`))
 				write([]byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"STEER_OK"}]}}`))
-				write([]byte(`{"type":"response.completed","response":{"id":"r3","output":[]}}`))
+				write([]byte(`{"type":"response.completed","response":{"id":"r3","model":"gpt-6-astra","output":[]}}`))
 				// Idle steering must also reach the same live upstream connection.
 				got = read()
 				if gjson.GetBytes(got, "previous_response_id").String() != "missing" {
@@ -197,7 +197,7 @@ func TestCodexDuplexAppendInheritsContextAndInstructions(t *testing.T) {
 			t.Errorf("first instructions = %q", gjson.GetBytes(first, "instructions").String())
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-6-astra","output":[]}}`))
 
 		// 2. Read subsequent append (which client sent omitting previous_response_id, model, and instructions)
 		_, second, err := conn.ReadMessage()
@@ -218,7 +218,7 @@ func TestCodexDuplexAppendInheritsContextAndInstructions(t *testing.T) {
 			t.Errorf("second instructions = %q, want 'Initial system instructions'", got)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-2","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-2","model":"gpt-6-astra","output":[]}}`))
 		_, _, _ = conn.ReadMessage()
 	}))
 	defer server.Close()
@@ -286,7 +286,7 @@ func TestCodexDuplexStandaloneCreateDoesNotInheritParentID(t *testing.T) {
 			return
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-6-astra","output":[]}}`))
 
 		// 2. Read second create (standalone / full history replacement without previous_response_id)
 		_, second, err := conn.ReadMessage()
@@ -301,7 +301,7 @@ func TestCodexDuplexStandaloneCreateDoesNotInheritParentID(t *testing.T) {
 			t.Errorf("standalone create must not gain previous_response_id: %s", second)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-2","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-2","model":"gpt-6-astra","output":[]}}`))
 		_, _, _ = conn.ReadMessage()
 	}))
 	defer server.Close()
@@ -371,7 +371,7 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 		if gjson.GetBytes(first, "type").String() != "response.create" {
 			t.Errorf("expected response.create: %s", first)
 		}
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1","model":"gpt-6-astra","output":[]}}`))
 
 		// Read first steer for r1
 		_, steer1, err := conn.ReadMessage()
@@ -386,7 +386,7 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.incomplete","response":{"id":"r1","output":[],"incomplete_details":{"reason":"steered"}}}`))
 
 		// Emit automatic successor (sets automaticActive = true)
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"auto-1","previous_response_id":"r1","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"auto-1","model":"gpt-6-astra","previous_response_id":"r1","output":[]}}`))
 
 		// Client will send next create (blocked by automaticActive) followed by steer for auto-1.
 		// Upstream expects steering to arrive NEXT, proving create did not block the steer!
@@ -400,9 +400,9 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 			return
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.steer.accepted","steer":{"id":"s2","previous_response_id":"auto-1"}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"auto-1","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"auto-2","previous_response_id":"auto-1","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"auto-2","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"auto-1","model":"gpt-6-astra","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"auto-2","model":"gpt-6-astra","previous_response_id":"auto-1","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"auto-2","model":"gpt-6-astra","output":[]}}`))
 
 		// Now that automatic successor is completed, the queued create is delivered to upstream
 		_, nextCreate, err := conn.ReadMessage()
@@ -413,8 +413,8 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 		if got := gjson.GetBytes(nextCreate, "type").String(); got != "response.create" {
 			t.Errorf("queued create type = %q, want response.create", got)
 		}
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r2","output":[]}}`))
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r2","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r2","model":"gpt-6-astra","output":[]}}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r2","model":"gpt-6-astra","output":[]}}`))
 		_, _, _ = conn.ReadMessage()
 	}))
 	defer server.Close()

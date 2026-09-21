@@ -354,6 +354,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 		}
 		reporter := initialReporter
+		modelGuard := helps.NewCodexModelGuard(req.Model)
 		firstResponse := true
 		responseActive := false
 		outputItems := make(map[int64][]byte)
@@ -431,6 +432,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				metadataMu.Unlock()
 				wakeWriter()
 				if !firstResponse {
+					modelGuard = helps.NewCodexModelGuard(req.Model)
 					reporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
 					reporter.SetTranslatedReasoningEffort(current.clientBody, current.to.String())
 					reporter.StartResponseTTFT()
@@ -442,7 +444,6 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			observeCodexTokenEvent(reporter, payload)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			// Steering acknowledgements, pending notifications and failures are opaque:
 			// preserve their IDs, input, sequence numbers and event types byte-for-byte.
 			if strings.HasPrefix(eventType, "response.steer.") {
@@ -478,6 +479,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				metadataMu.Unlock()
 				wakeWriter()
+				if !modelGuard.Authoritative() {
+					_ = send(cliproxyexecutor.StreamChunk{Err: modelGuard.Missing()})
+					return
+				}
 				if !send(cliproxyexecutor.StreamChunk{Payload: payload}) {
 					return
 				}
@@ -539,6 +544,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			payload = applyCodexIdentityConfuseResponsePayload(payload, eventPrepared.identityState)
 			restoreMultiAgent := !eventPrepared.multiAgentV2Conflict && (eventPrepared.optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgent)
+			if modelErr := modelGuard.Observe(payload); modelErr != nil {
+				send(cliproxyexecutor.StreamChunk{Err: modelErr})
+				return
+			}
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			// Parse and invalidate replay for every rejected request, using the
 			// metadata that belongs to this event. Only the first rejection can
 			// enter conductor bootstrap retry; later failures stay on this socket.

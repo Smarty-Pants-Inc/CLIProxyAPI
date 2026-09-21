@@ -34,6 +34,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	modelGuard := helps.NewCodexModelGuard(baseModel)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -306,8 +307,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		observeCodexTokenEvent(reporter, payload)
 		payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 		helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-		helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 		payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+		if modelErr := modelGuard.Observe(payload); modelErr != nil {
+			return resp, modelErr
+		}
+		helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 
 		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 			if sess != nil {

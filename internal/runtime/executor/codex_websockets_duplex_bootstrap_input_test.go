@@ -56,7 +56,7 @@ func TestCodexDuplexBootstrapPreservesFollowup(t *testing.T) {
 					}
 				}
 				succeeded.Add(1)
-				if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"healthy","output":[]}}`)); err != nil {
+				if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"healthy","model":"gpt-6-astra","output":[]}}`)); err != nil {
 					t.Error(err)
 					return
 				}
@@ -69,7 +69,7 @@ func TestCodexDuplexBootstrapPreservesFollowup(t *testing.T) {
 				if gjson.GetBytes(payload, "type").String() != kind || gjson.GetBytes(payload, "input.0.content.0.text").String() != "PRESERVE_ME" {
 					t.Errorf("follow-up changed: %s", payload)
 				}
-				if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"healthy","output":[]}}`)); err != nil {
+				if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"healthy","model":"gpt-6-astra","output":[]}}`)); err != nil {
 					t.Error(err)
 					return
 				}
