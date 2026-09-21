@@ -35,6 +35,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	modelGuard := helps.NewCodexModelGuard(baseModel)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -142,7 +143,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventData := bytes.TrimSpace(line[5:])
 		eventData = helps.RestoreCodexMultiAgentV2Response(eventData, optimizeMultiAgentV2)
 		reporter.ObserveCodexResponseModel(eventData)
+		modelErr := modelGuard.Observe(eventData)
 		eventType := gjson.GetBytes(eventData, "type").String()
+		if modelErr != nil && eventType != "response.completed" && eventType != "response.incomplete" && eventType != "response.done" {
+			err = modelErr
+			return resp, err
+		}
 
 		if helps.HasMeaningfulCodexOutputDelta(eventData) {
 			sawOutputDelta = true
@@ -183,6 +189,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			reporter.Publish(ctx, detail)
 		}
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
+		if modelErr != nil {
+			err = modelErr
+			return resp, err
+		}
 
 		completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 		if eventType == "response.completed" {
@@ -205,6 +215,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			return resp, err
 		}
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+	}
+	if !modelGuard.Authoritative() {
+		err = modelGuard.Missing()
+		return resp, err
 	}
 	err = newCodexIncompleteStreamError()
 	return resp, err

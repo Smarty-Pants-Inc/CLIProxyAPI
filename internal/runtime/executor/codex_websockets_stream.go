@@ -32,6 +32,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	modelGuard := helps.NewCodexModelGuard(baseModel)
 
 	prepared, err := e.prepareCodexWebsocketStream(ctx, auth, req, opts)
 	if err != nil {
@@ -244,11 +245,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
 
-	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
+	buffering := true
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
 	var exhaustionLogged bool
-	if buffering {
+	if buffering && e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
 	}
@@ -356,8 +357,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			observeCodexTokenEvent(reporter, payload)
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			if modelErr := modelGuard.Observe(payload); modelErr != nil {
+				return nil, modelErr
+			}
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				if sess != nil {
@@ -485,7 +489,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			// !isTerminalEvent is redundant against the closed allow-list, which admits no terminal
 			// type, and the empty-payload rule cannot fire on a payload already known non-empty. It
 			// stays as the guard a reader expects to find, and its SSE counterpart is !terminalSuccess.
-			if windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent {
+			if !modelGuard.Authoritative() && (!windowOpen || isTerminalEvent) {
+				return nil, modelGuard.Missing()
+			}
+			if windowOpen && (isCodexBootstrapBufferableEvent(eventType, payload) || !modelGuard.Authoritative()) && !isTerminalEvent {
 				frameBytes := len(payload)
 				for i := range currentChunks {
 					frameBytes += len(currentChunks[i])
@@ -623,8 +630,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			observeCodexTokenEvent(reporter, payload)
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			if modelErr := modelGuard.Observe(payload); modelErr != nil {
+				_ = send(cliproxyexecutor.StreamChunk{Err: modelErr})
+				return
+			}
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
