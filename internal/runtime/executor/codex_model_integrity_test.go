@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,6 +104,7 @@ func TestCodexWebsocketModelFailureReleasesSession(t *testing.T) {
 		`{"type":"response.output_text.delta","delta":"` + strings.Repeat("x", codexBootstrapMaxBufferedBytes) + `"}`,
 	} {
 		t.Run(fmt.Sprintf("bytes=%d", len(frame)), func(t *testing.T) {
+			var attempts atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 				if err != nil {
@@ -112,7 +114,11 @@ func TestCodexWebsocketModelFailureReleasesSession(t *testing.T) {
 				if _, _, err = conn.ReadMessage(); err != nil {
 					return
 				}
-				_ = conn.WriteMessage(websocket.TextMessage, []byte(frame))
+				response := frame
+				if attempts.Add(1) > 1 {
+					response = `{"type":"response.completed","response":{"model":"gpt-6-astra","output":[]}}`
+				}
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(response))
 				_, _, _ = conn.ReadMessage()
 			}))
 			defer server.Close()
@@ -120,14 +126,40 @@ func TestCodexWebsocketModelFailureReleasesSession(t *testing.T) {
 			e.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 			defer e.CloseExecutionSession(t.Name())
 			credential := &auth.Auth{ID: t.Name(), Provider: "codex", Attributes: map[string]string{"api_key": "synthetic", "base_url": server.URL}}
+			disconnected := e.UpstreamDisconnectChan(t.Name())
 			for attempt := 0; attempt < 2; attempt++ {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				result, err := e.ExecuteStream(ctx, credential, core.Request{Model: "gpt-6-astra", Payload: []byte(`{"model":"gpt-6-astra","input":"proof"}`)}, core.Options{SourceFormat: translator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: t.Name()}, WebSocketResponseObserver: func(_ context.Context, ev core.WebSocketResponseEvent) {
-					t.Errorf("unverified observer payload: %d bytes", len(ev.Payload))
+					if !strings.Contains(string(ev.Payload), `"model":"gpt-6-astra"`) {
+						t.Errorf("unverified observer payload: %d bytes", len(ev.Payload))
+					}
 				}})
-				cancel()
-				if result != nil || err == nil || !strings.Contains(err.Error(), "model_mismatch") {
-					t.Fatalf("attempt %d: result=%v err=%v", attempt, result, err)
+				if attempt == 0 {
+					cancel()
+					if result != nil || err == nil || !strings.Contains(err.Error(), "model_mismatch") {
+						t.Fatalf("attempt %d: result=%v err=%v", attempt, result, err)
+					}
+					select {
+					case <-disconnected:
+						t.Fatal("retryable refusal closed downstream socket")
+					default:
+					}
+				} else {
+					if err != nil {
+						cancel()
+						t.Fatal(err)
+					}
+					var payload []byte
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Error(chunk.Err)
+						}
+						payload = append(payload, chunk.Payload...)
+					}
+					cancel()
+					if !strings.Contains(string(payload), `"model":"gpt-6-astra"`) {
+						t.Fatalf("same-model retry failed: %s", payload)
+					}
 				}
 			}
 		})

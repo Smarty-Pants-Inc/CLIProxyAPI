@@ -274,7 +274,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	sawOutputDelta := false
 	failModelGuard := func(modelErr error) (*cliproxyexecutor.StreamResult, error) {
 		if sess != nil {
-			e.invalidateUpstreamConn(sess, conn, "model_integrity", modelErr)
+			e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "model_integrity", modelErr)
 			sess.clearActive(conn, readCh)
 			unlockStreamSession()
 			if isEphemeralSession {
