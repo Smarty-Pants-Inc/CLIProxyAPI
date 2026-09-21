@@ -199,7 +199,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				modelErr := modelGuard.Observe(data)
-				if modelErr != nil && gjson.GetBytes(data, "type").String() != "response.completed" && gjson.GetBytes(data, "type").String() != "response.incomplete" && gjson.GetBytes(data, "type").String() != "response.done" {
+				if modelErr != nil {
 					closeBootstrapBody()
 					return nil, modelErr
 				}
