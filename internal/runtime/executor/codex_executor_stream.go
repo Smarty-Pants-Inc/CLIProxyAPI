@@ -334,6 +334,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}
 
+	if !modelGuard.Authoritative() {
+		closeBootstrapBody()
+		if bootstrapTerminalErr != nil {
+			return nil, bootstrapTerminalErr
+		}
+		return nil, modelGuard.Missing()
+	}
+
 	chanCapacity := len(bufferedChunks) + len(initialChunks)
 	if bootstrapTerminalErr != nil {
 		chanCapacity++

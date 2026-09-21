@@ -345,7 +345,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			sess.clearActive(conn, readCh)
 			unlock()
 		}()
-		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+		modelGuard := helps.NewCodexModelGuard(req.Model)
+		var unverified [][]byte
+		unverifiedBytes := 0
+		deliver := func(chunk cliproxyexecutor.StreamChunk) bool {
 			select {
 			case out <- chunk:
 				return true
@@ -353,8 +356,33 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return false
 			}
 		}
+		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if chunk.Err != nil {
+				unverified = nil
+				unverifiedBytes = 0
+				return deliver(chunk)
+			}
+			if !modelGuard.Authoritative() {
+				if len(unverified) >= codexBootstrapMaxBufferedFrames || unverifiedBytes+len(chunk.Payload) > codexBootstrapMaxBufferedBytes {
+					_ = deliver(cliproxyexecutor.StreamChunk{Err: modelGuard.Missing()})
+					return false
+				}
+				unverified = append(unverified, bytes.Clone(chunk.Payload))
+				unverifiedBytes += len(chunk.Payload)
+				return true
+			}
+			for _, payload := range unverified {
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+				if !deliver(cliproxyexecutor.StreamChunk{Payload: payload}) {
+					return false
+				}
+			}
+			unverified = nil
+			unverifiedBytes = 0
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, chunk.Payload)
+			return deliver(chunk)
+		}
 		reporter := initialReporter
-		modelGuard := helps.NewCodexModelGuard(req.Model)
 		firstResponse := true
 		responseActive := false
 		outputItems := make(map[int64][]byte)
@@ -548,7 +576,6 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				send(cliproxyexecutor.StreamChunk{Err: modelErr})
 				return
 			}
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			// Parse and invalidate replay for every rejected request, using the
 			// metadata that belongs to this event. Only the first rejection can
 			// enter conductor bootstrap retry; later failures stay on this socket.
@@ -569,7 +596,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			if terminalErr != nil {
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", terminalErr)
 				eventReporter.PublishFailure(ctx, terminalErr)
-				if firstResponse {
+				if firstResponse || !modelGuard.Authoritative() {
 					send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 					return
 				}

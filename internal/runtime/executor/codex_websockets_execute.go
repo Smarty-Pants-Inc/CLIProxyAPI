@@ -35,6 +35,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	modelGuard := helps.NewCodexModelGuard(baseModel)
+	var unverifiedObserverEvents [][]byte
+	unverifiedObserverBytes := 0
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -311,7 +313,20 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if modelErr := modelGuard.Observe(payload); modelErr != nil {
 			return resp, modelErr
 		}
-		helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+		if modelGuard.Authoritative() {
+			for _, event := range unverifiedObserverEvents {
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
+			}
+			unverifiedObserverEvents = nil
+			unverifiedObserverBytes = 0
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+		} else {
+			if len(unverifiedObserverEvents) >= codexBootstrapMaxBufferedFrames || unverifiedObserverBytes+len(payload) > codexBootstrapMaxBufferedBytes {
+				return resp, modelGuard.Missing()
+			}
+			unverifiedObserverEvents = append(unverifiedObserverEvents, bytes.Clone(payload))
+			unverifiedObserverBytes += len(payload)
+		}
 
 		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 			if sess != nil {

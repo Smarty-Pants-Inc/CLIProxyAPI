@@ -260,6 +260,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var outputItemsFallback [][]byte
 
 	var bufferedChunks [][]byte
+	var unverifiedObserverEvents [][]byte
 	// bufferedFrames counts every websocket message read during bootstrap, including the ones the
 	// loop skips, so a peer that only sends frames the loop ignores cannot keep the window open.
 	bufferedFrames := 0
@@ -271,6 +272,19 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	// identical to the unbuffered path instead of silently turning into a credential failover.
 	var bootstrapTerminalErr error
 	sawOutputDelta := false
+	failModelGuard := func(modelErr error) (*cliproxyexecutor.StreamResult, error) {
+		if sess != nil {
+			e.invalidateUpstreamConn(sess, conn, "model_integrity", modelErr)
+			sess.clearActive(conn, readCh)
+			unlockStreamSession()
+			if isEphemeralSession {
+				closeCodexWebsocketSession(sess, "model_integrity")
+			}
+		} else {
+			_ = closer.Close()
+		}
+		return nil, modelErr
+	}
 
 	if buffering {
 		for {
@@ -359,9 +373,17 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			if modelErr := modelGuard.Observe(payload); modelErr != nil {
-				return nil, modelErr
+				return failModelGuard(modelErr)
 			}
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			if modelGuard.Authoritative() {
+				for _, event := range unverifiedObserverEvents {
+					helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
+				}
+				unverifiedObserverEvents = nil
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			} else {
+				unverifiedObserverEvents = append(unverifiedObserverEvents, bytes.Clone(payload))
+			}
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				if sess != nil {
@@ -490,7 +512,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			// type, and the empty-payload rule cannot fire on a payload already known non-empty. It
 			// stays as the guard a reader expects to find, and its SSE counterpart is !terminalSuccess.
 			if !modelGuard.Authoritative() && (!windowOpen || isTerminalEvent) {
-				return nil, modelGuard.Missing()
+				return failModelGuard(modelGuard.Missing())
 			}
 			if windowOpen && (isCodexBootstrapBufferableEvent(eventType, payload) || !modelGuard.Authoritative()) && !isTerminalEvent {
 				frameBytes := len(payload)
@@ -511,6 +533,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			break
 		}
+	}
+
+	if !modelGuard.Authoritative() {
+		if bootstrapTerminalErr != nil {
+			return failModelGuard(bootstrapTerminalErr)
+		}
+		return failModelGuard(modelGuard.Missing())
 	}
 
 	chanCapacity := len(bufferedChunks) + len(initialChunks)
