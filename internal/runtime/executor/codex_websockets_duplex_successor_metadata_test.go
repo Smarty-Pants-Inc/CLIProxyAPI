@@ -50,7 +50,7 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 					if id == "automatic" {
 						parent = "first"
 					}
-					write(fmt.Sprintf(`{"type":%q,"response":{"id":%q,"previous_response_id":%q,"prompt_cache_key":%q,"output":[],"incomplete_details":{"reason":"steered"}}}`, kind, id, parent, key))
+					write(fmt.Sprintf(`{"type":%q,"response":{"id":%q,"model":"gpt-6-astra","previous_response_id":%q,"prompt_cache_key":%q,"output":[],"incomplete_details":{"reason":"steered"}}}`, kind, id, parent, key))
 				}
 				first := read()
 				firstKey := gjson.GetBytes(first, "prompt_cache_key").String()

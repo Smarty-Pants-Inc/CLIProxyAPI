@@ -20,6 +20,10 @@ func NewCodexModelGuard(expected string) *CodexModelGuard {
 
 func (g *CodexModelGuard) Authoritative() bool { return g.observed }
 
+func (g *CodexModelGuard) Missing() error {
+	return newCodexModelMismatchError("upstream response.model is missing before downstream exposure")
+}
+
 func (g *CodexModelGuard) Observe(payload []byte) error {
 	model, terminal := extractCodexResponseModelEvent(payload)
 	if model == "" {
@@ -35,23 +39,33 @@ func (g *CodexModelGuard) Observe(payload []byte) error {
 	return nil
 }
 
-func (g *CodexModelGuard) Missing() error {
-	return newCodexModelMismatchError("upstream response.model is missing before downstream exposure")
-}
-
 type CodexModelMismatchError struct {
-	*cliproxyauth.Error
+	base *cliproxyauth.Error
 }
 
 func newCodexModelMismatchError(message string) error {
-	return &CodexModelMismatchError{Error: &cliproxyauth.Error{Code: "model_mismatch", Message: message, Retryable: true, HTTPStatus: http.StatusBadGateway}}
+	return &CodexModelMismatchError{base: &cliproxyauth.Error{Code: "model_mismatch", Message: message, Retryable: true, HTTPStatus: http.StatusBadGateway}}
 }
 
-func (*CodexModelMismatchError) IsCredentialScoped() bool { return true }
+func (e *CodexModelMismatchError) Error() string {
+	if e == nil || e.base == nil {
+		return ""
+	}
+	return e.base.Error()
+}
+
+func (e *CodexModelMismatchError) IsCredentialScoped() bool { return true }
+
+func (e *CodexModelMismatchError) StatusCode() int {
+	if e == nil || e.base == nil {
+		return 0
+	}
+	return e.base.StatusCode()
+}
 
 func (e *CodexModelMismatchError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
-	return e.Error
+	return e.base
 }

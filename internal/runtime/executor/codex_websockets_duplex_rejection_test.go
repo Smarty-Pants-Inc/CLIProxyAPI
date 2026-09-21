@@ -48,7 +48,7 @@ func TestCodexDuplexRejectedCreateMetadata(t *testing.T) {
 					return gjson.GetBytes(p, "prompt_cache_key").String()
 				}
 				write := func(kind, id, key string) {
-					p := fmt.Sprintf(`{"type":%q,"response":{"id":%q,"prompt_cache_key":%q,"output":[],"error":{"type":"invalid_request_error","message":"rejected"}}}`, kind, id, key)
+					p := fmt.Sprintf(`{"type":%q,"response":{"id":%q,"model":"gpt-6-astra","prompt_cache_key":%q,"output":[],"error":{"type":"invalid_request_error","message":"rejected"}}}`, kind, id, key)
 					if e := c.WriteMessage(websocket.TextMessage, []byte(p)); e != nil {
 						t.Error(e)
 					}
@@ -170,11 +170,11 @@ func TestCodexDuplexLaterInvalidSignatureClearsReplay(t *testing.T) {
 						}
 					}
 					read()
-					write(`{"type":"response.created","response":{"id":"first","output":[]}}`)
-					write(`{"type":"response.completed","response":{"id":"first","output":[]}}`)
+					write(`{"type":"response.created","response":{"id":"first","model":"gpt-6-astra","output":[]}}`)
+					write(`{"type":"response.completed","response":{"id":"first","model":"gpt-6-astra","output":[]}}`)
 					read()
 					if started {
-						write(`{"type":"response.created","response":{"id":"rejected","output":[]}}`)
+						write(`{"type":"response.created","response":{"id":"rejected","model":"gpt-6-astra","output":[]}}`)
 					}
 					switch kind {
 					case "response.failed":
@@ -188,8 +188,8 @@ func TestCodexDuplexLaterInvalidSignatureClearsReplay(t *testing.T) {
 					if bytes.Contains(corrected, []byte(encrypted)) {
 						t.Error("corrected create resent rejected encrypted reasoning")
 					}
-					write(`{"type":"response.created","response":{"id":"corrected","output":[]}}`)
-					write(`{"type":"response.completed","response":{"id":"corrected","output":[]}}`)
+					write(`{"type":"response.created","response":{"id":"corrected","model":"gpt-6-astra","output":[]}}`)
+					write(`{"type":"response.completed","response":{"id":"corrected","model":"gpt-6-astra","output":[]}}`)
 					_, _, _ = c.ReadMessage()
 				}))
 				defer upstream.Close()
