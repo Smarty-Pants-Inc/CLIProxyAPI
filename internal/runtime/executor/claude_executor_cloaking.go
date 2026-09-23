@@ -1209,7 +1209,8 @@ func claudeThinkingAcceptsClearThinking(payload []byte) bool {
 // so a missing body field is an observable inconsistency with the real client. A
 // caller that sent its own object keeps it untouched.
 func injectClaudeCodeContextManagement(payload []byte) ([]byte, bool) {
-	if gjson.GetBytes(payload, "context_management").Exists() {
+	// Anthropic rejects context_management on an on-demand compaction request.
+	if gjson.GetBytes(payload, "context_management").Exists() || gjson.GetBytes(payload, "compaction").Exists() {
 		return payload, false
 	}
 	if !claudeThinkingAcceptsClearThinking(payload) {
@@ -1252,7 +1253,7 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 		return updated
 	}
 
-	if !state.eligible || state.callerOwned || state.payloadRuleTouched || contextManagement.Exists() {
+	if !state.eligible || state.callerOwned || state.payloadRuleTouched || contextManagement.Exists() || gjson.GetBytes(payload, "compaction").Exists() {
 		return payload
 	}
 	updated, err := sjson.SetRawBytes(payload, "context_management", []byte(claudeCodeContextManagement))

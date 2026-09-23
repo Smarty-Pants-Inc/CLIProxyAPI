@@ -59,6 +59,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			clearClaudeThinkingReplayContent(ctx, replayScope)
 		}
 	}()
+	var compaction helps.ClaudeResponsesCompaction
+	req, opts, compaction, err = prepareClaudeResponsesCompaction(req, opts)
+	if err != nil {
+		return nil, err
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -82,6 +87,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalTranslated, body := helps.TranslateRequestPairWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, true, isCompat)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
+	if body, err = helps.ApplyClaudeResponsesCompaction(body, compaction); err != nil {
+		return nil, err
+	}
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -405,6 +413,34 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errIdentity != nil {
 			if !emitCancellation(errIdentity) {
 				emitResponseError(errIdentity)
+			}
+			return
+		}
+		if compaction.Trigger {
+			data, errRead := io.ReadAll(guardedBody)
+			if errRead != nil {
+				if !emitCancellation(errRead) {
+					emitResponseError(errRead)
+				}
+				return
+			}
+			helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+			for _, line := range bytes.Split(data, []byte("\n")) {
+				reporter.ObserveResponseModel(line)
+				streamUsage.ObserveClaudeStream(line)
+			}
+			result, errCompaction := helps.ParseClaudeCompactionStream(data)
+			if errCompaction != nil {
+				emitResponseError(errCompaction)
+				return
+			}
+			for _, chunk := range helps.BuildClaudeCompactionStreamChunks(req.Model, result) {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+				case <-ctx.Done():
+					emitCancellation(ctx.Err())
+					return
+				}
 			}
 			return
 		}

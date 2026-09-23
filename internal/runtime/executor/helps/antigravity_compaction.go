@@ -290,9 +290,14 @@ func ExtractAntigravitySummaryText(respPayload []byte) (string, error) {
 
 // BuildAntigravityCompactionStreamChunks creates SSE frames for compaction stream response.
 func BuildAntigravityCompactionStreamChunks(modelName, capsule string, inputTokens, outputTokens, totalTokens int) [][]byte {
+	return buildResponsesCompactionStreamChunks("ag", modelName, capsule, inputTokens, outputTokens, totalTokens)
+}
+
+// buildResponsesCompactionStreamChunks creates the Responses SSE frames for one compaction item.
+func buildResponsesCompactionStreamChunks(idTag, modelName, capsule string, inputTokens, outputTokens, totalTokens int) [][]byte {
 	now := time.Now().Unix()
-	responseID := fmt.Sprintf("resp_ag_compact_%d", time.Now().UnixNano())
-	itemID := fmt.Sprintf("cmp_ag_compact_%d", time.Now().UnixNano())
+	responseID := fmt.Sprintf("resp_%s_compact_%d", idTag, time.Now().UnixNano())
+	itemID := fmt.Sprintf("cmp_%s_compact_%d", idTag, time.Now().UnixNano())
 
 	itemInProgress := []byte(`{"type":"compaction","status":"in_progress"}`)
 	itemInProgress, _ = sjson.SetBytes(itemInProgress, "id", itemID)
