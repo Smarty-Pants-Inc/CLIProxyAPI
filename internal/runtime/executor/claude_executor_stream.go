@@ -390,7 +390,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return true
 		}
 		emitResponseError := func(errResponse error) {
-			errResponse = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errResponse)
+			if _, identityFailure := errResponse.(*helps.ClaudeModelMismatchError); !identityFailure {
+				errResponse = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errResponse)
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errResponse)
 			streamUsage.PublishFailure(ctx, reporter, errResponse)
 			select {
@@ -399,9 +401,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
+		guardedBody, errIdentity := helps.GuardClaudeModelStream(decodedBody, gjson.GetBytes(bodyForUpstream, "model").String())
+		if errIdentity != nil {
+			if !emitCancellation(errIdentity) {
+				emitResponseError(errIdentity)
+			}
+			return
+		}
+
 		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
-			scanner := bufio.NewScanner(decodedBody)
+			scanner := bufio.NewScanner(guardedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			var event bytes.Buffer
 			var upstreamMessageID string
@@ -469,7 +479,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 
 		// For other formats, use translation
-		scanner := bufio.NewScanner(decodedBody)
+		scanner := bufio.NewScanner(guardedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		var upstreamMessageID string

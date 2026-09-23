@@ -379,10 +379,24 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-	data, err := io.ReadAll(decodedBody)
+	var responseBody io.Reader = decodedBody
+	if upstreamStream {
+		responseBody, err = helps.GuardClaudeModelStream(decodedBody, gjson.GetBytes(bodyForUpstream, "model").String())
+		if err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+	}
+	data, err := io.ReadAll(responseBody)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
+	}
+	if !upstreamStream {
+		if errIdentity := helps.ValidateClaudeResponseModel(data, gjson.GetBytes(bodyForUpstream, "model").String()); errIdentity != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errIdentity)
+			return resp, errIdentity
+		}
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if upstreamStream {

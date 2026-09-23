@@ -46,6 +46,50 @@ Private delivery evidence: `/home/paul/.local/share/cliproxyapi-model-integrity/
 
 PR #1 and its `434f0ff4` follow-up are not the accepted release proof. The first candidate leaked a mismatched HTTP streaming completion and was rolled back. An earlier combined executor test exceeded 600 seconds; local checks were not CI qualification. The initial claimed post-merge build did not change into its detached landed checkout. Those build claims and binaries must not be reused as exact-landed artifact evidence. PR #2 and the CI receipt above supersede them.
 
+## Claude Messages identity guard — 2026-09-23
+
+The shared Claude executor also validates successful Messages responses before
+response logging, usage observation, tool-name restoration, replay caching, or
+translation. This covers API-key and OAuth credentials, native Messages output,
+and output translated from Claude. It does not change the Codex guards above.
+
+- Compare JSON `model` or SSE `message_start.message.model` with `model` in the
+  **final outbound request body**. Existing routing aliases, thinking-suffix
+  removal, provider normalization, and payload rules run before this boundary.
+  Response alias restoration cannot make a mismatch pass. No new substitution,
+  fuzzy matching, or model fallback is introduced.
+- A missing, non-string, or different model fails with `model_mismatch`. The
+  request-scoped error prevents ordinary credential/model rotation and avoids
+  penalizing credentials for an identity failure. Error text contains no
+  unverified upstream values.
+- Withhold SSE output, including ping events, until identity is verified. Reject
+  content before identity, missing identity at EOF, and a repeated message start.
+  The pre-identity buffer and scanner use the existing 50 MB bound. Keep the
+  streaming goroutine, cancellation, and response-body cleanup paths; do not add
+  network deadlines or wait for the whole verified response before streaming.
+- Model identity is the upstream's declaration, not proof of the model's weights.
+  A later protocol failure cannot retract content already released under a valid
+  initial identity. Other provider executors and token-count endpoints are not
+  covered by this patch. Existing routing policy is not redefined.
+
+Targeted regressions are `TestClaudeModelJSONIdentity`,
+`TestClaudeModelStreamIdentity`, and `TestClaudeMessagesModelIntegrity`. They cover
+native and translated responses in both HTTP modes, synthetic API-key and OAuth
+credentials, exact/wrong/missing identity, pre-identity content, normalization and
+thinking suffixes, malformed/bounded input, and existing OAuth cancellation.
+The hosted PR job runs these and the three retained Codex executor regressions,
+then the unchanged required build. Test-name assertions reject empty selection.
+The main-only exact-landed artifact job is unchanged.
+
+Activation still requires an exact reviewed landed artifact and both six-case
+executable proofs (Messages and Responses), with exact-model text/tool positives
+and wrong/missing-model negatives that release no text/tool markers. Keep the
+installed Messages failure baseline; never overwrite it with candidate results.
+These synthetic loopback fixtures use temporary configuration and credentials,
+not real model inference. Startup can fetch public version metadata, so this is
+not an OS-network-isolation claim. Test source and a green build alone are not
+activation evidence. Runtime staging and activation stay with the service owner.
+
 ## Future updates and verification
 
 1. Review upstream changes against the fork's current landed source. Preserve the authority fences, bounded buffering, observer behavior, error classification, and retry cleanup. Keep unrelated investigation changes separate.
