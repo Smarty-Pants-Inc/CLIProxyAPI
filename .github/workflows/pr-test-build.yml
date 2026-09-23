@@ -30,13 +30,13 @@ jobs:
           for test in TestClaudeModelJSONIdentity TestClaudeModelStreamIdentity; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-helpers.log"
           done
-      - name: Test Messages and retained Responses identity guards
+      - name: Test Messages identity, Claude compaction and retained Responses guards
         timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
-          go test -v ./internal/runtime/executor -run "TestClaudeMessagesModelIntegrity|TestCodexHTTPModelIntegrityTerminal|TestCodexUnverifiedFailureDoesNotFlush|TestCodexWebsocketModelFailureReleasesSession" -count=1 | tee "$RUNNER_TEMP/claude-model-executors.log"
-          for test in TestClaudeMessagesModelIntegrity TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
+          go test -v ./internal/runtime/executor -run "TestClaudeMessagesModelIntegrity|TestClaudeCompaction|TestCodexHTTPModelIntegrityTerminal|TestCodexUnverifiedFailureDoesNotFlush|TestCodexWebsocketModelFailureReleasesSession" -count=1 | tee "$RUNNER_TEMP/claude-model-executors.log"
+          for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
       - name: Build

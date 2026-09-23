@@ -53,6 +53,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			clearClaudeThinkingReplayContent(ctx, replayScope)
 		}
 	}()
+	var compaction helps.ClaudeResponsesCompaction
+	req, opts, compaction, err = prepareClaudeResponsesCompaction(req, opts)
+	if err != nil {
+		return resp, err
+	}
 	// Use an upstream stream whenever the downstream response needs translation
 	// from Claude events. Native Claude responses use the JSON response path.
 	upstreamStream := responseFormat != to
@@ -79,6 +84,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalTranslated, body := helps.TranslateRequestPairWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, upstreamStream, isCompat)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
+	if body, err = helps.ApplyClaudeResponsesCompaction(body, compaction); err != nil {
+		return resp, err
+	}
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -394,6 +402,22 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, err
 		}
 		return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
+	}
+	if compaction.Trigger {
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		var streamUsage helps.StreamUsageBuffer
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			reporter.ObserveResponseModel(line)
+			streamUsage.ObserveClaudeStream(line)
+		}
+		result, errCompaction := helps.ParseClaudeCompactionStream(data)
+		if errCompaction != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errCompaction)
+			streamUsage.PublishFailure(ctx, reporter, errCompaction)
+			return resp, errCompaction
+		}
+		streamUsage.Publish(ctx, reporter)
+		return cliproxyexecutor.Response{Payload: helps.BuildClaudeCompactionResponse(req.Model, result), Headers: httpResp.Header.Clone()}, nil
 	}
 	if !upstreamStream {
 		if errIdentity := helps.ValidateClaudeResponseModel(data, gjson.GetBytes(bodyForUpstream, "model").String()); errIdentity != nil {

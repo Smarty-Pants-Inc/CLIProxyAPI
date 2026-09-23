@@ -1031,6 +1031,11 @@ func applyClaudeHeadersWithNativeProfile(
 			}
 		}
 	}
+	// On-demand compaction requests and every later request carrying the signed
+	// block need the beta; Codex Responses callers cannot send it themselves.
+	if helps.ClaudeBodyUsesCompaction(body) {
+		appendBeta(helps.ClaudeCompactionBeta)
+	}
 	applyBetaHeader := func() {
 		// Enforce strict native Claude Code 2.1.258 model & turn beta gating:
 		if !claudeRequestSupportsEffort(body, nil) {

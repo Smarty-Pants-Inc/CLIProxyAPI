@@ -90,6 +90,32 @@ not real model inference. Startup can fetch public version metadata, so this is
 not an OS-network-isolation claim. Test source and a green build alone are not
 activation evidence. Runtime staging and activation stay with the service owner.
 
+## Claude on-demand compaction for Codex — 2026-09-23
+
+Codex 0.156 remote compaction v2 ends a streamed `/v1/responses` request with
+`{"type":"compaction_trigger"}` and requires exactly one `compaction` output
+item. The Claude executor maps this to Anthropic on-demand compaction
+(`compact-2026-09-04`) without changing `internal/translator`:
+
+- Before translation, remove the trigger and any `cpa-claude-compact-v1:` item.
+- After translation, set `compaction: {type: summarize}` and drop
+  `context_management`, `stop_sequences`, `output_config.format` and forced
+  `tool_choice`. Never enable threshold auto-compaction; Codex owns the trigger.
+- Return the Anthropic block, including `signature`, verbatim as base64 in one
+  Responses `compaction` item. Zero blocks or another `stop_reason` fails with a
+  request-scoped 502 and releases no output.
+- On later requests, put the decoded block first in `messages`. Retained Codex
+  messages follow it. Add the beta whenever a Claude body uses compaction.
+- Do not inject CPA `context_management` into a native request with the
+  `compaction` parameter, which Anthropic rejects.
+
+Whether Anthropic accepts a signed block on another account is not established.
+Use `routing.session-affinity` so compacted conversations stay on one account.
+Other compaction items (for example OpenAI ciphertext) keep existing handling.
+Regressions: `TestClaudeCompactionOnDemandRoundTrip`,
+`TestClaudeCompactionFailsClosed`, and
+`TestClaudeCompactionSkipsContextManagementInjection`.
+
 ## Future updates and verification
 
 1. Review upstream changes against the fork's current landed source. Preserve the authority fences, bounded buffering, observer behavior, error classification, and retry cleanup. Keep unrelated investigation changes separate.
