@@ -79,6 +79,9 @@ func TestClaudeMessagesModelIntegrity(t *testing.T) {
 							if got := gjson.GetBytes(body, "model").String(); got != model {
 								t.Errorf("upstream model = %q, want %q", got, model)
 							}
+							if got := gjson.GetBytes(body, "stream").Bool(); got != (stream || translated) {
+								t.Errorf("upstream stream = %t, want %t", got, stream || translated)
+							}
 							message := map[string]any{"id": "msg_proof", "type": "message", "role": "assistant", "content": []any{}, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}}
 							if identity != "missing" {
 								message["model"] = model
@@ -126,7 +129,7 @@ func TestClaudeMessagesModelIntegrity(t *testing.T) {
 							credential.Metadata = claudeOAuthCancellationTestMetadata()
 						}
 						e := NewClaudeExecutor(&config.Config{})
-						req := core.Request{Model: model, Payload: []byte(`{"model":"claude-opus-5-5","max_tokens":100,"messages":[{"role":"user","content":"proof"}]}`)}
+						req := core.Request{Model: model, Payload: []byte(fmt.Sprintf(`{"model":"claude-opus-5-5","max_tokens":100,"stream":%t,"messages":[{"role":"user","content":"proof"}]}`, stream))}
 						if identity == "exact-normalized" || identity == "wrong-normalized" {
 							req.Model = "public-alias"
 							e.upstreamModelNormalizer = func(string) string { return model }
@@ -134,7 +137,7 @@ func TestClaudeMessagesModelIntegrity(t *testing.T) {
 						if identity == "exact-suffix" {
 							req.Model += "(8192)"
 						}
-						opts := core.Options{SourceFormat: translator.FormatClaude}
+						opts := core.Options{SourceFormat: translator.FormatClaude, Stream: stream}
 						if translated {
 							opts.ResponseFormat = translator.FromString("openai")
 						}
