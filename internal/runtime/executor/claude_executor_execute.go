@@ -390,6 +390,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	data, err := io.ReadAll(responseBody)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		if _, identityFailure := err.(*helps.ClaudeModelMismatchError); identityFailure {
+			return resp, err
+		}
 		return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
 	}
 	if !upstreamStream {

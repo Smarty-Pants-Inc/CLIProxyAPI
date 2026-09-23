@@ -22,6 +22,47 @@ import (
 func TestClaudeMessagesModelIntegrity(t *testing.T) {
 	t.Run("OAuthStartupCancellation", TestClaudeExecutor_ExecuteStreamOAuthStartupCancellationIsRequestScoped)
 	t.Run("OAuthStreamCancellation", TestClaudeExecutor_ExecuteStreamOAuthCancellationIsRequestScoped)
+	t.Run("FastTranslatedNonstreamRepeatedStart", func(t *testing.T) {
+		attempts := 0
+		transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if !isAnthropicUpstreamURL(req.URL) || !claudeRequestIsFast(req, body) || !gjson.GetBytes(body, "stream").Bool() {
+				t.Fatalf("expected fast Anthropic upstream stream, got %s: %s", req.URL, body)
+			}
+			if got := gjson.GetBytes(body, "model").String(); got != "claude-opus-5-5" {
+				t.Fatalf("unexpected upstream model %q", got)
+			}
+			const start = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fast\",\"model\":\"claude-opus-5-5\"}}\n\n"
+			const content = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"MUST_NOT_LEAK\"}}\n\n"
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(start + content + start)),
+				Request:    req,
+			}, nil
+		})
+		ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+		credential := &auth.Auth{ID: t.Name(), Attributes: map[string]string{"api_key": "sk-ant-api03-synthetic"}}
+		response, err := NewClaudeExecutor(&config.Config{}).Execute(ctx, credential, core.Request{
+			Model:   "claude-opus-5-5",
+			Payload: []byte(`{"model":"claude-opus-5-5","max_tokens":100,"speed":"fast","messages":[{"role":"user","content":"proof"}]}`),
+		}, core.Options{SourceFormat: translator.FormatClaude, ResponseFormat: translator.FormatOpenAI})
+		status, ok := err.(interface{ StatusCode() int })
+		if !ok || status.StatusCode() != http.StatusBadGateway {
+			t.Fatalf("outermost error = %T %v, want status 502", err, err)
+		}
+		requestScoped, ok := err.(core.RequestScopedError)
+		if !ok || !requestScoped.IsRequestScoped() {
+			t.Fatalf("outermost error = %T %v, want request scope", err, err)
+		}
+		if !strings.Contains(err.Error(), "model_mismatch") || len(response.Payload) != 0 || attempts != 1 {
+			t.Fatalf("want one failed identity attempt without output, got attempts=%d payload=%q error=%v", attempts, response.Payload, err)
+		}
+	})
 	const model = "claude-opus-5-5"
 	markers := []string{"MUST_NOT_LEAK", "MUST_NOT_CALL", "MUST_NOT_EXECUTE", "proof-call"}
 	for _, oauth := range []bool{false, true} {
