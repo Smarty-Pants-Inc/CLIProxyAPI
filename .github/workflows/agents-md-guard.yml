@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   close-when-agents-md-changed:
+    # Fork: upstream's contribution rule; the fork may change its own AGENTS.md.
+    if: github.repository == 'router-for-me/CLIProxyAPI'
     runs-on: ubuntu-latest
     steps:
       - name: Detect AGENTS.md changes and close PR

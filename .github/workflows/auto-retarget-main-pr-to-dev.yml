@@ -16,7 +16,8 @@ permissions:
 
 jobs:
   retarget:
-    if: github.actor != 'github-actions[bot]'
+    # Fork: upstream's contribution rule (PRs go to dev); this fork has no dev branch.
+    if: github.repository == 'router-for-me/CLIProxyAPI' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Retarget PR base to dev
