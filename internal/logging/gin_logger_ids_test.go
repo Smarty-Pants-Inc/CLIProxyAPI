@@ -101,6 +101,16 @@ func TestGinLoggerRecordsJoinKeys(t *testing.T) {
 			want: "| session=01a0cdab-6295-73b9 msg=resp_stream1 compact=no",
 		},
 		{
+			name: "ping before message_start split",
+			path: "/v1/messages",
+			chunks: []string{
+				"event: ping\ndata: {\"type\":\"pi",
+				"ng\"}\n\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_re",
+				"al\",\"model\":\"expected\"}}\n\n",
+			},
+			want: "| session=01a0cdab-6295-73b9 msg=msg_real compact=no",
+		},
+		{
 			name: "first stream event without an envelope ID",
 			path: "/v1/messages",
 			chunks: []string{

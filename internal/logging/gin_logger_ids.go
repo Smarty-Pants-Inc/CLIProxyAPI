@@ -117,11 +117,18 @@ func (w *responseIDWriter) responseID() string {
 	if len(body) > 0 && body[0] == '{' {
 		return envelopeID(body)
 	}
-	// Server-sent events: the envelope is in the first data event.
+	// Server-sent events: the envelope is in the first data event after any
+	// ping (the Claude stream guard can replay a ping before message_start).
 	for _, line := range bytes.Split(body, []byte("\n")) {
-		if data, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("data:")); ok {
-			return envelopeID(bytes.TrimSpace(data))
+		data, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("data:"))
+		if !ok {
+			continue
 		}
+		data = bytes.TrimSpace(data)
+		if gjson.GetBytes(data, "type").String() == "ping" {
+			continue
+		}
+		return envelopeID(data)
 	}
 	return ""
 }
