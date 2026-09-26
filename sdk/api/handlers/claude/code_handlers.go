@@ -21,6 +21,7 @@ import (
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -83,6 +84,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	if gjson.GetBytes(rawJSON, "compaction").Exists() {
+		logging.SetGinCompaction(c)
+	}
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")

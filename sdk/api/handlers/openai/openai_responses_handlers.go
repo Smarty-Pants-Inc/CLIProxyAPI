@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
@@ -597,6 +598,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 
 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
+	if gjson.GetBytes(rawJSON, `input.#(type=="compaction_trigger")`).Exists() {
+		logging.SetGinCompaction(c)
+	}
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
