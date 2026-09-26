@@ -46,11 +46,16 @@ func GinLogrusLogger() gin.HandlerFunc {
 
 		// Only generate request ID for AI API paths
 		var requestID string
+		var idWriter *responseIDWriter
 		if isAIAPIPath(path) {
 			requestID = GenerateRequestID()
 			SetGinRequestID(c, requestID)
 			ctx := WithRequestID(c.Request.Context(), requestID)
 			c.Request = c.Request.WithContext(ctx)
+			if c.Request.Method == http.MethodPost {
+				idWriter = &responseIDWriter{ResponseWriter: c.Writer}
+				c.Writer = idWriter
+			}
 		}
 
 		c.Next()
@@ -87,6 +92,14 @@ func GinLogrusLogger() gin.HandlerFunc {
 		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
 		if creditsUsed(c) {
 			logLine += " [credits]"
+		}
+		if idWriter != nil {
+			compact := "no"
+			if isCompaction(c) {
+				compact = "yes"
+			}
+			logLine += fmt.Sprintf(" | session=%s msg=%s compact=%s",
+				logTokenOrPlaceholder(clientSessionID(c.Request.Header)), logTokenOrPlaceholder(idWriter.responseID()), compact)
 		}
 		if errorMessage != "" {
 			logLine = logLine + " | " + errorMessage
