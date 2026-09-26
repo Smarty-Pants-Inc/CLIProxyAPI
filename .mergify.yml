@@ -1,0 +1,46 @@
+merge_queue:
+  mode: serial
+  max_parallel_checks: 1
+  reset_on_external_merge: always
+
+# smarty-dev's plain rule (smarty-dev#865), as on pi and herdr: the PR, its required checks and this queue
+# are the review. The Astra reviewer queues a ready PR after its success verdict; `hold` and DO NOT LAND
+# titles keep a PR out.
+queue_rules:
+  - name: default
+    batch_size: 1
+    checks_timeout: 30 min
+    merge_method: merge
+    queue_conditions:
+      - base = main
+      - -draft
+      - -label = hold
+      - -title ~= (?i)do not land
+      - check-success = review/astra
+      # A PR that needs a named security pass waits for review/security, which
+      # CLIProxyAPI-security-astra posts on the exact head (smarty-dev#806, #855);
+      # so does an automated upstream sync (smarty-dev#755).
+      - or:
+          - -label = needs-security-pass
+          - check-success = review/security
+      - or:
+          - -head ~= ^sync/upstream-
+          - check-success = review/security
+      - check-success = build
+    merge_conditions:
+      - check-success = build
+
+# The fleet's write App bot may queue (smarty-dev#735, #736): GitHub reports App bots as permission
+# none, so the default `sender-permission >= write` restriction refused its queue commands.
+commands_restrictions:
+  queue:
+    conditions:
+      - or:
+          - sender-permission >= write
+          - sender = smarty-fleet-write[bot]
+  # The stuck-work check's R4 posts `@mergifyio refresh` as the write App (smarty-dev#868, #983).
+  refresh:
+    conditions:
+      - or:
+          - sender-permission >= write
+          - sender = smarty-fleet-write[bot]
