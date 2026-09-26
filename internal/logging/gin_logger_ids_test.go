@@ -65,6 +65,51 @@ func TestGinLoggerRecordsJoinKeys(t *testing.T) {
 			want:   "| session=01a0cdab-6295-73b9 msg=resp_abc123 compact=yes",
 		},
 		{
+			name: "responses root ID after output item ID",
+			path: "/v1/responses",
+			chunks: []string{
+				`{"object":"response","output":[{"type":"message","id":"msg_output_item",`,
+				`"role":"assistant","content":[]}],"id":"resp_real","status":"completed"}`,
+			},
+			want: "| session=01a0cdab-6295-73b9 msg=resp_real compact=no",
+		},
+		{
+			name: "messages root ID after tool input ID",
+			path: "/v1/messages",
+			chunks: []string{
+				`{"type":"message","content":[{"type":"tool_use","id":"toolu_1","input":{"id":"msg_customer_`,
+				`record_123"}}],"id":"msg_real","role":"assistant"}`,
+			},
+			want: "| session=01a0cdab-6295-73b9 msg=msg_real compact=no",
+		},
+		{
+			name: "root ID beyond the capture limit",
+			path: "/v1/messages",
+			chunks: []string{
+				`{"type":"message","content":[{"type":"tool_use","input":{"id":"msg_customer_record_123","pad":"` + strings.Repeat("x", maxResponseIDSniff) + `"}}],`,
+				`"id":"msg_real"}`,
+			},
+			want: "| session=01a0cdab-6295-73b9 msg=- compact=no",
+		},
+		{
+			name: "responses streaming split",
+			path: "/v1/responses",
+			chunks: []string{
+				"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"output\":[{\"id\":\"msg_item\"}],\"id\":\"resp_st",
+				"ream1\",\"object\":\"response\"}}\n\n",
+			},
+			want: "| session=01a0cdab-6295-73b9 msg=resp_stream1 compact=no",
+		},
+		{
+			name: "first stream event without an envelope ID",
+			path: "/v1/messages",
+			chunks: []string{
+				"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"input\":{\"id\":\"msg_customer\"}}}\n\n",
+				"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_late\"}}\n\n",
+			},
+			want: "| session=01a0cdab-6295-73b9 msg=- compact=no",
+		},
+		{
 			name:   "no ID in response",
 			path:   "/v1/messages",
 			chunks: []string{`{"type":"error","error":{"message":"overloaded"}}`},

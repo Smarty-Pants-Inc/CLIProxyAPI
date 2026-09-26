@@ -1,11 +1,13 @@
 package logging
 
 import (
+	"bytes"
 	"net/http"
 	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // Request log join keys (smarty-dev#933): the client session, the response
@@ -31,10 +33,9 @@ var clientSessionHeaders = []string{
 	"X-Session-Affinity",
 }
 
-// responseIDPattern matches the first message or response ID in a response
-// body: Anthropic message_start or message (msg_), OpenAI Responses (resp_)
-// and Chat Completions (chatcmpl-).
-var responseIDPattern = regexp.MustCompile(`"id"\s*:\s*"((?:msg_|resp_|chatcmpl-)[A-Za-z0-9_-]+)"`)
+// responseIDPattern accepts only message and response IDs: Anthropic (msg_),
+// OpenAI Responses (resp_) and Chat Completions (chatcmpl-).
+var responseIDPattern = regexp.MustCompile(`^(?:msg_|resp_|chatcmpl-)[A-Za-z0-9_-]{1,120}$`)
 
 // SetGinCompaction marks the request as a compaction request for the request log line.
 func SetGinCompaction(c *gin.Context) {
@@ -86,41 +87,59 @@ func logTokenOrPlaceholder(value string) string {
 	return value
 }
 
-// responseIDWriter records the first message or response ID written to the
-// client. It reads at most maxResponseIDSniff bytes and never changes the body.
+// responseIDWriter keeps the first maxResponseIDSniff bytes written to the
+// client, so the request log can read the response envelope ID. It never
+// changes the body.
 type responseIDWriter struct {
 	gin.ResponseWriter
-	sniff []byte
-	id    string
-	done  bool
+	prefix []byte
 }
 
 func (w *responseIDWriter) Write(data []byte) (int, error) {
-	w.observe(data)
+	if room := maxResponseIDSniff - len(w.prefix); room > 0 {
+		w.prefix = append(w.prefix, data[:min(room, len(data))]...)
+	}
 	return w.ResponseWriter.Write(data)
 }
 
 func (w *responseIDWriter) WriteString(data string) (int, error) {
-	w.observe([]byte(data))
+	if room := maxResponseIDSniff - len(w.prefix); room > 0 {
+		w.prefix = append(w.prefix, data[:min(room, len(data))]...)
+	}
 	return w.ResponseWriter.WriteString(data)
 }
 
-func (w *responseIDWriter) observe(data []byte) {
-	if w.done || len(data) == 0 {
-		return
+// responseID returns the envelope ID of the response, or "" when the captured
+// prefix does not establish it. It never falls back to a nested ID: nested IDs
+// belong to output items or tool input.
+func (w *responseIDWriter) responseID() string {
+	body := bytes.TrimLeft(w.prefix, " \t\r\n")
+	if len(body) > 0 && body[0] == '{' {
+		return envelopeID(body)
 	}
-	room := maxResponseIDSniff - len(w.sniff)
-	if len(data) > room {
-		data = data[:room]
+	// Server-sent events: the envelope is in the first data event.
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		if data, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("data:")); ok {
+			return envelopeID(bytes.TrimSpace(data))
+		}
 	}
-	w.sniff = append(w.sniff, data...)
-	if match := responseIDPattern.FindSubmatch(w.sniff); match != nil {
-		w.id = sanitizeLogToken(string(match[1]))
-		w.done = true
-	} else if len(w.sniff) >= maxResponseIDSniff {
-		w.done = true
+	return ""
+}
+
+// envelopeID reads the protocol envelope ID of one JSON response or event:
+// Claude message_start message.id, Responses lifecycle response.id, else the
+// top-level id. A value cut off by the capture limit does not parse.
+func envelopeID(event []byte) string {
+	path := "id"
+	switch eventType := gjson.GetBytes(event, "type").String(); {
+	case eventType == "message_start":
+		path = "message.id"
+	case strings.HasPrefix(eventType, "response."):
+		path = "response.id"
 	}
-	if w.done {
-		w.sniff = nil
+	value := gjson.GetBytes(event, path)
+	if value.Type != gjson.String || !responseIDPattern.MatchString(value.Str) {
+		return ""
 	}
+	return value.Str
 }

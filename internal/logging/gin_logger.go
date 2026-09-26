@@ -99,7 +99,7 @@ func GinLogrusLogger() gin.HandlerFunc {
 				compact = "yes"
 			}
 			logLine += fmt.Sprintf(" | session=%s msg=%s compact=%s",
-				logTokenOrPlaceholder(clientSessionID(c.Request.Header)), logTokenOrPlaceholder(idWriter.id), compact)
+				logTokenOrPlaceholder(clientSessionID(c.Request.Header)), logTokenOrPlaceholder(idWriter.responseID()), compact)
 		}
 		if errorMessage != "" {
 			logLine = logLine + " | " + errorMessage
