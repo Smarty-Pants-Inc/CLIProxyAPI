@@ -90,6 +90,12 @@ func quotaUsageOf(auth *Auth, now time.Time) quotaUsage {
 	// the weekly one. Reset is an absolute unix timestamp or seconds after the
 	// observation.
 	limitReached := strings.EqualFold(strings.TrimSpace(quotaSignalValue(signals, "X-Codex-Limit-Reached")), "true")
+	type codexWindow struct {
+		utilization float64
+		resetAt     time.Time
+		resetKnown  bool
+	}
+	windows := make([]codexWindow, 0, 2)
 	for _, window := range []string{"Primary", "Secondary"} {
 		prefix := "X-Codex-" + window + "-"
 		rawUsed, hasUsed := quotaSignal(signals, prefix+"Used-Percent")
@@ -110,9 +116,34 @@ func quotaUsageOf(auth *Auth, now time.Time) quotaUsage {
 		if !resetKnown && !hasUsed {
 			continue
 		}
-		// limit_reached is account-wide; attribute it to every window with a
-		// known future reset so the skip lasts until the last of them resets.
-		consider(used/100, limitReached, resetAt, resetKnown)
+		windows = append(windows, codexWindow{utilization: used / 100, resetAt: resetAt, resetKnown: resetKnown})
+	}
+	// limit_reached is reported once for the whole rate-limit object, not per
+	// window. It belongs only to the window that actually hit its limit, so the
+	// skip expires with that window's reset: a window at or above the threshold
+	// owns it. When no window is at the threshold the responsible one cannot be
+	// identified, and the flag is tied to the earliest known reset (normally the
+	// 5-hour window) so the account is reconsidered then instead of being held
+	// until an unrelated weekly reset.
+	rejectedWindow := -1
+	anyAtLimit := false
+	if limitReached {
+		for _, window := range windows {
+			if window.utilization >= quotaExhaustedUtilization {
+				anyAtLimit = true
+			}
+		}
+		if !anyAtLimit {
+			for i, window := range windows {
+				if window.resetKnown && (rejectedWindow < 0 || window.resetAt.Before(windows[rejectedWindow].resetAt)) {
+					rejectedWindow = i
+				}
+			}
+		}
+	}
+	for i, window := range windows {
+		rejected := limitReached && (i == rejectedWindow || (anyAtLimit && window.utilization >= quotaExhaustedUtilization))
+		consider(window.utilization, rejected, window.resetAt, window.resetKnown)
 	}
 	return usage
 }

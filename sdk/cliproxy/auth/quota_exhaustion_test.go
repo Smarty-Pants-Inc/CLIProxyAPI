@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -278,5 +279,156 @@ func TestQuotaUsageOf_OutOfRangeResetNeverSkips(t *testing.T) {
 		"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-After-Seconds": "604800"}}}
 	if !quotaExhausted(inRange, now) {
 		t.Error("weekly reset-after should still skip")
+	}
+}
+
+// Codex reports limit_reached once for the whole rate-limit object. It must
+// expire with the window that actually hit the limit, not with the weekly one.
+func TestQuotaUsageOf_CodexLimitReachedExpiresWithLimitingWindow(t *testing.T) {
+	observed := time.Unix(1_800_000_000, 0)
+	primaryReset := observed.Add(time.Hour)
+	secondaryReset := observed.Add(7 * 24 * time.Hour)
+	auth := &Auth{ID: "a", Provider: "codex", Quota: QuotaState{ObservedAt: observed, Signals: map[string]string{
+		"X-Codex-Limit-Reached":          "true",
+		"X-Codex-Primary-Used-Percent":   "100",
+		"X-Codex-Primary-Reset-At":       strconv.FormatInt(primaryReset.Unix(), 10),
+		"X-Codex-Secondary-Used-Percent": "20",
+		"X-Codex-Secondary-Reset-At":     strconv.FormatInt(secondaryReset.Unix(), 10),
+	}}}
+	if got := quotaUsageOf(auth, observed.Add(time.Minute)); !got.exhausted || got.utilization != 1 {
+		t.Fatalf("before primary reset = %+v, want exhausted utilization=1", got)
+	}
+	if got := quotaUsageOf(auth, observed.Add(2*time.Hour)); got.exhausted || got.utilization != 0.20 {
+		t.Fatalf("after primary reset = %+v, want not exhausted utilization=0.20", got)
+	}
+
+	// The weekly window hit the limit: the skip lasts until the weekly reset.
+	weekly := &Auth{ID: "w", Provider: "codex", Quota: QuotaState{ObservedAt: observed, Signals: map[string]string{
+		"X-Codex-Limit-Reached":          "true",
+		"X-Codex-Primary-Used-Percent":   "30",
+		"X-Codex-Primary-Reset-At":       strconv.FormatInt(primaryReset.Unix(), 10),
+		"X-Codex-Secondary-Used-Percent": "100",
+		"X-Codex-Secondary-Reset-At":     strconv.FormatInt(secondaryReset.Unix(), 10),
+	}}}
+	if got := quotaUsageOf(weekly, observed.Add(2*time.Hour)); !got.exhausted {
+		t.Fatalf("weekly limit after primary reset = %+v, want exhausted", got)
+	}
+	if got := quotaUsageOf(weekly, secondaryReset.Add(time.Second)); got.exhausted {
+		t.Fatalf("weekly limit after weekly reset = %+v, want eligible", got)
+	}
+
+	// No window is at the threshold: the flag is tied to the earliest reset
+	// (bounded reconsideration), never to the unrelated weekly reset.
+	ambiguous := &Auth{ID: "u", Provider: "codex", Quota: QuotaState{ObservedAt: observed, Signals: map[string]string{
+		"X-Codex-Limit-Reached":          "true",
+		"X-Codex-Primary-Used-Percent":   "90",
+		"X-Codex-Primary-Reset-At":       strconv.FormatInt(primaryReset.Unix(), 10),
+		"X-Codex-Secondary-Used-Percent": "20",
+		"X-Codex-Secondary-Reset-At":     strconv.FormatInt(secondaryReset.Unix(), 10),
+	}}}
+	if got := quotaUsageOf(ambiguous, observed.Add(time.Minute)); !got.exhausted {
+		t.Fatalf("ambiguous before earliest reset = %+v, want exhausted", got)
+	}
+	if got := quotaUsageOf(ambiguous, observed.Add(2*time.Hour)); got.exhausted {
+		t.Fatalf("ambiguous after earliest reset = %+v, want eligible", got)
+	}
+}
+
+// A recovered Codex account (its 5h limit reset; weekly at 20%) is offered
+// again even though another account with headroom exists.
+func TestSchedulerPick_CodexRecoveredAfterPrimaryResetIsEligible(t *testing.T) {
+	now := time.Now()
+	recovered := &Auth{ID: "a-recovered", Provider: "codex", Quota: QuotaState{ObservedAt: now.Add(-2 * time.Hour), Signals: map[string]string{
+		"X-Codex-Limit-Reached":          "true",
+		"X-Codex-Primary-Used-Percent":   "100",
+		"X-Codex-Primary-Reset-At":       strconv.FormatInt(now.Add(-time.Hour).Unix(), 10),
+		"X-Codex-Secondary-Used-Percent": "20",
+		"X-Codex-Secondary-Reset-At":     strconv.FormatInt(now.Add(5*24*time.Hour).Unix(), 10),
+	}}}
+	fresh := &Auth{ID: "b-fresh", Provider: "codex", Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+		"X-Codex-Primary-Used-Percent": "10",
+		"X-Codex-Primary-Reset-At":     strconv.FormatInt(now.Add(time.Hour).Unix(), 10),
+	}}}
+	for name, selector := range quotaSkipSelectors {
+		t.Run(name, func(t *testing.T) {
+			scheduler := newSchedulerForTest(selector, recovered, fresh)
+			seen := map[string]int{}
+			for i := 0; i < 4; i++ {
+				got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+				if errPick != nil || got == nil {
+					t.Fatalf("pick #%d error = %v", i, errPick)
+				}
+				seen[got.ID]++
+			}
+			if seen["a-recovered"] == 0 {
+				t.Fatalf("recovered account never picked: %v", seen)
+			}
+		})
+	}
+}
+
+// The quota pre-skip must run over the weighted selector's own candidates: a
+// zero-weight credential can neither survive the skip alone nor be the
+// least-utilized fallback. Covers SelectAuth, plugin fallback, weighted session
+// affinity (with and without a session) and mixed-provider selection.
+func TestManagerWeightedSelection_ZeroWeightDoesNotHideQuotaFallback(t *testing.T) {
+	now := time.Now()
+	future := now.Add(time.Hour)
+	zeroUnknown := func() *Auth {
+		return &Auth{ID: "a-zero", Provider: "claude", Attributes: map[string]string{AttributeWeight: "0"}}
+	}
+	zeroExhausted := func() *Auth {
+		auth := claudeQuotaAuth("a-zero", 0.985, 0.2, future, now)
+		auth.Attributes = map[string]string{AttributeWeight: "0"}
+		return auth
+	}
+	busy := func() *Auth {
+		auth := claudeQuotaAuth("b-busy", 0.99, 0.2, future, now)
+		auth.Attributes = map[string]string{AttributeWeight: "1"}
+		return auth
+	}
+	selectors := map[string]func() Selector{
+		"weighted":          func() Selector { return &WeightedRoundRobinSelector{} },
+		"weighted-affinity": func() Selector { return NewSessionAffinitySelector(&WeightedRoundRobinSelector{}) },
+	}
+	zeros := map[string]func() *Auth{"unknown-quota": zeroUnknown, "exhausted-lower": zeroExhausted}
+	for selectorName, newSelector := range selectors {
+		for zeroName, newZero := range zeros {
+			for _, plugin := range []bool{false, true} {
+				name := fmt.Sprintf("%s/%s/plugin=%v", selectorName, zeroName, plugin)
+				t.Run(name, func(t *testing.T) {
+					manager := NewManager(nil, newSelector(), nil)
+					manager.executors["claude"] = schedulerTestExecutor{}
+					manager.executors["codex"] = schedulerTestExecutor{}
+					var pluginScheduler *fakePluginScheduler
+					if plugin {
+						pluginScheduler = &fakePluginScheduler{}
+						manager.SetPluginScheduler(pluginScheduler)
+					}
+					for _, auth := range []*Auth{newZero(), busy()} {
+						if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+							t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+						}
+					}
+					sessionOpts := cliproxyexecutor.Options{Headers: http.Header{"Session_id": []string{"quota-session"}}}
+					for i, opts := range []cliproxyexecutor.Options{{}, sessionOpts, sessionOpts} {
+						got, errPick := manager.SelectAuth(context.Background(), "claude", "", opts)
+						if errPick != nil || got == nil || got.ID != "b-busy" {
+							t.Fatalf("SelectAuth #%d = %v, %v; want b-busy", i, got, errPick)
+						}
+						mixed, _, provider, errMixed := manager.pickNextMixedLegacy(context.Background(), []string{"claude", "codex"}, "", opts, nil)
+						if errMixed != nil || mixed == nil || mixed.ID != "b-busy" || provider != "claude" {
+							t.Fatalf("mixed #%d = %v/%s, %v; want b-busy", i, mixed, provider, errMixed)
+						}
+					}
+					if plugin {
+						// The unhandled plugin still saw the zero-weight credential.
+						if pluginScheduler.calls == 0 || len(pluginScheduler.requests[0].Candidates) != 1 || pluginScheduler.requests[0].Candidates[0].ID != "a-zero" {
+							t.Fatalf("plugin candidates = %+v, want the plugin's own unweighted quota view", pluginScheduler.requests)
+						}
+					}
+				})
+			}
+		}
 	}
 }

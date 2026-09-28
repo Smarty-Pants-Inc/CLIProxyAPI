@@ -620,7 +620,48 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
 // unless session affinity or an across-priorities scheduler is active, in which case the selector
 // or scheduler additionally receives lower priority tiers.
+//
+// A weighted selector (directly or as the session-affinity fallback) never picks a credential
+// with a nonpositive weight, so those are dropped from its candidates before availability and
+// the quota pre-skip run. Otherwise the pre-skip could keep only a zero-weight credential, or
+// pick one as the least-utilized fallback, and the selector would then find nothing. A plugin
+// scheduler keeps its unfiltered candidates; the weighted set only serves the selector.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
+	if !selectorRequiresPositiveWeight(selector) {
+		return m.availableAuthsForSelectorCandidates(selector, auths, provider, routeModel, now)
+	}
+	weighted := positiveWeightAuths(auths)
+	if len(weighted) == len(auths) || len(weighted) == 0 {
+		// Nothing to drop, or nothing selectable: keep the selector's own error path.
+		return m.availableAuthsForSelectorCandidates(selector, auths, provider, routeModel, now)
+	}
+	if m.pluginScheduler == nil {
+		return m.availableAuthsForSelectorCandidates(selector, weighted, provider, routeModel, now)
+	}
+	priorityAuths, _, err = m.availableAuthsForSelectorCandidates(selector, auths, provider, routeModel, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, weightedAuths, errWeighted := m.availableAuthsForSelectorCandidates(selector, weighted, provider, routeModel, now); errWeighted == nil {
+		selectorAuths = weightedAuths
+	}
+	return priorityAuths, selectorAuths, nil
+}
+
+// selectorRequiresPositiveWeight reports whether selector only picks positive-weight credentials.
+func selectorRequiresPositiveWeight(selector Selector) bool {
+	switch typed := selector.(type) {
+	case *WeightedRoundRobinSelector:
+		return true
+	case *SessionAffinitySelector:
+		_, weighted := typed.fallback.(*WeightedRoundRobinSelector)
+		return weighted
+	default:
+		return false
+	}
+}
+
+func (m *Manager) availableAuthsForSelectorCandidates(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 
