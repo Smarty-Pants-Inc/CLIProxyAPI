@@ -422,10 +422,79 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
-		return picked, nil
+	picked, _, errPick := s.pickSkippingExhaustedLocked([]*modelScheduler{shard}, predicate, func(pred func(*scheduledAuth) bool) (*Auth, string, error) {
+		if picked := shard.pickReadyLocked(preferWebsocket, strategy, pred); picked != nil {
+			return picked, providerKey, nil
+		}
+		return nil, "", shard.unavailableErrorLocked(provider, model, pred)
+	})
+	return picked, errPick
+}
+
+// pickSkippingExhaustedLocked runs pick first over the ready auths whose quota
+// windows are not exhausted. If that finds nothing and some ready auth passing
+// base is exhausted, it retries pinned to the least-utilized exhausted auth, so
+// skipping never leaves a request without a candidate. Otherwise it falls back
+// to pick(base), which reproduces the unfiltered result and error.
+func (s *authScheduler) pickSkippingExhaustedLocked(shards []*modelScheduler, base func(*scheduledAuth) bool, pick func(func(*scheduledAuth) bool) (*Auth, string, error)) (*Auth, string, error) {
+	now := time.Now()
+	skip := func(entry *scheduledAuth) bool {
+		return base(entry) && !quotaExhausted(s.latestScheduledAuthLocked(entry), now)
 	}
-	return nil, shard.unavailableErrorLocked(provider, model, predicate)
+	if picked, providerKey, errPick := pick(skip); errPick == nil && picked != nil {
+		return picked, providerKey, nil
+	}
+	var exhausted []*Auth
+	seen := make(map[string]struct{})
+	for _, shard := range shards {
+		if shard == nil {
+			continue
+		}
+		for _, bucket := range shard.readyByPriority {
+			if bucket == nil {
+				continue
+			}
+			for _, entry := range bucket.all.flat {
+				if entry == nil || entry.auth == nil || !base(entry) {
+					continue
+				}
+				if _, dup := seen[entry.auth.ID]; dup {
+					continue
+				}
+				seen[entry.auth.ID] = struct{}{}
+				if latest := s.latestScheduledAuthLocked(entry); quotaExhausted(latest, now) {
+					exhausted = append(exhausted, latest)
+				}
+			}
+		}
+	}
+	if least := leastUtilizedAuth(exhausted, now); least != nil {
+		leastID := least.ID
+		pinned := func(entry *scheduledAuth) bool {
+			return base(entry) && entry.auth.ID == leastID
+		}
+		if picked, providerKey, errPick := pick(pinned); errPick == nil && picked != nil {
+			return picked, providerKey, nil
+		}
+	}
+	return pick(base)
+}
+
+// latestScheduledAuthLocked returns the newest scheduled snapshot of entry's auth.
+// Shards not targeted by a model-scoped result keep an older pointer, while the
+// provider meta always carries the latest quota observation.
+func (s *authScheduler) latestScheduledAuthLocked(entry *scheduledAuth) *Auth {
+	if entry == nil {
+		return nil
+	}
+	if entry.meta != nil && entry.auth != nil {
+		if providerState := s.providers[entry.meta.providerKey]; providerState != nil {
+			if latest := providerState.auths[entry.auth.ID]; latest != nil && latest.auth != nil {
+				return latest.auth
+			}
+		}
+	}
+	return entry.auth
 }
 
 func providerPrefersWebsocketTransport(providerKey string) bool {
@@ -472,6 +541,21 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	if strategy == schedulerStrategyCurrent {
 		strategy = s.strategy
 	}
+	base := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
+	now := time.Now()
+	shards := make([]*modelScheduler, 0, len(normalized))
+	for _, providerKey := range normalized {
+		if providerState := s.providers[providerKey]; providerState != nil {
+			shards = append(shards, providerState.ensureModelLocked(modelKey, now))
+		}
+	}
+	return s.pickSkippingExhaustedLocked(shards, base, func(predicate func(*scheduledAuth) bool) (*Auth, string, error) {
+		return s.pickMixedLocked(normalized, model, modelKey, pinnedAuthID, strategy, predicate)
+	})
+}
+
+// pickMixedLocked picks across provider shards using predicate. The caller holds s.mu.
+func (s *authScheduler) pickMixedLocked(normalized []string, model, modelKey, pinnedAuthID string, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) (*Auth, string, error) {
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
@@ -482,14 +566,12 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
-		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
 		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
-	predicate := scheduledAuthPredicate(eligibility, tried, "", strategy == schedulerStrategyWeightedRoundRobin)
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false

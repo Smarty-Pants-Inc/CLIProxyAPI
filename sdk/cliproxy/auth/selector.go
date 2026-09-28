@@ -483,7 +483,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 			earliest = next
 		}
 	}
-	return available, cooldownCount, earliest
+	return skipQuotaExhaustedBuckets(available, now), cooldownCount, earliest
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
