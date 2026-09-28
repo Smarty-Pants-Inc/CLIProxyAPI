@@ -601,9 +601,37 @@ func extractThinkingConfigForUsage(body []byte, provider string) ThinkingConfig 
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex", "xai", "openai-response":
 		return extractCodexUsageConfig(body)
+	case "claude":
+		if config, ok := claudePerTurnEffortConfig(body); ok {
+			return config
+		}
+		return extractClaudeConfig(body)
 	default:
 		return extractThinkingConfig(body, provider)
 	}
+}
+
+// claudePerTurnEffortConfig reads the mid-conversation effort that clients such as Pi
+// send as a trailing {role:"system", output_config:{effort}} message. It overrides the
+// top-level output_config.effort for usage reporting only; the request body is not changed.
+func claudePerTurnEffortConfig(body []byte) (ThinkingConfig, bool) {
+	last := gjson.GetBytes(body, "messages.@reverse.0")
+	if last.Get("role").String() != "system" {
+		return ThinkingConfig{}, false
+	}
+	effort := last.Get("output_config.effort")
+	if effort.Type != gjson.String {
+		return ThinkingConfig{}, false
+	}
+	switch level := ThinkingLevel(strings.ToLower(strings.TrimSpace(effort.String()))); level {
+	case LevelNone:
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}, true
+	case LevelAuto:
+		return ThinkingConfig{Mode: ModeAuto, Budget: -1}, true
+	case LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax:
+		return ThinkingConfig{Mode: ModeLevel, Level: level}, true
+	}
+	return ThinkingConfig{}, false
 }
 
 func reasoningEffortFromSuffix(suffix SuffixResult) string {
