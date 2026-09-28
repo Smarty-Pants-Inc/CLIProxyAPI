@@ -14,6 +14,15 @@ import (
 // reset yet: trying it would only spend a request on an upstream 429.
 const quotaExhaustedUtilization = 0.98
 
+// quotaMaxResetHorizon bounds how far ahead a recorded reset may lie. Quota
+// windows are at most weekly, so a reset beyond this horizon is bogus data and
+// is treated as unknown: an out-of-range value never causes a skip.
+const quotaMaxResetHorizon = 30 * 24 * time.Hour
+
+// quotaMaxTimestamp is the largest raw unix value (milliseconds) accepted
+// before conversion, so huge values cannot overflow int64.
+const quotaMaxTimestamp = 1e15
+
 // quotaUsage summarizes the last passive quota snapshot of one account.
 type quotaUsage struct {
 	// utilization is the highest utilization (0..1) across the account's
@@ -40,7 +49,14 @@ func quotaUsageOf(auth *Auth, now time.Time) quotaUsage {
 	signals := auth.Quota.Signals
 	observedAt := auth.Quota.ObservedAt
 
+	horizonBase := observedAt
+	if horizonBase.IsZero() || horizonBase.After(now) {
+		horizonBase = now
+	}
 	consider := func(utilization float64, rejected bool, resetAt time.Time, resetKnown bool) {
+		if resetKnown && resetAt.After(horizonBase.Add(quotaMaxResetHorizon)) {
+			resetKnown = false // out of range: never a skip
+		}
 		if resetKnown && !resetAt.After(now) {
 			return // the window has reset; the recorded usage is stale
 		}
@@ -86,7 +102,7 @@ func quotaUsageOf(auth *Auth, now time.Time) quotaUsage {
 		}
 		resetAt, resetKnown := parseQuotaTimestamp(quotaSignalValue(signals, prefix+"Reset-At"))
 		if !resetKnown && !observedAt.IsZero() {
-			if seconds, okSeconds := parseQuotaFloat(quotaSignalValue(signals, prefix+"Reset-After-Seconds")); okSeconds {
+			if seconds, okSeconds := parseQuotaFloat(quotaSignalValue(signals, prefix+"Reset-After-Seconds")); okSeconds && seconds <= quotaMaxResetHorizon.Seconds() {
 				resetAt = observedAt.Add(time.Duration(seconds * float64(time.Second)))
 				resetKnown = true
 			}
@@ -225,7 +241,7 @@ func parseQuotaTimestamp(raw string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	if value, ok := parseQuotaFloat(raw); ok {
-		if value <= 0 {
+		if value <= 0 || value >= quotaMaxTimestamp {
 			return time.Time{}, false
 		}
 		if value > 1e12 {
