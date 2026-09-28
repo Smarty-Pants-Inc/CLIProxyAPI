@@ -125,6 +125,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 	if len(parsed.Meta) == 0 && oldData != nil && len(oldData.Meta) > 0 {
 		parsed.Meta = oldData.Meta
 	}
+	parsed.Claude = keepEmbeddedClaudeModels(parsed.Claude)
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
@@ -309,6 +310,31 @@ func mergeProviderNames(existing, incoming []string) []string {
 		merged = append(merged, name)
 	}
 	return merged
+}
+
+// keepEmbeddedClaudeModels appends embedded Claude models that the remote catalog lacks.
+// ponytail: the fork can ship a new Anthropic model before router-for-me/models lists it
+// (claude-sonnet-5-5, smarty-dev#1830); remote entries still win for IDs present in both.
+func keepEmbeddedClaudeModels(remote []*ModelInfo) []*ModelInfo {
+	var embedded staticModelsJSON
+	if err := json.Unmarshal(embeddedModelsJSON, &embedded); err != nil {
+		return remote
+	}
+	have := make(map[string]struct{}, len(remote))
+	for _, m := range remote {
+		if m != nil {
+			have[strings.ToLower(strings.TrimSpace(m.ID))] = struct{}{}
+		}
+	}
+	for _, m := range embedded.Claude {
+		if m == nil {
+			continue
+		}
+		if _, ok := have[strings.ToLower(strings.TrimSpace(m.ID))]; !ok {
+			remote = append(remote, m)
+		}
+	}
+	return remote
 }
 
 func loadModelsFromBytes(data []byte, source string) error {
