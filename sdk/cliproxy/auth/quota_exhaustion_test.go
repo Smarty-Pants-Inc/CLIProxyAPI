@@ -256,3 +256,27 @@ func TestLegacySelectorPath_SkipsQuotaExhaustedAccounts(t *testing.T) {
 		t.Fatalf("all exhausted = %v, %v; want [c-full]", authIDs(available), errAvailable)
 	}
 }
+
+func TestQuotaUsageOf_OutOfRangeResetNeverSkips(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	cases := map[string]map[string]string{
+		"reset-after 1e30":         {"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-After-Seconds": "1e30"},
+		"reset-after 31 days":      {"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-After-Seconds": "2678400"},
+		"codex reset-at 1e300":     {"X-Codex-Secondary-Used-Percent": "100", "X-Codex-Secondary-Reset-At": "1e300"},
+		"codex reset-at +60 days":  {"X-Codex-Secondary-Used-Percent": "100", "X-Codex-Secondary-Reset-At": "1805184000"},
+		"claude reset 9e18":        {"Anthropic-Ratelimit-Unified-5h-Utilization": "1", "Anthropic-Ratelimit-Unified-5h-Reset": "9e18"},
+		"codex limit reached 1e30": {"X-Codex-Limit-Reached": "true", "X-Codex-Primary-Reset-After-Seconds": "1e30"},
+	}
+	for name, signals := range cases {
+		auth := &Auth{ID: "a", Quota: QuotaState{ObservedAt: now, Signals: signals}}
+		if quotaExhausted(auth, now) {
+			t.Errorf("%s: out-of-range reset caused a skip", name)
+		}
+	}
+	// In-range values at the horizon still skip.
+	inRange := &Auth{ID: "a", Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+		"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-After-Seconds": "604800"}}}
+	if !quotaExhausted(inRange, now) {
+		t.Error("weekly reset-after should still skip")
+	}
+}
