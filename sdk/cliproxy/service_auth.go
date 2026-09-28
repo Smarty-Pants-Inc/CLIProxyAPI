@@ -371,6 +371,10 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 				auth.ModelStates = existing.ModelStates
+				// The carried model holds keep the failure scope recorded with them.
+				if auth.LastError == nil && auth.FailureScope == "" {
+					auth.FailureScope = existing.FailureScope
+				}
 			}
 		}
 		op = "update"

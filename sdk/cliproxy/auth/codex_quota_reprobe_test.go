@@ -758,3 +758,46 @@ func TestReprobeHeldCodexQuotas_ExplicitQuotaScopeReleases(t *testing.T) {
 		}
 	}
 }
+
+// An auth-file reload (Update with a record that has no runtime state) carries
+// the existing holds over; it must carry their recorded scope with them, so an
+// explicit quota hold stays releasable and a credential-wide failure is not
+// forgotten. (The isolated gateway run hits this path: the 429 persists the
+// auth file and the watcher reloads it.)
+func TestUpdateReloadCarriesFailureScopeWithHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		authWide403 bool
+		want        string
+	}{
+		{"explicit-model-quota", false, FailureScopeModel},
+		{"auth-wide-403", true, FailureScopeCredential},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			ctx := WithSkipPersist(context.Background())
+			fileRecord := func() *Auth {
+				return &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"account_id": "acct-held"}}
+			}
+			if _, errRegister := manager.Register(ctx, fileRecord()); errRegister != nil {
+				t.Fatalf("register: %v", errRegister)
+			}
+			reset := 72 * time.Hour
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset,
+				Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}})
+			if tc.authWide403 {
+				manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Error: &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}})
+			}
+			if _, errUpdate := manager.Update(ctx, fileRecord()); errUpdate != nil {
+				t.Fatalf("reload: %v", errUpdate)
+			}
+			reloaded, _ := manager.GetByID("codex-held")
+			if !codexQuotaHeld(reloaded, time.Now()) || reloaded.LastError != nil {
+				t.Fatalf("setup: reload should carry the model hold without an auth-level error: quota=%+v err=%+v", reloaded.Quota, reloaded.LastError)
+			}
+			if reloaded.FailureScope != tc.want {
+				t.Fatalf("FailureScope after reload = %q, want %q", reloaded.FailureScope, tc.want)
+			}
+		})
+	}
+}
