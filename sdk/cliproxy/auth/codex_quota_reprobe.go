@@ -122,10 +122,35 @@ func releaseModelQuotaHold(state *ModelState, now time.Time) bool {
 	return true
 }
 
+// authErrorIsQuotaOrModelScoped reports whether the auth-level error is nothing
+// but a quota refusal, or is the recorded error of a model state (a non-quota
+// model error, which releaseModelQuotaHold never clears). Any other auth-level error (a credential-wide 401/403, a forced
+// cooldown, a transient failure recorded with an empty model) is an independent
+// restriction: its deadline may have been folded into the quota deadline by
+// applyAuthFailureState, so deadlines alone cannot prove it is gone.
+func authErrorIsQuotaOrModelScoped(auth *Auth) bool {
+	if quotaOnlyError(auth.LastError) {
+		return true
+	}
+	for _, state := range auth.ModelStates {
+		if state != nil && state.LastError != nil && *state.LastError == *auth.LastError {
+			return true
+		}
+	}
+	return false
+}
+
 // releaseCodexQuotaHoldLocked clears only the quota hold a successful usage probe
 // justifies. It reports whether anything changed. Caller holds m.mu.
+//
+// The release applies only when the quota hold is the account's sole
+// credential-wide restriction: an auth-level non-quota error or forced cooldown
+// keeps the whole hold, and sibling model restrictions are left untouched.
 func releaseCodexQuotaHoldLocked(auth *Auth, now time.Time) bool {
 	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if !authErrorIsQuotaOrModelScoped(auth) {
 		return false
 	}
 	if len(auth.ModelStates) == 0 {

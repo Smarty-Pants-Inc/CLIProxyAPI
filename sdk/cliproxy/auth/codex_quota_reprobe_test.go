@@ -291,3 +291,89 @@ func TestReprobeHeldCodexQuotas_CancelledBeforeApplyKeepsHold(t *testing.T) {
 		t.Fatalf("hold cleared after cancellation: %+v", held.Quota)
 	}
 }
+
+// A credential-wide failure recorded on top of a quota hold (MarkResult with an
+// empty model) is an independent restriction. applyAuthFailureState folds its
+// shorter deadline into the quota deadline, so an "allowed" usage probe must
+// not take that as proof the account is only quota-held: the whole hold stays.
+func TestReprobeHeldCodexQuotas_KeepsHoldWithAuthLevelFailure(t *testing.T) {
+	quota429 := func() *Error {
+		return &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}
+	}
+	cases := []struct {
+		name            string
+		credentialScope bool
+		authErr         *Error
+	}{
+		{"credential-quota+403", true, &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}},
+		{"credential-quota+forced-cooldown", true, &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadRequest, Message: "forced"}},
+		{"model-quota+403", false, &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}},
+		{"model-quota+forced-cooldown", false, &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadRequest, Message: "forced"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			ctx := WithSkipPersist(context.Background())
+			auth := &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"account_id": "acct-held"}}
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("register: %v", errRegister)
+			}
+			reset := 72 * time.Hour
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset, CredentialScope: tc.credentialScope, Error: quota429()})
+			held, _ := manager.GetByID("codex-held")
+			if !codexQuotaHeld(held, time.Now()) {
+				t.Fatalf("setup: account not quota-held: %+v", held.Quota)
+			}
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Error: cloneError(tc.authErr)})
+			before, _ := manager.GetByID("codex-held")
+			if !codexQuotaHeld(before, time.Now()) || !before.Unavailable {
+				t.Fatalf("setup: auth-level failure removed the quota hold: quota=%+v unavailable=%v", before.Quota, before.Unavailable)
+			}
+
+			released := manager.reprobeHeldCodexQuotas(context.Background())
+
+			if len(executor.probedIDs()) != 1 {
+				t.Fatalf("probes = %v, want one probe of codex-held", executor.probedIDs())
+			}
+			if len(released) != 0 {
+				t.Fatalf("released = %v, want none: an auth-level %+v must keep the hold", released, tc.authErr)
+			}
+			after, _ := manager.GetByID("codex-held")
+			if !reflect.DeepEqual(after.LastError, tc.authErr) {
+				t.Fatalf("auth-level error cleared: LastError = %+v, want %+v", after.LastError, tc.authErr)
+			}
+			if !after.Unavailable || !after.NextRetryAfter.Equal(before.NextRetryAfter) || after.Status != StatusError {
+				t.Fatalf("account released: unavailable=%v next=%v (was %v) status=%s", after.Unavailable, after.NextRetryAfter, before.NextRetryAfter, after.Status)
+			}
+			if !reflect.DeepEqual(before.Quota, after.Quota) || !reflect.DeepEqual(before.ModelStates, after.ModelStates) {
+				t.Fatalf("hold changed:\nbefore quota=%+v states=%+v\nafter  quota=%+v states=%+v", before.Quota, before.ModelStates, after.Quota, after.ModelStates)
+			}
+		})
+	}
+}
+
+// Control for the case above: the same manager transitions without the
+// auth-level failure release the quota hold.
+func TestReprobeHeldCodexQuotas_ReleasesQuotaOnlyHoldFromMarkResult(t *testing.T) {
+	for _, credentialScope := range []bool{true, false} {
+		executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+		manager := NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		ctx := WithSkipPersist(context.Background())
+		if _, errRegister := manager.Register(ctx, &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("register: %v", errRegister)
+		}
+		reset := 72 * time.Hour
+		manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset, CredentialScope: credentialScope,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}})
+		if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 1 {
+			t.Fatalf("credentialScope=%v: released = %v, want [codex-held]", credentialScope, released)
+		}
+		after, _ := manager.GetByID("codex-held")
+		if after.Unavailable || after.Quota.Exceeded || after.LastError != nil || after.Status != StatusActive {
+			t.Fatalf("credentialScope=%v: still held: %+v", credentialScope, after)
+		}
+	}
+}
