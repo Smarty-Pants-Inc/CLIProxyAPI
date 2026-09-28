@@ -319,11 +319,10 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 		t.Fatalf("messages.0 differs across turns:\nTurn 1: %s\nTurn 2: %s", msg1User, msg2User)
 	}
 
-	// 4. Verify messages[1] (the relocated caller system instructions) matches across turns
-	msg1Sys := gjson.GetBytes(body1, "messages.1").Raw
-	msg2Sys := gjson.GetBytes(body2, "messages.1").Raw
-	if msg1Sys != msg2Sys {
-		t.Fatalf("messages.1 differs across turns:\nTurn 1: %s\nTurn 2: %s", msg1Sys, msg2Sys)
+	// 4. Verify the relocated caller system instructions sit inside messages[0]
+	// (checked invariant above), ahead of the user text.
+	if got := gjson.GetBytes(body1, "messages.0.content.1.text").String(); got != claudeCallerSystemReminder(systemPrompt) {
+		t.Fatalf("messages.0.content.1 = %q, want the caller system reminder", got)
 	}
 
 	// 5. Verify cc_prompt_id matches across turns
@@ -391,6 +390,96 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	}
 	if !bytes.Equal(body3, body3Repeat) {
 		t.Fatalf("repeated turn 3 body differs:\nTurn 3:        %s\nTurn 3 repeat: %s", string(body3), string(body3Repeat))
+	}
+}
+
+// TestClaudeCloakedCallerPromptPrefixSurvivesNewFirstMessage is the
+// smarty-dev#1579 regression: two fresh conversations with the same caller
+// system prompt and different first messages must share the upstream prefix
+// through a breakpoint on the caller prompt. Before the fix the caller prompt
+// followed the first user message, so the cacheable prefix ended at the
+// identity block and every new first message rewrote the whole caller prompt.
+// A Pi-shaped later turn (two caller message breakpoints) must also keep the
+// caller-prompt breakpoint within Anthropic's limit of four.
+func TestClaudeCloakedCallerPromptPrefixSurvivesNewFirstMessage(t *testing.T) {
+	var capturedBodies [][]byte
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		capturedBodies = append(capturedBodies, body)
+		header := make(http.Header)
+		header.Set("Content-Type", "application/json")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	auth := &cliproxyauth.Auth{
+		ID:         "test-cloaked-new-first-message",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-first-message"},
+		Metadata: map[string]any{
+			"account_uuid": "11111111-2222-4333-8444-555555555555",
+			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			},
+		},
+	}
+	exec := NewClaudeExecutor(&config.Config{})
+	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+	systemPrompt := "You are an expert coding assistant operating inside pi."
+	payloadFor := func(messages string) []byte {
+		return []byte(fmt.Sprintf(`{"model":"claude-opus-5","max_tokens":100,`+
+			`"system":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}],"messages":%s}`, systemPrompt, messages))
+	}
+	firstMessage := func(text string) string {
+		return fmt.Sprintf(`[{"role":"user","content":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}]}]`, text)
+	}
+	for _, payload := range [][]byte{
+		payloadFor(firstMessage("activation A: mesh event one")),
+		payloadFor(firstMessage("activation B: a different mesh event")),
+		payloadFor(`[` +
+			`{"role":"user","content":[{"type":"text","text":"activation A: mesh event one"}]},` +
+			`{"role":"assistant","content":[{"type":"text","text":"a1"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]},` +
+			`{"role":"assistant","content":[{"type":"text","text":"a2"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"u3","cache_control":{"type":"ephemeral"}}]}]`),
+	} {
+		if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}, options); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	}
+	if len(capturedBodies) != 3 {
+		t.Fatalf("captured %d upstream bodies, want 3", len(capturedBodies))
+	}
+
+	for idx, body := range capturedBodies {
+		if got := gjson.GetBytes(body, "system.#").Int(); got != 2 {
+			t.Fatalf("body %d: top-level system has %d blocks, want billing and identity only (OAuth rejects a caller prompt there): %s", idx, got, body)
+		}
+		reminder := gjson.GetBytes(body, "messages.0.content.1")
+		if reminder.Get("text").String() != claudeCallerSystemReminder(systemPrompt) || !reminder.Get("cache_control").Exists() {
+			t.Fatalf("body %d: messages.0.content.1 = %s, want the caller reminder with a breakpoint", idx, reminder.Raw)
+		}
+		if got := countCacheControls(body); got > 4 {
+			t.Fatalf("body %d: %d cache breakpoints, want at most 4", idx, got)
+		}
+	}
+
+	// Everything up to and including the caller-prompt breakpoint must be
+	// byte-identical across the two different first messages. The billing
+	// block (system.0) is excluded: it carries a per-message fingerprint and
+	// Anthropic does not key the cache on it (the live gateway already reads
+	// the tools and identity block across different first messages).
+	for _, path := range []string{"tools", "system.1", "messages.0.content.0", "messages.0.content.1"} {
+		if a, b := gjson.GetBytes(capturedBodies[0], path).Raw, gjson.GetBytes(capturedBodies[1], path).Raw; a != b {
+			t.Fatalf("%s differs across first messages:\nA: %s\nB: %s", path, a, b)
+		}
 	}
 }
 

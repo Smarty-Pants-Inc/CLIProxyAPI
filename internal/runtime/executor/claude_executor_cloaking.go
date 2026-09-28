@@ -303,10 +303,9 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
-// Code's minimal CLI shape. Each caller system block is preserved as a separate
-// mid-conversation system message after the first user turn, where supported
-// Claude models give it operator-level authority without changing the cached
-// top-level prefix.
+// Code's minimal CLI shape. Each caller system block is preserved as a
+// <system-reminder> at the start of the first user message, ahead of the user's
+// text, so the cached prefix does not depend on the first user message.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string) []byte {
 	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now(), false, "", "")
 }
@@ -364,14 +363,15 @@ func checkSystemInstructionsWithSigningModeAt(
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 		return injectClaudeCodeCurrentDate(payload, now)
 	}
-	if claudeUsesLegacySystemReminder(payload) {
-		payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
-	} else {
-		// Unknown and future model IDs optimistically use the authoritative
-		// mid-conversation system role. Only empirically unsupported legacy IDs
-		// stay on the user-reminder compatibility path.
-		payload = insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
-	}
+	// Smarty fork (smarty-dev#1579): every model uses the reminder placement.
+	// Upstream puts the caller prompt in a role=system turn after the first user
+	// message, so the cached prefix ends at the identity block and every new
+	// first message rewrites the whole caller prompt (~20k tokens for Pi).
+	// Anthropic rejects the other stable placements for OAuth (verified
+	// 2026-09-28): a second top-level system block gets "Third-party apps now
+	// draw from your extra usage", and a role=system turn before the first user
+	// text breaks the message-order rules.
+	payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
 	return injectClaudeCodeCurrentDate(payload, now)
 }
 
@@ -414,10 +414,7 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool) [
 		return payload
 	}
 	payload = updated
-	if claudeUsesLegacySystemReminder(payload) {
-		return prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
-	}
-	return insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
+	return prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
 }
 
 // claudeLegacySystemReminderModels lists the official Anthropic model IDs and
@@ -655,6 +652,7 @@ func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []stri
 		if len(reminderBlocks) == 0 {
 			return payload
 		}
+		reminderBlocks[len(reminderBlocks)-1] = withEphemeralCacheControl(reminderBlocks[len(reminderBlocks)-1])
 
 		insertAt := 0
 		for insertAt < len(blocks) && blocks[insertAt].Get("type").String() == "tool_result" {
@@ -673,8 +671,12 @@ func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []stri
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]"))
 	} else if content.Type == gjson.String {
 		rawBlocks := make([]string, 0, len(reminderTexts)+1)
-		for _, reminderText := range reminderTexts {
-			rawBlocks = append(rawBlocks, buildTextBlock(reminderText, nil))
+		for idx, reminderText := range reminderTexts {
+			var cacheControl *claudeCacheControl
+			if idx == len(reminderTexts)-1 {
+				cacheControl = &claudeCodeCacheControl
+			}
+			rawBlocks = append(rawBlocks, buildTextBlock(reminderText, cacheControl))
 		}
 		rawBlocks = append(rawBlocks, buildTextBlock(content.String(), nil))
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]"))
@@ -1155,6 +1157,13 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 			text := block.Get("text").String()
 			if isClaudeCodeCurrentDateReminder(text) {
 				continue
+			}
+			// A breakpoint on an earlier block (the caller-prompt reminder)
+			// already caches this prefix; a second one a few tokens later only
+			// costs one of the four slots, and enforceCacheControlLimit would
+			// then strip the earlier, more valuable one.
+			if isClaudeCodeContextReminder(text) && block.Get("cache_control").Exists() {
+				actualTextCached = true
 			}
 			if !actualTextCached && !isClaudeCodeContextReminder(text) {
 				rawBlocks = append(rawBlocks, withEphemeralCacheControl(block.Raw))

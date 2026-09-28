@@ -2459,8 +2459,8 @@ func TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates(t *te
 		model         string
 		wantSystemMsg bool
 	}{
-		{name: "mid conversation system role", model: "claude-opus-5", wantSystemMsg: true},
-		{name: "legacy system reminder", model: "claude-sonnet-4-5", wantSystemMsg: false},
+		{name: "current model system reminder", model: "claude-opus-5"},
+		{name: "legacy system reminder", model: "claude-sonnet-4-5"},
 	}
 
 	for _, testCase := range testCases {
@@ -2516,11 +2516,10 @@ func TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates(t *te
 			if !strings.Contains(joinedTexts, "orchestrator rules") {
 				t.Fatalf("caller system prompt was dropped from the counted body: %s", upstreamBody)
 			}
-			if testCase.wantSystemMsg {
-				if !sawSystemRole {
-					t.Fatalf("expected a mid-conversation system message, got %s", upstreamBody)
-				}
-			} else if !strings.Contains(joinedTexts, "<system-reminder>") {
+			if sawSystemRole {
+				t.Fatalf("unexpected mid-conversation system message, got %s", upstreamBody)
+			}
+			if !strings.Contains(joinedTexts, "<system-reminder>") {
 				t.Fatalf("expected a legacy system reminder, got %s", upstreamBody)
 			}
 			// Sensitive words must not reach Anthropic verbatim on this endpoint either.
@@ -3872,6 +3871,46 @@ func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block gjson.Result, now ti
 	}
 }
 
+// assertClaudeFirstUserCallerReminders checks the Smarty placement of caller
+// system blocks (smarty-dev#1579): top-level system holds only billing and
+// identity; the first user message holds currentDate, one reminder per caller
+// block (only the last one carries a breakpoint), then the user text without a
+// breakpoint of its own.
+func assertClaudeFirstUserCallerReminders(t *testing.T, body []byte, wantUser string, wantSystem ...string) {
+	t.Helper()
+	if got := gjson.GetBytes(body, "system.#").Int(); got != 2 {
+		t.Fatalf("top-level system block count = %d, want billing and identity only: %s", got, body)
+	}
+	if got := gjson.GetBytes(body, `messages.#(role=="system")#`).Array(); len(got) != 0 {
+		t.Fatalf("unexpected role=system message: %s", body)
+	}
+	content := gjson.GetBytes(body, "messages.0.content").Array()
+	if len(content) != len(wantSystem)+2 {
+		t.Fatalf("first user content has %d blocks, want currentDate, %d caller reminders and user text: %s", len(content), len(wantSystem), body)
+	}
+	assertClaudeCodeCurrentDateBlock(t, content[0])
+	for idx, want := range wantSystem {
+		block := content[idx+1]
+		if got := block.Get("text").String(); got != claudeCallerSystemReminder(want) {
+			t.Fatalf("content[%d] = %q, want caller reminder for %q", idx+1, got, want)
+		}
+		last := idx == len(wantSystem)-1
+		if got := block.Get("cache_control").Exists(); got != last {
+			t.Fatalf("content[%d] cache_control present = %v, want %v: %s", idx+1, got, last, block.Raw)
+		}
+		if last && (block.Get("cache_control.type").String() != "ephemeral" || block.Get("cache_control.ttl").Exists()) {
+			t.Fatalf("content[%d] cache_control = %s, want bare ephemeral", idx+1, block.Get("cache_control").Raw)
+		}
+	}
+	user := content[len(content)-1]
+	if got := user.Get("text").String(); got != wantUser {
+		t.Fatalf("user text = %q, want %q", got, wantUser)
+	}
+	if user.Get("cache_control").Exists() {
+		t.Fatalf("user text must not add a second breakpoint after the caller reminder: %s", user.Raw)
+	}
+}
+
 // assertEphemeralUserTextBlock checks the cloaked first-user block. wantTTL is ""
 // for the native default marker and "1h" once upgradeClaudeCacheControlTTL has run,
 // which only happens for OAuth credentials.
@@ -4052,8 +4091,7 @@ func TestInjectClaudeCodeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
 	assertClaudeCodeCurrentDateBlockAt(t, content[2], fixed)
 }
 
-// Test case 1: String system prompt becomes an authoritative mid-conversation
-// system message after the first user turn.
+// Test case 1: String system prompt becomes a reminder ahead of the first user text.
 func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -4079,13 +4117,7 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if blocks[1].Get("cache_control.ttl").Exists() {
 		t.Fatalf("blocks[1] cache_control must not carry a default ttl: %s", blocks[1].Raw)
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 2 {
-		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text: %s", len(content), out)
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.", "")
+	assertClaudeFirstUserCallerReminders(t, out, "hi", "You are a helpful assistant.")
 }
 
 func TestClaudeUsesLegacySystemReminder(t *testing.T) {
@@ -4111,44 +4143,21 @@ func TestClaudeUsesLegacySystemReminder(t *testing.T) {
 	}
 }
 
-func TestCheckSystemInstructionsWithMode_FutureModelDefaultsToMidSystem(t *testing.T) {
+func TestCheckSystemInstructionsWithMode_FutureModelUsesFirstUserReminder(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-6","system":"future instructions","messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
-		t.Fatalf("top-level system block count = %d, want 2", got)
-	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 2 {
-		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions", "")
+	assertClaudeFirstUserCallerReminders(t, out, "hi", "future instructions")
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-4-6","system":"legacy instructions","messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
-		t.Fatalf("top-level system block count = %d, want billing and identity only", got)
-	}
 	if got := gjson.GetBytes(out, "messages.#").Int(); got != 1 {
 		t.Fatalf("message count = %d, want no role=system insertion", got)
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 3 {
-		t.Fatalf("user content has %d blocks, want currentDate, caller reminder, and user text", len(content))
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	if got := content[1].Get("text").String(); got != claudeCallerSystemReminder("legacy instructions") {
-		t.Fatalf("caller system reminder = %q", got)
-	}
-	if content[1].Get("cache_control").Exists() {
-		t.Fatalf("caller system reminder unexpectedly has cache_control: %s", content[1].Raw)
-	}
-	assertEphemeralUserTextBlock(t, content[2], "hi", "")
+	assertClaudeFirstUserCallerReminders(t, out, "hi", "legacy instructions")
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t *testing.T) {
@@ -4158,21 +4167,7 @@ func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t 
 		`"messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 4 {
-		t.Fatalf("user content has %d blocks, want currentDate, two caller reminders, and user text: %s", len(content), out)
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	for idx, want := range []string{"first guidance", "second guidance"} {
-		block := content[idx+1]
-		if got := block.Get("text").String(); got != claudeCallerSystemReminder(want) {
-			t.Fatalf("content[%d].text = %q, want separate caller reminder %q", idx+1, got, want)
-		}
-		if block.Get("cache_control").Exists() {
-			t.Fatalf("content[%d] caller reminder unexpectedly has cache_control: %s", idx+1, block.Raw)
-		}
-	}
-	assertEphemeralUserTextBlock(t, content[3], "hi", "")
+	assertClaudeFirstUserCallerReminders(t, out, "hi", "first guidance", "second guidance")
 }
 
 // Test case 2: Strict mode keeps only the injected Claude Code system blocks.
@@ -4211,53 +4206,31 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 	assertEphemeralUserTextBlock(t, content[1], "hi", "")
 }
 
-// Test case 4: Array system prompt becomes one mid-conversation system message.
+// Test case 4: Array system prompt becomes one reminder ahead of the first user text.
 func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-
-	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 2 {
-		t.Fatalf("expected 2 top-level system blocks, got %d", len(blocks))
-	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 2 {
-		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.", "")
+	assertClaudeFirstUserCallerReminders(t, out, "hi", "Be concise.")
 }
 
-func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessages(t *testing.T) {
+func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateReminders(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","system":[` +
 		`{"type":"text","text":"first guidance","cache_control":{"type":"ephemeral","ttl":"1h"}},` +
 		`{"type":"text","text":"second guidance"}],` +
 		`"messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
-		t.Fatalf("message count = %d, want user and two separate system messages: %s", got, out)
-	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 2 {
-		t.Fatalf("user content has %d blocks, want currentDate and user text: %s", len(content), out)
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
-	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
+	assertClaudeFirstUserCallerReminders(t, out, "hi", "first guidance", "second guidance")
 }
 
 func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.T) {
 	tests := []struct {
-		name   string
-		model  string
-		legacy bool
+		name  string
+		model string
 	}{
-		{name: "mid-system model", model: "claude-opus-5"},
-		{name: "legacy model", model: "claude-opus-4-6", legacy: true},
+		{name: "current model", model: "claude-opus-5"},
+		{name: "legacy model", model: "claude-opus-4-6"},
 	}
 
 	for _, test := range tests {
@@ -4271,27 +4244,19 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 			if gjson.GetBytes(out, "system").Exists() {
 				t.Fatalf("count_tokens system must be absent: %s", out)
 			}
-			if test.legacy {
-				content := gjson.GetBytes(out, "messages.0.content").Array()
-				if len(content) != 3 {
-					t.Fatalf("legacy content has %d blocks, want two reminders and user text: %s", len(content), out)
-				}
-				if got := content[0].Get("text").String(); got != claudeCallerSystemReminder("first guidance") {
-					t.Fatalf("first caller reminder = %q", got)
-				}
-				if got := content[1].Get("text").String(); got != claudeCallerSystemReminder("second guidance") {
-					t.Fatalf("second caller reminder = %q", got)
-				}
-				if got := content[2].Get("text").String(); got != "hi" {
-					t.Fatalf("user text = %q, want hi", got)
-				}
-				return
+			content := gjson.GetBytes(out, "messages.0.content").Array()
+			if len(content) != 3 {
+				t.Fatalf("content has %d blocks, want two reminders and user text: %s", len(content), out)
 			}
-			if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
-				t.Fatalf("message count = %d, want user and two system messages: %s", got, out)
+			if got := content[0].Get("text").String(); got != claudeCallerSystemReminder("first guidance") {
+				t.Fatalf("first caller reminder = %q", got)
 			}
-			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
-			assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
+			if got := content[1].Get("text").String(); got != claudeCallerSystemReminder("second guidance") {
+				t.Fatalf("second caller reminder = %q", got)
+			}
+			if got := content[2].Get("text").String(); got != "hi" {
+				t.Fatalf("user text = %q, want hi", got)
+			}
 		})
 	}
 }
@@ -4535,7 +4500,7 @@ func TestCheckSystemInstructionsWithMode_StandaloneAdvisorResultWithoutCall(t *t
 	}
 }
 
-func TestCheckSystemInstructionsWithMode_NormalTextWithAdvisorWordDoesNotBypassMidSystemSplice(t *testing.T) {
+func TestCheckSystemInstructionsWithMode_NormalTextWithAdvisorWordDoesNotBypassRelocation(t *testing.T) {
 	payload := []byte(`{
 		"model": "claude-opus-5",
 		"system": [
@@ -4549,12 +4514,8 @@ func TestCheckSystemInstructionsWithMode_NormalTextWithAdvisorWordDoesNotBypassM
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	// Since there is no advisor tool invocation/result, normal mid-conversation system insertion occurs.
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
-		t.Fatalf("messages count = %d, want 3 (user + 2 system messages): %s", got, out)
-	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
-	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
+	// Since there is no advisor tool invocation/result, normal relocation occurs.
+	assertClaudeFirstUserCallerReminders(t, out, "I need an advisor on financial planning.", "first guidance", "second guidance")
 }
 
 func TestCheckSystemInstructionsWithMode_AdvisorToolResultArrayContent(t *testing.T) {
@@ -4696,18 +4657,9 @@ func TestCheckSystemInstructionsWithMode_ClientToolNamedAdvisorRelocatesSystemPr
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	// Caller prompt must be relocated to a mid-conversation system message,
-	// so the top-level system must only have the 2 Claude Code cloak blocks.
-	systemBlocks := gjson.GetBytes(out, "system").Array()
-	if len(systemBlocks) != 2 {
-		t.Fatalf("system blocks count = %d, want 2 (caller prompt must be relocated, not hoisted): %s", len(systemBlocks), out)
-	}
-	for i, b := range systemBlocks {
-		if strings.Contains(b.Get("text").String(), "caller guidance") {
-			t.Fatalf("system[%d] unexpectedly contains caller guidance: %s", i, b.Raw)
-		}
-	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance", "")
+	// Caller prompt must be relocated into the first user message, so the
+	// top-level system must only have the 2 Claude Code cloak blocks.
+	assertClaudeFirstUserCallerReminders(t, out, "hello", "caller guidance")
 }
 
 func TestRelocateClaudeSystemPromptForCountTokens_ClientToolNamedAdvisorRelocatesSystemPrompt(t *testing.T) {
@@ -4742,26 +4694,22 @@ func TestRelocateClaudeSystemPromptForCountTokens_ClientToolNamedAdvisorRelocate
 	if gjson.GetBytes(out, "system").Exists() {
 		t.Fatalf("count_tokens system field should have been relocated out of top-level system: %s", out)
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance", "")
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != claudeCallerSystemReminder("caller guidance") {
+		t.Fatalf("first user block = %q, want caller reminder: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "assistant" {
+		t.Fatalf("messages.1.role = %q, want assistant (no system turn spliced in)", got)
+	}
 }
 
-// Test case 5: Special characters survive the mid-conversation system move.
+// Test case 5: Special characters survive the relocation.
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
 	wantSystem := `Use <xml> tags & "quotes" in output.`
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
-		t.Fatalf("top-level system block count = %d, want 2", got)
-	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 2 {
-		t.Fatalf("messages[0].content has %d blocks, want 2", len(content))
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi", "")
-	assertClaudeMidConversationSystemMessage(t, out, 1, wantSystem, "")
+	assertClaudeFirstUserCallerReminders(t, out, "hi", wantSystem)
 }
 
 func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t *testing.T) {
@@ -4784,21 +4732,10 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 	if !bytes.Equal(first, second) {
 		t.Fatalf("complete cloak layout is not byte-idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
-	if got := gjson.GetBytes(first, "system.#").Int(); got != 2 {
-		t.Fatalf("top-level system block count = %d, want 2", got)
-	}
-	if got := gjson.GetBytes(first, "messages.#").Int(); got != 2 {
-		t.Fatalf("message count = %d, want user then system", got)
-	}
+	assertClaudeFirstUserCallerReminders(t, first, "hello", wantSystem)
 	content := gjson.GetBytes(first, "messages.0.content").Array()
-	if len(content) != 2 {
-		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
-	}
-	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hello", "")
-	assertClaudeMidConversationSystemMessage(t, first, 1, wantSystem, "")
-	if strings.Contains(content[0].Get("text").String(), "PI_SYSTEM_BEGIN") || strings.Contains(content[1].Get("text").String(), "PI_SYSTEM_BEGIN") {
-		t.Fatal("caller system prompt leaked into the user content blocks")
+	if strings.Contains(content[0].Get("text").String(), "PI_SYSTEM_BEGIN") || strings.Contains(content[2].Get("text").String(), "PI_SYSTEM_BEGIN") {
+		t.Fatal("caller system prompt leaked into the currentDate or user text blocks")
 	}
 	if !bytes.Contains(first, []byte(`<system-reminder>`)) || bytes.Contains(first, []byte(`\u003csystem-reminder`)) {
 		t.Fatalf("currentDate reminder angle brackets must remain literal JSON bytes")

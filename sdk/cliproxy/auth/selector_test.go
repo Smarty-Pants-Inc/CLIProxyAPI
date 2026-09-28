@@ -2077,6 +2077,70 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 	}
 }
 
+// TestSessionAffinitySelector_QuotaMoveBlastRadiusByStrategy records why the
+// gateway runs routing.strategy round-robin with session affinity
+// (smarty-dev#1579). Affinity keeps every live session on its account until
+// that account is unavailable (a hard 429 cools it). Under fill-first every new
+// session binds to the same account, so its 5 h limit is reached fastest and
+// one 429 moves every live session to a cold cache at once. Under round-robin
+// the same 429 moves only that account's share, and sessions on other accounts
+// stay put.
+func TestSessionAffinitySelector_QuotaMoveBlastRadiusByStrategy(t *testing.T) {
+	t.Parallel()
+
+	const sessions = 12
+	for _, tc := range []struct {
+		name      string
+		fallback  Selector
+		wantMoved int
+	}{
+		{name: "fill-first", fallback: &FillFirstSelector{}, wantMoved: sessions},
+		{name: "round-robin", fallback: &RoundRobinSelector{}, wantMoved: sessions / 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: tc.fallback, TTL: time.Hour})
+			defer selector.Stop()
+			auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+			pick := func(i int, available []*Auth) string {
+				t.Helper()
+				payload := []byte(fmt.Sprintf(`{"metadata":{"user_id":"user_xxx_account__session_%08d-0000-0000-0000-000000000000"}}`, i))
+				got, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", cliproxyexecutor.Options{OriginalRequest: payload}, available)
+				if err != nil {
+					t.Fatalf("Pick() session %d error = %v", i, err)
+				}
+				return got.ID
+			}
+
+			bound := make([]string, sessions)
+			for i := range bound {
+				bound[i] = pick(i, auths)
+			}
+			// Sessions stay on their account while it is available.
+			for i := range bound {
+				if got := pick(i, auths); got != bound[i] {
+					t.Fatalf("session %d moved from %s to %s without a quota error", i, bound[i], got)
+				}
+			}
+
+			// auth-a hits its 5 h limit: the conductor cools it, so it leaves
+			// the available list.
+			moved := 0
+			for i := range bound {
+				got := pick(i, auths[1:])
+				if got != bound[i] {
+					if bound[i] != "auth-a" {
+						t.Fatalf("session %d moved off healthy %s", i, bound[i])
+					}
+					moved++
+				}
+			}
+			if moved != tc.wantMoved {
+				t.Fatalf("one account's 429 moved %d of %d sessions, want %d", moved, sessions, tc.wantMoved)
+			}
+		})
+	}
+}
+
 func TestSessionAffinitySelector_RoundRobinDistribution(t *testing.T) {
 	t.Parallel()
 
