@@ -225,6 +225,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
 				auth.Unavailable = false
 				auth.LastError = nil
+				auth.FailureScope = ""
 				auth.StatusMessage = ""
 				auth.Status = StatusActive
 			}

@@ -26,7 +26,10 @@ type CooldownStateRecord struct {
 	Reason         string     `json:"reason,omitempty"`
 	Quota          QuotaState `json:"quota,omitempty"`
 	LastError      *Error     `json:"last_error,omitempty"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	// FailureScope is the auth-level failure scope (Auth.FailureScope); set on
+	// auth-level records only.
+	FailureScope string    `json:"failure_scope,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.

@@ -82,6 +82,13 @@ type Auth struct {
 	Quota QuotaState `json:"quota"`
 	// LastError stores the last failure encountered while executing or refreshing.
 	LastError *Error `json:"last_error,omitempty"`
+	// FailureScope records, explicitly and at the point each failure is recorded,
+	// the widest scope of the failures recorded on this auth since its auth-level
+	// error was last cleared (see FailureScope* constants). It never narrows while
+	// an error is recorded, so a later model-scoped failure cannot hide an earlier
+	// credential-wide one. Empty with a recorded error means the provenance is
+	// unknown.
+	FailureScope string `json:"failure_scope,omitempty"`
 	// CreatedAt is the creation timestamp in UTC.
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is the last modification timestamp in UTC.
