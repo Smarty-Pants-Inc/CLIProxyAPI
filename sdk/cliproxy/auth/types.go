@@ -223,6 +223,11 @@ type ModelState struct {
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
 	Quota QuotaState `json:"quota"`
+	// FailureScope records the widest scope of the restrictions recorded on this
+	// model since it was last cleared (FailureScopeModel* constants). It only
+	// widens, so a later quota refusal cannot hide an earlier non-quota
+	// restriction on the same model.
+	FailureScope string `json:"failure_scope,omitempty"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
 }

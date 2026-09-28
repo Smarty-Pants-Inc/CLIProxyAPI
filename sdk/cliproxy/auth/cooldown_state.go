@@ -26,8 +26,8 @@ type CooldownStateRecord struct {
 	Reason         string     `json:"reason,omitempty"`
 	Quota          QuotaState `json:"quota,omitempty"`
 	LastError      *Error     `json:"last_error,omitempty"`
-	// FailureScope is the auth-level failure scope (Auth.FailureScope); set on
-	// auth-level records only.
+	// FailureScope is the failure scope recorded with the hold: Auth.FailureScope
+	// on auth-level records, ModelState.FailureScope on model records.
 	FailureScope string    `json:"failure_scope,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

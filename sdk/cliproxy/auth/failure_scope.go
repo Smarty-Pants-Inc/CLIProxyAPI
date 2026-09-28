@@ -61,3 +61,36 @@ func failureScopeAllowsQuotaRelease(auth *Auth) bool {
 		return false
 	}
 }
+
+// Per-model failure scopes recorded in ModelState.FailureScope, narrowest first.
+const (
+	// FailureScopeModelQuota: every restriction recorded on the model since its
+	// last clear was a quota refusal (HTTP 429, not forced).
+	FailureScopeModelQuota = "model_quota"
+	// FailureScopeModelOther: some restriction recorded on the model since its
+	// last clear was not a quota refusal (model support, forced cooldown,
+	// auth, transient, ...), or its provenance is unknown.
+	FailureScopeModelOther = "model_other"
+)
+
+func modelFailureScopeRank(scope string) int {
+	switch scope {
+	case "":
+		return 0
+	case FailureScopeModelQuota:
+		return 1
+	default:
+		return 2 // model_other, unknown or unrecognised values are the widest
+	}
+}
+
+// widenModelFailureScope records a restriction of the given scope on a model
+// state. The scope only ever widens until the model state is cleared.
+func widenModelFailureScope(state *ModelState, scope string) {
+	if state == nil {
+		return
+	}
+	if modelFailureScopeRank(scope) > modelFailureScopeRank(state.FailureScope) {
+		state.FailureScope = scope
+	}
+}

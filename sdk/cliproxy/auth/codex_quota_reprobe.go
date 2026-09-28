@@ -123,12 +123,20 @@ func codexQuotaHeld(auth *Auth, now time.Time) bool {
 
 // releaseModelQuotaHold clears a model state only when its sole restriction is a
 // quota hold. Disabled states, non-quota errors (model support, auth, forced
-// cooldown, cloudflare) and retry deadlines beyond the quota reset are kept.
+// cooldown, cloudflare), any non-quota restriction recorded on the model since
+// its last clear, and retry deadlines beyond the quota reset are kept.
 func releaseModelQuotaHold(state *ModelState, now time.Time) bool {
 	if state == nil || state.Status == StatusDisabled {
 		return false
 	}
 	if !state.Quota.Exceeded || !isQuotaHoldReason(state.Quota.Reason) || !quotaOnlyError(state.LastError) {
+		return false
+	}
+	// Provenance comes from the per-model scope recorded with each restriction:
+	// a quota refusal recorded after a model-support error or forced cooldown on
+	// the same model overwrites LastError and folds the deadlines, so only an
+	// explicit model_quota scope proves quota is the model's sole restriction.
+	if state.FailureScope != FailureScopeModelQuota {
 		return false
 	}
 	if state.NextRetryAfter.After(state.Quota.NextRecoverAt) {
