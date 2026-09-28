@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -18,31 +20,70 @@ const (
 	codexUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
 )
 
+// codexQuotaReprobeIntervalEnv overrides the re-probe interval (a Go duration,
+// at least 1s). It exists so an isolated gateway run can exercise the ticker.
+const codexQuotaReprobeIntervalEnv = "CLIPROXY_CODEX_QUOTA_REPROBE_INTERVAL"
+
+func codexQuotaReprobeIntervalFromEnv() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv(codexQuotaReprobeIntervalEnv)); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d >= time.Second {
+			return d
+		}
+		log.Warnf("ignoring invalid %s=%q", codexQuotaReprobeIntervalEnv, raw)
+	}
+	return codexQuotaReprobeInterval
+}
+
 // codexQuotaReprobeURL is a variable so tests can point the probe at a local server.
 var codexQuotaReprobeURL = codexUsageURL
 
+type codexUsageRateLimit struct {
+	Allowed      *bool `json:"allowed"`
+	LimitReached *bool `json:"limit_reached"`
+}
+
 // codexUsageAllows reports whether a /wham/usage body shows the account can
-// serve requests now. A body without an explicit rate_limit verdict is never
-// treated as available, so an unknown shape keeps the hold.
+// serve requests now. Release needs an explicit "allowed": true and no
+// "limit_reached": true on the general limit; a missing, null or non-boolean
+// "allowed" is not approval and keeps the hold. A body that also reports a
+// separately limited feature (additional_rate_limits) as exhausted or not
+// allowed keeps the hold too, since that limit cannot be mapped to models.
 func codexUsageAllows(body []byte) bool {
 	var payload struct {
-		RateLimit *struct {
-			Allowed      *bool `json:"allowed"`
-			LimitReached *bool `json:"limit_reached"`
-		} `json:"rate_limit"`
+		RateLimit            *codexUsageRateLimit `json:"rate_limit"`
+		AdditionalRateLimits []struct {
+			RateLimit *codexUsageRateLimit `json:"rate_limit"`
+		} `json:"additional_rate_limits"`
 	}
 	if json.Unmarshal(body, &payload) != nil || payload.RateLimit == nil {
 		return false
 	}
 	rl := payload.RateLimit
-	if rl.Allowed == nil && rl.LimitReached == nil {
+	if rl.Allowed == nil || !*rl.Allowed || (rl.LimitReached != nil && *rl.LimitReached) {
 		return false
 	}
-	return (rl.Allowed == nil || *rl.Allowed) && (rl.LimitReached == nil || !*rl.LimitReached)
+	for _, extra := range payload.AdditionalRateLimits {
+		if extra.RateLimit == nil {
+			continue
+		}
+		if (extra.RateLimit.Allowed != nil && !*extra.RateLimit.Allowed) || (extra.RateLimit.LimitReached != nil && *extra.RateLimit.LimitReached) {
+			return false
+		}
+	}
+	return true
 }
 
-// codexQuotaHeld reports whether a Codex OAuth account is held by a quota
-// cooldown that has not yet reached its upstream reset.
+func isQuotaHoldReason(reason string) bool {
+	return reason == "quota" || reason == "credential_quota"
+}
+
+// quotaOnlyError reports whether a recorded error is nothing but a quota refusal.
+func quotaOnlyError(err *Error) bool {
+	return err == nil || (err.HTTPStatus == http.StatusTooManyRequests && err.Code != ErrorCodeForceCooldown)
+}
+
+// codexQuotaHeld reports whether an enabled Codex OAuth account is held by a
+// quota cooldown that has not yet reached its upstream reset.
 func codexQuotaHeld(auth *Auth, now time.Time) bool {
 	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 		return false
@@ -53,53 +94,203 @@ func codexQuotaHeld(auth *Auth, now time.Time) bool {
 	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != "" {
 		return false // API-key accounts have no /wham/usage endpoint.
 	}
-	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+	if auth.Quota.Exceeded && isQuotaHoldReason(auth.Quota.Reason) && auth.Quota.NextRecoverAt.After(now) {
 		return true
 	}
 	for _, state := range auth.ModelStates {
-		if state != nil && state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) {
+		if state != nil && state.Quota.Exceeded && isQuotaHoldReason(state.Quota.Reason) && state.Quota.NextRecoverAt.After(now) {
 			return true
 		}
 	}
 	return false
 }
 
+// releaseModelQuotaHold clears a model state only when its sole restriction is a
+// quota hold. Disabled states, non-quota errors (model support, auth, forced
+// cooldown, cloudflare) and retry deadlines beyond the quota reset are kept.
+func releaseModelQuotaHold(state *ModelState, now time.Time) bool {
+	if state == nil || state.Status == StatusDisabled {
+		return false
+	}
+	if !state.Quota.Exceeded || !isQuotaHoldReason(state.Quota.Reason) || !quotaOnlyError(state.LastError) {
+		return false
+	}
+	if state.NextRetryAfter.After(state.Quota.NextRecoverAt) {
+		return false // an independent, longer deadline outlives the quota hold
+	}
+	resetModelState(state, now)
+	return true
+}
+
+// releaseCodexQuotaHoldLocked clears only the quota hold a successful usage probe
+// justifies. It reports whether anything changed. Caller holds m.mu.
+func releaseCodexQuotaHoldLocked(auth *Auth, now time.Time) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if len(auth.ModelStates) == 0 {
+		if !auth.Quota.Exceeded || !isQuotaHoldReason(auth.Quota.Reason) || !quotaOnlyError(auth.LastError) {
+			return false
+		}
+		if auth.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
+			return false
+		}
+		clearAuthStateOnSuccess(auth, now)
+		return true
+	}
+
+	credentialHold := auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota"
+	if credentialHold {
+		// The credential-scope path keeps NextRetryAfter equal to the quota reset;
+		// anything else means an auth-level failure landed on top of it.
+		if !auth.NextRetryAfter.Equal(auth.Quota.NextRecoverAt) {
+			return false
+		}
+	} else {
+		// Account availability must be fully derived from model states; an
+		// independent auth-level restriction is left alone.
+		derived := auth.Clone()
+		updateAggregatedAvailability(derived, now)
+		if derived.Unavailable != auth.Unavailable || !derived.NextRetryAfter.Equal(auth.NextRetryAfter) {
+			return false
+		}
+	}
+
+	changed := false
+	for _, state := range auth.ModelStates {
+		if releaseModelQuotaHold(state, now) {
+			changed = true
+		}
+	}
+	if credentialHold {
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	// Re-derive the account view from what remains; quota states that were kept
+	// re-establish the aggregated quota hold.
+	applyCooldownFields(&auth.Quota, QuotaState{})
+	updateAggregatedAvailability(auth, now)
+	if !hasModelError(auth, now) {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		auth.Status = StatusActive
+	}
+	return true
+}
+
+// codexReprobeSnapshot validates the queued ID immediately before its probe and
+// returns a clone bound to the live registration. Nil means skip.
+func (m *Manager) codexReprobeSnapshot(authID string, now time.Time) *Auth {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	auth := m.auths[authID]
+	if !codexQuotaHeld(auth, now) {
+		return nil
+	}
+	return auth.Clone()
+}
+
+// applyCodexQuotaRelease releases the probed credential's quota hold under the
+// manager lock, only if it is still the exact registration and state that was
+// probed and the lifecycle has not been cancelled.
+func (m *Manager) applyCodexQuotaRelease(ctx context.Context, probed *Auth) (bool, error) {
+	now := time.Now()
+	m.mu.Lock()
+	current := m.auths[probed.ID]
+	if ctx.Err() != nil || current == nil ||
+		current.RegistrationEpoch != probed.RegistrationEpoch ||
+		current.Generation != probed.Generation ||
+		!codexQuotaHeld(current, now) {
+		m.mu.Unlock()
+		return false, nil
+	}
+	var recordsBefore []CooldownStateRecord
+	trackCooldownState := m.cooldownStore != nil
+	if trackCooldownState {
+		recordsBefore = m.cooldownStateRecordsForAuthLocked(current, now)
+	}
+	if !releaseCodexQuotaHoldLocked(current, now) {
+		m.mu.Unlock()
+		return false, nil
+	}
+	current.Generation++
+	current.UpdatedAt = now
+	snapshot := current.Clone()
+	cooldownStateChanged := false
+	if trackCooldownState {
+		cooldownStateChanged = !cooldownStateRecordsEqual(recordsBefore, m.cooldownStateRecordsForAuthLocked(current, now))
+	}
+	errPersist := m.persist(ctx, current)
+	m.mu.Unlock()
+
+	if cooldownStateChanged {
+		m.persistCooldownStates(context.Background())
+	}
+	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(snapshot.ID)
+	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
+	for _, sm := range supportedModels {
+		if sm == nil || strings.TrimSpace(sm.ID) == "" {
+			continue
+		}
+		projections = append(projections, m.clientModelProjectionForAuth(snapshot, sm.ID, now))
+	}
+	registry.GetGlobalRegistry().ApplyClientModelProjections(snapshot.ID, regEpoch, snapshot.Generation, projections)
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+	return true, errPersist
+}
+
 // reprobeHeldCodexQuotas asks /wham/usage about every held Codex account and
-// releases the hold early when upstream says the account is available again.
-// It returns the IDs it released.
+// releases the quota hold early when upstream says the account is available
+// again. It returns the IDs it released.
 func (m *Manager) reprobeHeldCodexQuotas(ctx context.Context) []string {
 	if m == nil {
 		return nil
 	}
 	now := time.Now()
-	var held []*Auth
+	var queued []string
 	m.mu.RLock()
-	for _, auth := range m.auths {
+	for id, auth := range m.auths {
 		if codexQuotaHeld(auth, now) {
-			held = append(held, auth.Clone())
+			queued = append(queued, id)
 		}
 	}
 	m.mu.RUnlock()
 
 	var released []string
-	for _, auth := range held {
+	for _, id := range queued {
 		if ctx.Err() != nil {
 			return released
 		}
-		ok, errProbe := m.probeCodexUsage(ctx, auth)
+		// Re-read the live credential right before the request: an account
+		// disabled, removed or released while earlier probes ran is skipped.
+		probed := m.codexReprobeSnapshot(id, time.Now())
+		if probed == nil {
+			continue
+		}
+		ok, errProbe := m.probeCodexUsage(ctx, probed)
 		if errProbe != nil {
-			log.Debugf("codex quota re-probe failed | auth=%s err=%v", auth.ID, errProbe)
+			log.Debugf("codex quota re-probe failed | auth=%s err=%v", id, errProbe)
 			continue
 		}
 		if !ok {
 			continue
 		}
-		if _, _, errReset := m.ResetQuota(ctx, auth.ID); errReset != nil {
-			log.Warnf("codex quota re-probe: release failed | auth=%s err=%v", auth.ID, errReset)
+		applied, errApply := m.applyCodexQuotaRelease(ctx, probed)
+		if errApply != nil {
+			log.Warnf("codex quota re-probe: release persist failed | auth=%s err=%v", id, errApply)
+		}
+		if !applied {
+			log.Debugf("codex quota re-probe: result dropped (credential changed, released or cancelled) | auth=%s", id)
 			continue
 		}
-		log.Infof("codex quota re-probe: usage shows account available, hold released early | auth=%s held_until=%s", auth.ID, auth.Quota.NextRecoverAt.Format(time.RFC3339))
-		released = append(released, auth.ID)
+		log.Infof("codex quota re-probe: usage shows account available, quota hold released early | auth=%s held_until=%s", id, probed.Quota.NextRecoverAt.Format(time.RFC3339))
+		released = append(released, id)
 	}
 	return released
 }

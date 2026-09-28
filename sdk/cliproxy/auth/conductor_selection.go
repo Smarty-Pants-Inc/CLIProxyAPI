@@ -947,7 +947,10 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 	return selected, true, nil
 }
 
-func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
+// affinityCandidates are every otherwise-eligible, untried credential across priority tiers;
+// a session binding is validated against them rather than the priority-scoped candidates, so a
+// recovered higher-priority credential does not silently move a bound session.
+func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates, affinityCandidates []*Auth) (*Auth, bool, error) {
 	if scheduler == nil || len(candidates) == 0 {
 		return nil, false, nil
 	}
@@ -972,7 +975,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		return nil, false, nil
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
-		return m.keepPluginPickSessionAffinity(ctx, scheduler, req, provider, model, opts, candidates, selected), true, nil
+		return m.keepPluginPickSessionAffinity(ctx, scheduler, req, provider, model, opts, affinityCandidates, selected), true, nil
 	}
 
 	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)
@@ -985,7 +988,9 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 // keepPluginPickSessionAffinity keeps a session on its bound credential when a plugin
 // scheduler picked another one: the plugin is asked again with only the bound
 // credential, so its own cutoff still decides whether that credential may serve.
-// The final pick is recorded as the session binding.
+// The bound credential is looked up among all otherwise-eligible, untried candidates
+// (every priority tier), not only the tier the plugin was offered. The final pick is
+// recorded as the session binding.
 func (m *Manager) keepPluginPickSessionAffinity(ctx context.Context, scheduler PluginScheduler, req pluginapi.SchedulerPickRequest, provider, model string, opts cliproxyexecutor.Options, candidates []*Auth, selected *Auth) *Auth {
 	affinity, ok := m.Selector().(*SessionAffinitySelector)
 	if !ok || affinity == nil {
@@ -1791,7 +1796,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	m.mu.RUnlock()
 
-	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
+	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available, selectorAuths)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
 		return nil, nil, errPick
@@ -2125,7 +2130,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	m.mu.RUnlock()
 
-	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
+	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available, selectorAuths)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
 		return nil, nil, "", errPick
