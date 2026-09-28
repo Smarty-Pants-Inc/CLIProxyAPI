@@ -1789,7 +1789,8 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 //
 //	Phase 1: system blocks earliest-first, preserving the last one.
 //	Phase 2: tool blocks earliest-first, preserving the last one.
-//	Phase 3: message content blocks earliest-first.
+//	Phase 3: message content blocks earliest-first, first sparing the
+//	         caller-prompt reminder and the latest message marker.
 //	Phase 4: remaining system blocks (last system).
 //	Phase 5: remaining tool blocks (last tool).
 func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
@@ -1876,35 +1877,19 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 		return payload
 	}
 
-	messages := gjson.GetBytes(payload, "messages")
-	if messages.IsArray() {
-		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
-			if excess <= 0 {
-				return false
-			}
-			content := msg.Get("content")
-			if !content.IsArray() {
-				return true
-			}
-			content.ForEach(func(itemIdx, item gjson.Result) bool {
-				if excess <= 0 {
-					return false
-				}
-				if !item.Get("cache_control").Exists() {
-					return true
-				}
-				path := fmt.Sprintf("messages.%d.content.%d.cache_control", int(msgIdx.Int()), int(itemIdx.Int()))
-				updated, errDel := sjson.DeleteBytes(payload, path)
-				if errDel != nil {
-					return true
-				}
-				payload = updated
-				excess--
-				return true
-			})
-			return true
-		})
+	// Phase 3a: message markers earliest-first, keeping the caller-prompt
+	// reminder breakpoint and the latest message breakpoint. Smarty fork
+	// (smarty-dev#1579): with Pi's tool marker present, a later turn otherwise
+	// carries five markers and the earliest one stripped here would be the
+	// caller-prompt breakpoint, the only one that caches the caller prompt
+	// across different first messages.
+	protected := protectedMessageCacheControls(payload)
+	payload, excess = stripMessageCacheControls(payload, excess, protected)
+	if excess <= 0 {
+		return payload
 	}
+	// Phase 3b: the protected message markers, earliest-first.
+	payload, excess = stripMessageCacheControls(payload, excess, nil)
 	if excess <= 0 {
 		return payload
 	}
@@ -1953,6 +1938,77 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	}
 
 	return payload
+}
+
+// messageCacheControlPath identifies one message content block.
+type messageCacheControlPath struct{ msg, item int }
+
+// protectedMessageCacheControls returns the message markers phase 3a keeps:
+// the caller-prompt reminder breakpoint in the first user message and the
+// latest message breakpoint.
+func protectedMessageCacheControls(payload []byte) map[messageCacheControlPath]bool {
+	protected := make(map[messageCacheControlPath]bool, 2)
+	firstUserIdx := firstClaudeUserMessageIndex(payload)
+	last := messageCacheControlPath{-1, -1}
+	gjson.GetBytes(payload, "messages").ForEach(func(msgIdx, msg gjson.Result) bool {
+		m := int(msgIdx.Int())
+		msg.Get("content").ForEach(func(itemIdx, item gjson.Result) bool {
+			if !item.Get("cache_control").Exists() {
+				return true
+			}
+			path := messageCacheControlPath{m, int(itemIdx.Int())}
+			last = path
+			text := item.Get("text").String()
+			if m == firstUserIdx && item.Get("type").String() == "text" && isClaudeCodeContextReminder(text) && !isClaudeCodeCurrentDateReminder(text) {
+				protected[path] = true
+			}
+			return true
+		})
+		return true
+	})
+	if last.msg >= 0 {
+		protected[last] = true
+	}
+	return protected
+}
+
+// stripMessageCacheControls removes up to excess message markers
+// earliest-first, skipping protected ones, and returns the remaining excess.
+func stripMessageCacheControls(payload []byte, excess int, protected map[messageCacheControlPath]bool) ([]byte, int) {
+	messages := gjson.GetBytes(payload, "messages")
+	if excess <= 0 || !messages.IsArray() {
+		return payload, excess
+	}
+	messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+		if excess <= 0 {
+			return false
+		}
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(itemIdx, item gjson.Result) bool {
+			if excess <= 0 {
+				return false
+			}
+			if !item.Get("cache_control").Exists() {
+				return true
+			}
+			m, i := int(msgIdx.Int()), int(itemIdx.Int())
+			if protected[messageCacheControlPath{m, i}] {
+				return true
+			}
+			updated, errDel := sjson.DeleteBytes(payload, fmt.Sprintf("messages.%d.content.%d.cache_control", m, i))
+			if errDel != nil {
+				return true
+			}
+			payload = updated
+			excess--
+			return true
+		})
+		return true
+	})
+	return payload, excess
 }
 
 // injectMessagesCacheControl adds cache_control to the message the native rolling

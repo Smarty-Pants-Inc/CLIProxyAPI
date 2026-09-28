@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -399,87 +400,170 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 // through a breakpoint on the caller prompt. Before the fix the caller prompt
 // followed the first user message, so the cacheable prefix ended at the
 // identity block and every new first message rewrote the whole caller prompt.
-// A Pi-shaped later turn (two caller message breakpoints) must also keep the
-// caller-prompt breakpoint within Anthropic's limit of four.
+//
+// The requests carry Pi's real tool list (testdata/pi_tools.json, captured
+// from the Pi CLI, with Pi's breakpoint on the last tool). A later turn with
+// two caller message breakpoints then reaches five markers (tool, identity,
+// caller prompt, two messages); the limit of four must drop the older
+// conversation marker, not the caller-prompt breakpoint, in both Execute and
+// ExecuteStream.
 func TestClaudeCloakedCallerPromptPrefixSurvivesNewFirstMessage(t *testing.T) {
-	var capturedBodies [][]byte
-	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		header := make(http.Header)
-		header.Set("Content-Type", "application/json")
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)),
-			Request:    req,
-		}, nil
-	})
-	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
-	auth := &cliproxyauth.Auth{
-		ID:         "test-cloaked-new-first-message",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-first-message"},
-		Metadata: map[string]any{
-			"account_uuid": "11111111-2222-4333-8444-555555555555",
-			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
-				"0000000000000000000000000000000000000000000000000000000000000001",
-			},
-		},
+	piTools, errTools := os.ReadFile("testdata/pi_tools.json")
+	if errTools != nil {
+		t.Fatal(errTools)
 	}
-	exec := NewClaudeExecutor(&config.Config{})
-	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+	if last := gjson.GetBytes(piTools, "@reverse.0"); !last.Get("cache_control").Exists() {
+		t.Fatalf("pi_tools.json: last tool %s has no breakpoint", last.Get("name").String())
+	}
 
 	systemPrompt := "You are an expert coding assistant operating inside pi."
 	payloadFor := func(messages string) []byte {
-		return []byte(fmt.Sprintf(`{"model":"claude-opus-5","max_tokens":100,`+
-			`"system":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}],"messages":%s}`, systemPrompt, messages))
+		return []byte(fmt.Sprintf(`{"model":"claude-opus-5","max_tokens":100,"tools":%s,`+
+			`"system":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}],"messages":%s}`, piTools, systemPrompt, messages))
 	}
 	firstMessage := func(text string) string {
 		return fmt.Sprintf(`[{"role":"user","content":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}]}]`, text)
 	}
-	for _, payload := range [][]byte{
+	laterTurn := `[` +
+		`{"role":"user","content":[{"type":"text","text":"activation A: mesh event one"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"note.txt"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"hello","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"assistant","content":[{"type":"text","text":"a2"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"u3","cache_control":{"type":"ephemeral"}}]}]`
+	payloads := [][]byte{
 		payloadFor(firstMessage("activation A: mesh event one")),
 		payloadFor(firstMessage("activation B: a different mesh event")),
-		payloadFor(`[` +
-			`{"role":"user","content":[{"type":"text","text":"activation A: mesh event one"}]},` +
-			`{"role":"assistant","content":[{"type":"text","text":"a1"}]},` +
-			`{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]},` +
-			`{"role":"assistant","content":[{"type":"text","text":"a2"}]},` +
-			`{"role":"user","content":[{"type":"text","text":"u3","cache_control":{"type":"ephemeral"}}]}]`),
-	} {
-		if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}, options); err != nil {
-			t.Fatalf("Execute() error = %v", err)
-		}
-	}
-	if len(capturedBodies) != 3 {
-		t.Fatalf("captured %d upstream bodies, want 3", len(capturedBodies))
+		payloadFor(laterTurn),
 	}
 
-	for idx, body := range capturedBodies {
-		if got := gjson.GetBytes(body, "system.#").Int(); got != 2 {
-			t.Fatalf("body %d: top-level system has %d blocks, want billing and identity only (OAuth rejects a caller prompt there): %s", idx, got, body)
-		}
-		reminder := gjson.GetBytes(body, "messages.0.content.1")
-		if reminder.Get("text").String() != claudeCallerSystemReminder(systemPrompt) || !reminder.Get("cache_control").Exists() {
-			t.Fatalf("body %d: messages.0.content.1 = %s, want the caller reminder with a breakpoint", idx, reminder.Raw)
-		}
-		if got := countCacheControls(body); got > 4 {
-			t.Fatalf("body %d: %d cache breakpoints, want at most 4", idx, got)
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			var capturedBodies [][]byte
+			transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				body, errRead := io.ReadAll(req.Body)
+				if errRead != nil {
+					t.Fatal(errRead)
+				}
+				capturedBodies = append(capturedBodies, body)
+				header := make(http.Header)
+				response := `{"id":"msg_1","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+				header.Set("Content-Type", "application/json")
+				if stream {
+					response = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"model\":\"claude-opus-5\",\"role\":\"assistant\",\"content\":[]}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+					header.Set("Content-Type", "text/event-stream")
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       io.NopCloser(strings.NewReader(response)),
+					Request:    req,
+				}, nil
+			})
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+			auth := &cliproxyauth.Auth{
+				ID:         "test-cloaked-new-first-message",
+				Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-first-message"},
+				Metadata: map[string]any{
+					"account_uuid": "11111111-2222-4333-8444-555555555555",
+					claudeauth.ClaudeDeviceIDsMetadataKey: []string{
+						"0000000000000000000000000000000000000000000000000000000000000001",
+					},
+				},
+			}
+			exec := NewClaudeExecutor(&config.Config{})
+			options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: stream}
+
+			for _, payload := range payloads {
+				req := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+				if !stream {
+					if _, err := exec.Execute(ctx, auth, req, options); err != nil {
+						t.Fatalf("Execute() error = %v", err)
+					}
+					continue
+				}
+				resp, err := exec.ExecuteStream(ctx, auth, req, options)
+				if err != nil {
+					t.Fatalf("ExecuteStream() error = %v", err)
+				}
+				for range resp.Chunks {
+				}
+			}
+			if len(capturedBodies) != 3 {
+				t.Fatalf("captured %d upstream bodies, want 3", len(capturedBodies))
+			}
+
+			lastTool := fmt.Sprintf("tools.%d", gjson.GetBytes(piTools, "#").Int()-1)
+			for idx, body := range capturedBodies {
+				if got := gjson.GetBytes(body, "system.#").Int(); got != 2 {
+					t.Fatalf("body %d: top-level system has %d blocks, want billing and identity only (OAuth rejects a caller prompt there): %s", idx, got, body)
+				}
+				reminder := gjson.GetBytes(body, "messages.0.content.1")
+				if reminder.Get("text").String() != claudeCallerSystemReminder(systemPrompt) || !reminder.Get("cache_control").Exists() {
+					t.Fatalf("body %d: messages.0.content.1 = %s, want the caller reminder with a breakpoint", idx, reminder.Raw)
+				}
+				if !gjson.GetBytes(body, lastTool+".cache_control").Exists() {
+					t.Fatalf("body %d: the last tool lost its breakpoint", idx)
+				}
+				if got := countCacheControls(body); got != 4 {
+					t.Fatalf("body %d: %d cache breakpoints, want exactly 4", idx, got)
+				}
+			}
+
+			// Later turn: five markers before the limit. The older conversation
+			// marker (the tool result) goes; the latest message keeps its marker.
+			later := capturedBodies[2]
+			if gjson.GetBytes(later, "messages.2.content.0.cache_control").Exists() {
+				t.Fatalf("later turn: the older tool_result breakpoint should be the one dropped")
+			}
+			if !gjson.GetBytes(later, "messages.4.content.0.cache_control").Exists() {
+				t.Fatalf("later turn: the latest message lost its breakpoint")
+			}
+
+			// Everything up to and including the caller-prompt breakpoint must be
+			// byte-identical across the two different first messages. The billing
+			// block (system.0) is excluded: it carries a per-message fingerprint and
+			// Anthropic does not key the cache on it (the live gateway already reads
+			// the tools and identity block across different first messages).
+			for _, path := range []string{"tools", "system.1", "messages.0.content.0", "messages.0.content.1"} {
+				if a, b := gjson.GetBytes(capturedBodies[0], path).Raw, gjson.GetBytes(capturedBodies[1], path).Raw; a != b {
+					t.Fatalf("%s differs across first messages:\nA: %s\nB: %s", path, a, b)
+				}
+			}
+		})
+	}
+}
+
+// TestEnforceCacheControlLimit_KeepsCallerPromptAndLatestMessage checks the
+// marker budget directly: with the tool, identity, caller-prompt and two
+// message markers, the older message marker is dropped.
+func TestEnforceCacheControlLimit_KeepsCallerPromptAndLatestMessage(t *testing.T) {
+	payload := []byte(`{
+		"tools": [{"name":"read"},{"name":"ls","cache_control":{"type":"ephemeral"}}],
+		"system": [{"type":"text","text":"billing"},{"type":"text","text":"identity","cache_control":{"type":"ephemeral"}}],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"<system-reminder>\ncaller\n</system-reminder>","cache_control":{"type":"ephemeral"}},{"type":"text","text":"u1"}]},
+			{"role":"assistant","content":[{"type":"text","text":"a1"}]},
+			{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"a2"}]},
+			{"role":"user","content":[{"type":"text","text":"u3","cache_control":{"type":"ephemeral"}}]}
+		]
+	}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+	for _, path := range []string{"tools.1", "system.1", "messages.0.content.0", "messages.4.content.0"} {
+		if !gjson.GetBytes(out, path+".cache_control").Exists() {
+			t.Fatalf("%s lost its breakpoint: %s", path, out)
 		}
 	}
-
-	// Everything up to and including the caller-prompt breakpoint must be
-	// byte-identical across the two different first messages. The billing
-	// block (system.0) is excluded: it carries a per-message fingerprint and
-	// Anthropic does not key the cache on it (the live gateway already reads
-	// the tools and identity block across different first messages).
-	for _, path := range []string{"tools", "system.1", "messages.0.content.0", "messages.0.content.1"} {
-		if a, b := gjson.GetBytes(capturedBodies[0], path).Raw, gjson.GetBytes(capturedBodies[1], path).Raw; a != b {
-			t.Fatalf("%s differs across first messages:\nA: %s\nB: %s", path, a, b)
-		}
+	if gjson.GetBytes(out, "messages.2.content.0.cache_control").Exists() {
+		t.Fatalf("messages.2 (older conversation marker) should be dropped: %s", out)
+	}
+	if again := enforceCacheControlLimit(payload, 4); !bytes.Equal(again, out) {
+		t.Fatalf("enforceCacheControlLimit is not deterministic")
 	}
 }
 
