@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -633,39 +634,49 @@ func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []stri
 	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
 	if content.IsArray() {
-		blocks := content.Array()
-		existing := make(map[string]int, len(blocks))
-		for _, block := range blocks {
-			if block.Get("type").String() == "text" {
-				existing[block.Get("text").String()]++
+		// Smarty fork (smarty-dev#1579, F4): an identical reminder that is
+		// already present is removed and re-inserted, so it always lands in the
+		// same position and carries the caller-prompt breakpoint. The caller
+		// text is never dropped: each removed block is replaced by our own.
+		wanted := make(map[string]int, len(reminderTexts))
+		for _, reminderText := range reminderTexts {
+			wanted[reminderText]++
+		}
+		var kept []gjson.Result
+		for _, block := range content.Array() {
+			if block.Get("type").String() == "text" && wanted[block.Get("text").String()] > 0 {
+				wanted[block.Get("text").String()]--
+				continue
 			}
+			kept = append(kept, block)
 		}
 
 		reminderBlocks := make([]string, 0, len(reminderTexts))
 		for _, reminderText := range reminderTexts {
-			if existing[reminderText] > 0 {
-				existing[reminderText]--
-				continue
-			}
 			reminderBlocks = append(reminderBlocks, buildTextBlock(reminderText, nil))
-		}
-		if len(reminderBlocks) == 0 {
-			return payload
 		}
 		reminderBlocks[len(reminderBlocks)-1] = withEphemeralCacheControl(reminderBlocks[len(reminderBlocks)-1])
 
+		// Leading tool results must stay first; an injected current-date
+		// reminder keeps its native place ahead of the caller prompt.
 		insertAt := 0
-		for insertAt < len(blocks) && blocks[insertAt].Get("type").String() == "tool_result" {
-			insertAt++
+		for insertAt < len(kept) {
+			block := kept[insertAt]
+			if block.Get("type").String() == "tool_result" ||
+				(block.Get("type").String() == "text" && isClaudeCodeCurrentDateReminder(block.Get("text").String())) {
+				insertAt++
+				continue
+			}
+			break
 		}
-		rawBlocks := make([]string, 0, len(blocks)+len(reminderBlocks))
-		for idx, block := range blocks {
+		rawBlocks := make([]string, 0, len(kept)+len(reminderBlocks))
+		for idx, block := range kept {
 			if idx == insertAt {
 				rawBlocks = append(rawBlocks, reminderBlocks...)
 			}
 			rawBlocks = append(rawBlocks, block.Raw)
 		}
-		if insertAt == len(blocks) {
+		if insertAt == len(kept) {
 			rawBlocks = append(rawBlocks, reminderBlocks...)
 		}
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]"))
@@ -684,7 +695,21 @@ func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []stri
 	return payload
 }
 
+// claudeReminderTagPattern matches anything that could read as an opening or
+// closing system-reminder tag, including case and whitespace variants.
+var claudeReminderTagPattern = regexp.MustCompile(`(?i)<(\s*/?\s*system-reminder)`)
+
+// neutralizeClaudeReminderTags keeps caller text inside its reminder
+// (smarty-dev#1579, F1): '<' of any system-reminder tag becomes "&lt;", so the
+// caller cannot close the enclosure early or open a fake reminder. The text is
+// otherwise unchanged. This is a text-level enclosure guarantee, not an
+// authorization boundary.
+func neutralizeClaudeReminderTags(text string) string {
+	return claudeReminderTagPattern.ReplaceAllString(text, "&lt;$1")
+}
+
 func claudeCallerSystemReminder(text string) string {
+	text = neutralizeClaudeReminderTags(text)
 	var reminder strings.Builder
 	reminder.WriteString("<system-reminder>\n")
 	reminder.WriteString(text)
@@ -1124,8 +1149,15 @@ func isClaudeCodeContextReminder(text string) bool {
 	return strings.HasPrefix(text, "<system-reminder>") && strings.Contains(text, "</system-reminder>")
 }
 
+// claudeCodeCurrentDateReminderPattern matches exactly the block that
+// claudeCodeCurrentDateReminder generates (and native Claude Code sends), for
+// any date. A prefix match is not enough (smarty-dev#1579, F2): a caller prompt
+// that starts like the date context would otherwise be dropped as a duplicate.
+var claudeCodeCurrentDateReminderPattern = regexp.MustCompile(`\A` + regexp.QuoteMeta("<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ") +
+	`\d{4}-\d{2}-\d{2}` + regexp.QuoteMeta(".\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n") + `\z`)
+
 func isClaudeCodeCurrentDateReminder(text string) bool {
-	return strings.HasPrefix(text, "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ")
+	return claudeCodeCurrentDateReminderPattern.MatchString(text)
 }
 
 func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
