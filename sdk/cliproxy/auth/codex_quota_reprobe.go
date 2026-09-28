@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -18,7 +20,51 @@ const (
 	codexQuotaReprobeInterval = time.Hour
 	codexQuotaReprobeTimeout  = 15 * time.Second
 	codexUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
+	// codexUsageMaxBody caps the /wham/usage body. A larger body is refused
+	// rather than truncated, so a cut-off document is never parsed as a verdict.
+	codexUsageMaxBody = 1 << 20
 )
+
+// errCodexUsageBodyTooLarge reports a /wham/usage body above codexUsageMaxBody.
+var errCodexUsageBodyTooLarge = errors.New("codex usage probe: response body exceeds 1 MiB")
+
+type httpRedirectPolicyKey struct{}
+
+// WithHTTPRedirectPolicy attaches a CheckRedirect policy that executors apply to
+// the client serving Manager.HttpRequest for this context.
+func WithHTTPRedirectPolicy(ctx context.Context, policy func(req *http.Request, via []*http.Request) error) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, httpRedirectPolicyKey{}, policy)
+}
+
+// HTTPRedirectPolicyFromContext returns the CheckRedirect policy set by
+// WithHTTPRedirectPolicy, or nil when the context carries none.
+func HTTPRedirectPolicyFromContext(ctx context.Context) func(req *http.Request, via []*http.Request) error {
+	if ctx == nil {
+		return nil
+	}
+	policy, _ := ctx.Value(httpRedirectPolicyKey{}).(func(req *http.Request, via []*http.Request) error)
+	return policy
+}
+
+// sameHostHTTPSRedirects follows a redirect only to https on the host of the
+// original request. The probe carries the account's bearer token and account
+// ID, which must never reach another host or travel in clear text.
+func sameHostHTTPSRedirects(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if len(via) >= 10 {
+		return errors.New("codex usage probe: too many redirects")
+	}
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, "https") || !strings.EqualFold(req.URL.Host, origin.Host) {
+		return fmt.Errorf("codex usage probe: refused redirect to %s://%s", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
 
 // codexQuotaReprobeIntervalEnv overrides the re-probe interval (a positive Go
 // duration). It exists so an isolated gateway run can exercise the ticker.
@@ -375,6 +421,7 @@ func (m *Manager) reprobeHeldCodexQuotas(ctx context.Context) []string {
 func (m *Manager) probeCodexUsage(ctx context.Context, auth *Auth) (bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, codexQuotaReprobeTimeout)
 	defer cancel()
+	probeCtx = WithHTTPRedirectPolicy(probeCtx, sameHostHTTPSRedirects)
 	req, errReq := http.NewRequestWithContext(probeCtx, http.MethodGet, codexQuotaReprobeURL, nil)
 	if errReq != nil {
 		return false, errReq
@@ -390,12 +437,21 @@ func (m *Manager) probeCodexUsage(ctx context.Context, auth *Auth) (bool, error)
 		return false, errDo
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if errRead != nil {
-		return false, errRead
+	// Defense in depth for executors that ignore the redirect policy: a
+	// response served from anywhere but the probed origin is not trusted.
+	if final := resp.Request; final != nil && final.URL != nil &&
+		(!strings.EqualFold(final.URL.Scheme, req.URL.Scheme) || !strings.EqualFold(final.URL.Host, req.URL.Host)) {
+		return false, fmt.Errorf("codex usage probe: response served from %s://%s", final.URL.Scheme, final.URL.Host)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return false, &Error{Code: "codex_usage_probe", Message: resp.Status, HTTPStatus: resp.StatusCode}
+	}
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, codexUsageMaxBody+1))
+	if errRead != nil {
+		return false, errRead
+	}
+	if len(body) > codexUsageMaxBody {
+		return false, errCodexUsageBodyTooLarge
 	}
 	return codexUsageAllows(body), nil
 }

@@ -81,6 +81,11 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	// Callers such as the quota re-probe restrict redirects so the bearer
+	// token cannot follow one to another host or to plain http.
+	if policy := cliproxyauth.HTTPRedirectPolicyFromContext(ctx); policy != nil {
+		httpClient.CheckRedirect = policy
+	}
 	return httpClient.Do(httpReq)
 }
 
