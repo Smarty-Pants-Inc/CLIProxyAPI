@@ -972,7 +972,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		return nil, false, nil
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
-		return selected, true, nil
+		return m.keepPluginPickSessionAffinity(ctx, scheduler, req, provider, model, opts, candidates, selected), true, nil
 	}
 
 	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)
@@ -980,6 +980,27 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		return nil, false, nil
 	}
 	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+}
+
+// keepPluginPickSessionAffinity keeps a session on its bound credential when a plugin
+// scheduler picked another one: the plugin is asked again with only the bound
+// credential, so its own cutoff still decides whether that credential may serve.
+// The final pick is recorded as the session binding.
+func (m *Manager) keepPluginPickSessionAffinity(ctx context.Context, scheduler PluginScheduler, req pluginapi.SchedulerPickRequest, provider, model string, opts cliproxyexecutor.Options, candidates []*Auth, selected *Auth) *Auth {
+	affinity, ok := m.Selector().(*SessionAffinitySelector)
+	if !ok || affinity == nil {
+		return selected
+	}
+	if boundID := affinity.boundAuthID(provider, model, opts); boundID != "" && boundID != selected.ID {
+		if bound := pickSchedulerAuthByID(candidates, boundID); bound != nil {
+			req.Candidates = schedulerAuthCandidates([]*Auth{bound})
+			if resp, handled, errPick := scheduler.PickAuth(ctx, req); errPick == nil && handled && resp.Handled && resp.AuthID == bound.ID {
+				selected = bound
+			}
+		}
+	}
+	affinity.bindExplicitSession(provider, model, opts, selected.ID)
+	return selected
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {

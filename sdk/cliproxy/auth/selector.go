@@ -1073,7 +1073,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, nil
 		}
 		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		// ponytail: the session is rebound, not re-homed later. A switch pays one full cache
+		// write on the new account; moving back would pay a second one (#1579 lane B).
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s from=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 		return auth, nil
 	}
 
@@ -1548,6 +1550,41 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	s.cache.CompareAndDelete(cacheKey, res.AuthID)
 	if fallbackKey != "" {
 		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+	}
+}
+
+// explicitSessionKey returns the binding key Pick uses for a request that carries an
+// explicit session identity, or "" when the request has none. It never mutates opts.
+func (s *SessionAffinitySelector) explicitSessionKey(provider, model string, opts cliproxyexecutor.Options) string {
+	if s == nil || s.cache == nil {
+		return ""
+	}
+	metadata := make(map[string]any, len(opts.Metadata))
+	for k, v := range opts.Metadata {
+		metadata[k] = v
+	}
+	primaryID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, metadata)
+	if primaryID == "" {
+		return ""
+	}
+	return provider + "::" + cliproxysession.BoundSessionIdentity(primaryID) + "::" + canonicalModelKey(model)
+}
+
+// boundAuthID returns the credential bound to the request's explicit session, if any.
+func (s *SessionAffinitySelector) boundAuthID(provider, model string, opts cliproxyexecutor.Options) string {
+	key := s.explicitSessionKey(provider, model, opts)
+	if key == "" {
+		return ""
+	}
+	authID, _ := s.cache.Get(key)
+	return authID
+}
+
+// bindExplicitSession records a credential picked outside Pick (by a plugin scheduler)
+// so later requests of the same session can stay on it.
+func (s *SessionAffinitySelector) bindExplicitSession(provider, model string, opts cliproxyexecutor.Options, authID string) {
+	if key := s.explicitSessionKey(provider, model, opts); key != "" && authID != "" {
+		s.cache.Set(key, authID)
 	}
 }
 
