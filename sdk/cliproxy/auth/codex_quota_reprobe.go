@@ -20,19 +20,35 @@ const (
 	codexUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
 )
 
-// codexQuotaReprobeIntervalEnv overrides the re-probe interval (a Go duration,
-// at least 1s). It exists so an isolated gateway run can exercise the ticker.
+// codexQuotaReprobeIntervalEnv overrides the re-probe interval (a positive Go
+// duration). It exists so an isolated gateway run can exercise the ticker.
 const codexQuotaReprobeIntervalEnv = "CLIPROXY_CODEX_QUOTA_REPROBE_INTERVAL"
 
+// codexQuotaReprobeMinInterval is the production floor for the override: shorter
+// values are clamped to it so the environment cannot turn the re-probe into a
+// tight polling loop against the usage endpoint. Only in-package tests lower it.
+var codexQuotaReprobeMinInterval = time.Minute
+
 func codexQuotaReprobeIntervalFromEnv() time.Duration {
-	if raw := strings.TrimSpace(os.Getenv(codexQuotaReprobeIntervalEnv)); raw != "" {
-		if d, err := time.ParseDuration(raw); err == nil && d >= time.Second {
-			return d
-		}
-		log.Warnf("ignoring invalid %s=%q", codexQuotaReprobeIntervalEnv, raw)
+	raw := strings.TrimSpace(os.Getenv(codexQuotaReprobeIntervalEnv))
+	if raw == "" {
+		return codexQuotaReprobeInterval
 	}
-	return codexQuotaReprobeInterval
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Warnf("ignoring invalid %s=%q", codexQuotaReprobeIntervalEnv, raw)
+		return codexQuotaReprobeInterval
+	}
+	if d < codexQuotaReprobeMinInterval {
+		log.Warnf("%s=%q is below the minimum; using %s", codexQuotaReprobeIntervalEnv, raw, codexQuotaReprobeMinInterval)
+		return codexQuotaReprobeMinInterval
+	}
+	return d
 }
+
+// codexQuotaBeforeRegistryPublish, when set by a test, runs after the manager
+// release is committed and before the registry projection is published.
+var codexQuotaBeforeRegistryPublish func(authID string)
 
 // codexQuotaReprobeURL is a variable so tests can point the probe at a local server.
 var codexQuotaReprobeURL = codexUsageURL
@@ -207,22 +223,38 @@ func releaseCodexQuotaHoldLocked(auth *Auth, now time.Time) bool {
 	return true
 }
 
+// codexReprobeTarget is a probed credential snapshot together with the model
+// registry registration it was taken against.
+type codexReprobeTarget struct {
+	auth *Auth
+	// registryEpoch is the registry's registration epoch for auth.ID when the
+	// snapshot was taken. The registry projection is published against this
+	// epoch only, so a replacement registration is never touched.
+	registryEpoch uint64
+}
+
 // codexReprobeSnapshot validates the queued ID immediately before its probe and
-// returns a clone bound to the live registration. Nil means skip.
-func (m *Manager) codexReprobeSnapshot(authID string, now time.Time) *Auth {
+// returns a clone bound to the live manager and registry registrations. Nil
+// means skip.
+func (m *Manager) codexReprobeSnapshot(authID string, now time.Time) *codexReprobeTarget {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	auth := m.auths[authID]
 	if !codexQuotaHeld(auth, now) {
 		return nil
 	}
-	return auth.Clone()
+	return &codexReprobeTarget{
+		auth:          auth.Clone(),
+		registryEpoch: registry.GetGlobalRegistry().ClientRegistrationEpoch(authID),
+	}
 }
 
 // applyCodexQuotaRelease releases the probed credential's quota hold under the
 // manager lock, only if it is still the exact registration and state that was
-// probed and the lifecycle has not been cancelled.
-func (m *Manager) applyCodexQuotaRelease(ctx context.Context, probed *Auth) (bool, error) {
+// probed and the lifecycle has not been cancelled. The registry projection is
+// then published only to the registry registration the snapshot was bound to.
+func (m *Manager) applyCodexQuotaRelease(ctx context.Context, target *codexReprobeTarget) (bool, error) {
+	probed := target.auth
 	now := time.Now()
 	m.mu.Lock()
 	current := m.auths[probed.ID]
@@ -255,15 +287,27 @@ func (m *Manager) applyCodexQuotaRelease(ctx context.Context, probed *Auth) (boo
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}
-	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(snapshot.ID)
-	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
-	for _, sm := range supportedModels {
-		if sm == nil || strings.TrimSpace(sm.ID) == "" {
-			continue
-		}
-		projections = append(projections, m.clientModelProjectionForAuth(snapshot, sm.ID, now))
+	if codexQuotaBeforeRegistryPublish != nil {
+		codexQuotaBeforeRegistryPublish(snapshot.ID)
 	}
-	registry.GetGlobalRegistry().ApplyClientModelProjections(snapshot.ID, regEpoch, snapshot.Generation, projections)
+	// Publish against the registration captured with the probed snapshot, never
+	// against whatever registration is current now: a replacement registered in
+	// the meantime has a new epoch and is left untouched (ApplyClientModelProjections
+	// re-checks the epoch atomically, so a replacement racing this call is safe too).
+	reg := registry.GetGlobalRegistry()
+	supportedModels, regEpoch := reg.GetModelsAndEpochForClient(snapshot.ID)
+	if regEpoch != target.registryEpoch {
+		log.Debugf("codex quota re-probe: registry registration changed, projection dropped | auth=%s", snapshot.ID)
+	} else {
+		projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
+		for _, sm := range supportedModels {
+			if sm == nil || strings.TrimSpace(sm.ID) == "" {
+				continue
+			}
+			projections = append(projections, m.clientModelProjectionForAuth(snapshot, sm.ID, now))
+		}
+		reg.ApplyClientModelProjections(snapshot.ID, target.registryEpoch, snapshot.Generation, projections)
+	}
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}
@@ -273,11 +317,22 @@ func (m *Manager) applyCodexQuotaRelease(ctx context.Context, probed *Auth) (boo
 // reprobeHeldCodexQuotas asks /wham/usage about every held Codex account and
 // releases the quota hold early when upstream says the account is available
 // again. It returns the IDs it released.
+//
+// A cycle probes each held account at most once, and cycles never overlap: a
+// cycle that starts while another is still running (for example after
+// StartAutoRefresh replaced the loop) is skipped.
 func (m *Manager) reprobeHeldCodexQuotas(ctx context.Context) []string {
 	if m == nil {
 		return nil
 	}
+	if !m.codexReprobeCycle.TryLock() {
+		log.Debug("codex quota re-probe: previous cycle still running, skipped")
+		return nil
+	}
+	defer m.codexReprobeCycle.Unlock()
 	now := time.Now()
+	// The queue holds each held ID once (m.auths is keyed by ID), and it is the
+	// only source of probes in this cycle: at most one probe per held account.
 	var queued []string
 	m.mu.RLock()
 	for id, auth := range m.auths {
@@ -294,10 +349,11 @@ func (m *Manager) reprobeHeldCodexQuotas(ctx context.Context) []string {
 		}
 		// Re-read the live credential right before the request: an account
 		// disabled, removed or released while earlier probes ran is skipped.
-		probed := m.codexReprobeSnapshot(id, time.Now())
-		if probed == nil {
+		target := m.codexReprobeSnapshot(id, time.Now())
+		if target == nil {
 			continue
 		}
+		probed := target.auth
 		ok, errProbe := m.probeCodexUsage(ctx, probed)
 		if errProbe != nil {
 			log.Debugf("codex quota re-probe failed | auth=%s err=%v", id, errProbe)
@@ -306,7 +362,7 @@ func (m *Manager) reprobeHeldCodexQuotas(ctx context.Context) []string {
 		if !ok {
 			continue
 		}
-		applied, errApply := m.applyCodexQuotaRelease(ctx, probed)
+		applied, errApply := m.applyCodexQuotaRelease(ctx, target)
 		if errApply != nil {
 			log.Warnf("codex quota re-probe: release persist failed | auth=%s err=%v", id, errApply)
 		}

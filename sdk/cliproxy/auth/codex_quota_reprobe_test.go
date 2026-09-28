@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 type codexUsageProbeExecutor struct {
@@ -375,5 +377,183 @@ func TestReprobeHeldCodexQuotas_ReleasesQuotaOnlyHoldFromMarkResult(t *testing.T
 		if after.Unavailable || after.Quota.Exceeded || after.LastError != nil || after.Status != StatusActive {
 			t.Fatalf("credentialScope=%v: still held: %+v", credentialScope, after)
 		}
+	}
+}
+
+// registerHeldCodexWithRegistry registers a quota-held Codex credential in the
+// manager and its model in the global registry, with the registry quota marker set.
+func registerHeldCodexWithRegistry(t *testing.T, manager *Manager, id, model string, holdUntil time.Time) {
+	t.Helper()
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+	reg.SetModelQuotaExceeded(id, model)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth(id, holdUntil)); errRegister != nil {
+		t.Fatalf("register %s: %v", id, errRegister)
+	}
+}
+
+// Security review P2: the registry publication after a release must be bound to
+// the registration of the snapshot that was probed. Pause after the manager
+// mutation and before the registry publication, replace the credential and its
+// registry entry (new epoch) and restrict the replacement; the delayed
+// publication must leave the replacement's markers and generation unchanged.
+func TestReprobeHeldCodexQuotas_DelayedRegistryPublishSparesReplacement(t *testing.T) {
+	const id, model = "codex-regbind", "gpt-5.5-regbind"
+	executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerHeldCodexWithRegistry(t, manager, id, model, time.Now().Add(72*time.Hour))
+	reg := registry.GetGlobalRegistry()
+	oldEpoch := reg.ClientRegistrationEpoch(id)
+
+	newHold := time.Now().Add(96 * time.Hour).Round(time.Second)
+	replaced := false
+	codexQuotaBeforeRegistryPublish = func(authID string) {
+		if authID != id {
+			return
+		}
+		replaced = true
+		manager.Remove(WithSkipPersist(context.Background()), id)
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth(id, newHold)); errRegister != nil {
+			t.Errorf("re-register: %v", errRegister)
+		}
+		reg.UnregisterClient(id)
+		reg.RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		reg.SetModelQuotaExceeded(id, model)
+		reg.SuspendClientModel(id, model, "replacement-restriction")
+	}
+	t.Cleanup(func() { codexQuotaBeforeRegistryPublish = nil })
+
+	released := manager.reprobeHeldCodexQuotas(context.Background())
+	if !replaced {
+		t.Fatal("the pause point before registry publication was not reached")
+	}
+	if len(released) != 1 {
+		t.Fatalf("released = %v, want the old registration's manager release", released)
+	}
+	if reg.ClientRegistrationEpoch(id) == oldEpoch {
+		t.Fatal("setup: replacement did not get a new registry epoch")
+	}
+	if !reg.IsModelQuotaExceededForClient(id, model) {
+		t.Fatal("old snapshot cleared the replacement's registry quota marker")
+	}
+	if !reg.IsModelSuspendedForClient(id, model) {
+		t.Fatal("old snapshot cleared the replacement's registry suspension")
+	}
+	// The replacement's registry generation is still 0: a generation-1 update
+	// from the replacement is accepted. Had the old snapshot's (higher)
+	// generation been installed, this would be rejected.
+	if !reg.ApplyClientModelProjections(id, reg.ClientRegistrationEpoch(id), 1, []registry.ClientModelProjection{{ModelID: model, QuotaExceeded: true}}) {
+		t.Fatal("old snapshot's generation was installed on the replacement's registry entry")
+	}
+	replacement, _ := manager.GetByID(id)
+	if !replacement.Quota.Exceeded || !replacement.Quota.NextRecoverAt.Equal(newHold) || !replacement.Unavailable {
+		t.Fatalf("replacement's manager hold changed: %+v", replacement.Quota)
+	}
+}
+
+// Control for the case above: with no replacement the same path does publish
+// the release to the registry, so the regression above is not vacuous.
+func TestReprobeHeldCodexQuotas_RegistryPublishWithoutReplacement(t *testing.T) {
+	const id, model = "codex-regpub", "gpt-5.5-regpub"
+	executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerHeldCodexWithRegistry(t, manager, id, model, time.Now().Add(72*time.Hour))
+	reg := registry.GetGlobalRegistry()
+	if !reg.IsModelQuotaExceededForClient(id, model) {
+		t.Fatal("setup: registry quota marker not set")
+	}
+	if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 1 {
+		t.Fatalf("released = %v, want [%s]", released, id)
+	}
+	if reg.IsModelQuotaExceededForClient(id, model) {
+		t.Fatal("release was not published to the registry")
+	}
+}
+
+// The interval override is clamped to the production minimum of 60s; invalid
+// and non-positive values fall back to the hourly default.
+func TestCodexQuotaReprobeIntervalFromEnv_ClampsToMinimum(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":        codexQuotaReprobeInterval,
+		"1s":      time.Minute,
+		"59s":     time.Minute,
+		"1ms":     time.Minute,
+		"60s":     time.Minute,
+		"90s":     90 * time.Second,
+		"2h":      2 * time.Hour,
+		"0":       codexQuotaReprobeInterval,
+		"-5m":     codexQuotaReprobeInterval,
+		"garbage": codexQuotaReprobeInterval,
+	}
+	if codexQuotaReprobeMinInterval != time.Minute {
+		t.Fatalf("production minimum = %s, want 1m", codexQuotaReprobeMinInterval)
+	}
+	for raw, want := range cases {
+		t.Setenv(codexQuotaReprobeIntervalEnv, raw)
+		if got := codexQuotaReprobeIntervalFromEnv(); got != want {
+			t.Errorf("%s=%q: interval = %s, want %s", codexQuotaReprobeIntervalEnv, raw, got, want)
+		}
+	}
+}
+
+// Only the in-package test hook can lower the floor.
+func TestCodexQuotaReprobeIntervalFromEnv_TestHookLowersMinimum(t *testing.T) {
+	prev := codexQuotaReprobeMinInterval
+	codexQuotaReprobeMinInterval = time.Second
+	t.Cleanup(func() { codexQuotaReprobeMinInterval = prev })
+	t.Setenv(codexQuotaReprobeIntervalEnv, "5s")
+	if got := codexQuotaReprobeIntervalFromEnv(); got != 5*time.Second {
+		t.Fatalf("interval = %s, want 5s with the test hook", got)
+	}
+	t.Setenv(codexQuotaReprobeIntervalEnv, "10ms")
+	if got := codexQuotaReprobeIntervalFromEnv(); got != time.Second {
+		t.Fatalf("interval = %s, want the hooked 1s floor", got)
+	}
+}
+
+// A cycle probes each held account at most once, and a cycle started while
+// another is running is skipped rather than overlapping it.
+func TestReprobeHeldCodexQuotas_OneProbePerAccountAndNoOverlap(t *testing.T) {
+	executor := newPausingUsageExecutor(`{"rate_limit":{"allowed":false,"limit_reached":true}}`)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	holdUntil := time.Now().Add(72 * time.Hour)
+	ids := []string{"codex-p1", "codex-p2", "codex-p3"}
+	for _, id := range ids {
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth(id, holdUntil)); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+	}
+	done := make(chan []string, 1)
+	go func() { done <- manager.reprobeHeldCodexQuotas(context.Background()) }()
+	<-executor.started
+	if released := manager.reprobeHeldCodexQuotas(context.Background()); released != nil {
+		t.Fatalf("overlapping cycle released %v", released)
+	}
+	if got := executor.probedIDs(); len(got) != 1 {
+		t.Fatalf("overlapping cycle probed: %v", got)
+	}
+	close(executor.resume)
+	<-done
+	got := executor.probedIDs()
+	counts := map[string]int{}
+	for _, id := range got {
+		counts[id]++
+	}
+	if len(got) != len(ids) {
+		t.Fatalf("probes = %v, want each of %v once", got, ids)
+	}
+	for _, id := range ids {
+		if counts[id] != 1 {
+			t.Fatalf("%s probed %d times in one cycle, want 1 (all: %v)", id, counts[id], got)
+		}
+	}
+	// The lock is released: the next cycle runs.
+	manager.reprobeHeldCodexQuotas(context.Background())
+	if n := len(executor.probedIDs()); n != 2*len(ids) {
+		t.Fatalf("next cycle probes = %d, want %d", n, 2*len(ids))
 	}
 }
