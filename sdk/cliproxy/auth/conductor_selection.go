@@ -611,6 +611,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		return nil, newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 	}
 
+	// Skip accounts whose 5-hour or weekly quota window is exhausted until the
+	// window resets; if all are exhausted only the least-utilized one remains.
+	availableByPriority = skipQuotaExhaustedBuckets(availableByPriority, now)
 	return availableAuthsFromPriorityBuckets(availableByPriority, allPriorities), nil
 }
 
