@@ -46,14 +46,17 @@ jobs:
 
   artifact:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # cgo links glibc dynamically: pin the runner to Dev1's Ubuntu 24.04 (glibc 2.39).
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
-      CGO_ENABLED: '0'
+      # The plugin host dlopen()s c-shared plugins (quota-router); a CGO_ENABLED=0
+      # build refuses them with 'standard dynamic library plugin loading requires cgo'.
+      CGO_ENABLED: '1'
       GOOS: linux
       GOARCH: amd64
       GOFLAGS: '-mod=readonly -p=2'
@@ -105,7 +108,7 @@ jobs:
             readlink -f "$(command -v go)"
             go version
             sha256sum "$(readlink -f "$(command -v go)")"
-            printf 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS=-mod=readonly,-p=2\n'
+            printf 'CGO_ENABLED=1 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS=-mod=readonly,-p=2\n'
             printf 'go build -trimpath -ldflags %q -o %q ./cmd/server\n' "$flags" "$output/cliproxyapi"
           } > "$output/provenance.txt"
           set +e
@@ -116,6 +119,7 @@ jobs:
           test "$status" = 0
           test -z "$(git status --porcelain)"
           go version -m "$output/cliproxyapi" >> "$output/provenance.txt"
+          go version -m "$output/cliproxyapi" | grep -qx $'\tbuild\tCGO_ENABLED=1'
           set +e
           (cd "$RUNNER_TEMP/cpa-empty-home"; HOME="$PWD" timeout --kill-after=5s 10s "$output/cliproxyapi" --help) > "$output/help.txt" 2>&1
           help_status=$?
