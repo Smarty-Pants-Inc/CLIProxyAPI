@@ -12,7 +12,8 @@ import (
 
 func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *testing.T) {
 	now := time.Now()
-	sevenDayReset := now.Add(7 * 24 * time.Hour)
+	// Smarty fork: a 7d retry-after holds the credential only until the next re-probe.
+	sevenDayReset := now.Add(quotaReprobeInterval)
 
 	manager := NewManager(nil, nil, nil)
 
@@ -63,7 +64,7 @@ func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *te
 	if !ok || updatedAuth == nil {
 		t.Fatal("auth not found")
 	}
-	if !updatedAuth.Quota.Exceeded || !updatedAuth.Quota.NextRecoverAt.After(now.Add(6*24*time.Hour)) {
+	if !updatedAuth.Quota.Exceeded || !updatedAuth.Quota.NextRecoverAt.After(now.Add(quotaReprobeInterval-time.Minute)) {
 		t.Fatalf("auth quota was cleared or shortened by concurrent success: quota=%+v", updatedAuth.Quota)
 	}
 
@@ -131,7 +132,7 @@ func TestAuthManager_UpdatePreservesActiveCredentialCooldown(t *testing.T) {
 	if !ok || persistedAuth == nil {
 		t.Fatal("auth not found after update")
 	}
-	if !persistedAuth.Quota.Exceeded || persistedAuth.Quota.Reason != "credential_quota" || !persistedAuth.Quota.NextRecoverAt.After(now.Add(6*24*time.Hour)) {
+	if !persistedAuth.Quota.Exceeded || persistedAuth.Quota.Reason != "credential_quota" || !persistedAuth.Quota.NextRecoverAt.After(now.Add(quotaReprobeInterval-time.Minute)) {
 		t.Fatalf("credential cooldown was lost after Update: quota=%+v", persistedAuth.Quota)
 	}
 
@@ -297,7 +298,7 @@ func TestAuthManager_CooldownPersistenceAcrossRestore(t *testing.T) {
 	if !ok || restoredAuth == nil {
 		t.Fatal("restored auth not found")
 	}
-	if !restoredAuth.Quota.Exceeded || restoredAuth.Quota.NextRecoverAt.Before(time.Now().Add(6*24*time.Hour)) {
+	if !restoredAuth.Quota.Exceeded || restoredAuth.Quota.NextRecoverAt.Before(time.Now().Add(quotaReprobeInterval-time.Minute)) {
 		t.Fatalf("restored auth quota was not preserved: quota=%+v", restoredAuth.Quota)
 	}
 }
