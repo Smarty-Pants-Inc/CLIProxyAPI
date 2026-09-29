@@ -881,11 +881,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 							if !disableCooling {
 								if result.RetryAfter != nil {
-									cooldown := *result.RetryAfter
-									if cooldown < minQuotaCooldownFloor {
-										cooldown = minQuotaCooldownFloor
-									}
-									next = now.Add(cooldown).Round(0)
+									next = now.Add(quotaRetryAfterCooldown(*result.RetryAfter)).Round(0)
 								} else {
 									quotaForFailure := state.Quota
 									if result.CredentialScope {
@@ -2273,11 +2269,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			var next time.Time
 			if !disableCooling {
 				if retryAfter != nil {
-					cooldown := *retryAfter
-					if cooldown < minQuotaCooldownFloor {
-						cooldown = minQuotaCooldownFloor
-					}
-					next = now.Add(cooldown).Round(0)
+					next = now.Add(quotaRetryAfterCooldown(*retryAfter)).Round(0)
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				}
@@ -2315,6 +2307,22 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 // window is still open reuse that window instead of escalating, so a burst of
 // concurrent in-flight failures advances the backoff ladder at most once per
 // window.
+// quotaRetryAfterCooldown bounds an upstream 429 retry-after hint to
+// [minQuotaCooldownFloor, quotaReprobeInterval]. Upstream reports the weekly
+// reset (up to ~7 days), but a top-up or plan change can restore the account
+// long before that, so the hold only lasts until the next re-probe: the next
+// request after it expires tries the account again, and a 429 holds it for at
+// most another interval (smarty-dev cooldown re-probe).
+func quotaRetryAfterCooldown(retryAfter time.Duration) time.Duration {
+	if retryAfter < minQuotaCooldownFloor {
+		return minQuotaCooldownFloor
+	}
+	if retryAfter > quotaReprobeInterval {
+		return quotaReprobeInterval
+	}
+	return retryAfter
+}
+
 func quotaCooldownAfterFailure(quota QuotaState, now time.Time) (time.Time, int) {
 	if quota.NextRecoverAt.After(now) {
 		return quota.NextRecoverAt, quota.BackoffLevel

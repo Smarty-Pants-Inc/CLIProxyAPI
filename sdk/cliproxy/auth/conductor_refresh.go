@@ -37,7 +37,10 @@ const (
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
 	minQuotaCooldownFloor     = 10 * time.Second
-	transientErrorCooldown    = time.Minute
+	// quotaReprobeInterval is the longest a quota 429 or a passive quota
+	// snapshot keeps an account out of selection before it is tried again.
+	quotaReprobeInterval   = time.Hour
+	transientErrorCooldown = time.Minute
 )
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
