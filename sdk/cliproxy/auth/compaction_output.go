@@ -22,43 +22,36 @@ func (s *SessionAffinitySelector) RecordCompactionOutput(authID string, opts cli
 	return s.recordCompactionOutputKeys(authID, opts, collector.keys)
 }
 
-func (s *SessionAffinitySelector) recordCompactionOutputKeys(authID string, opts cliproxyexecutor.Options, keys []string) error {
+func (s *SessionAffinitySelector) recordCompactionOutputKeys(authID string, opts cliproxyexecutor.Options, keys []string, contexts ...context.Context) error {
+	ctx := compactionContext(opts)
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	if err := compactionCheckContext(ctx); err != nil {
+		return err
+	}
 	if len(keys) == 0 {
 		return nil
 	}
 	if s == nil || s.cache == nil || strings.TrimSpace(authID) == "" {
 		return affinityStateError()
 	}
-	for _, key := range keys {
-		if errSave := s.cache.SetProtectedAliases(authID, key); errSave != nil {
-			return affinityStateError()
-		}
-	}
+	bindings := append([]string(nil), keys...)
 	// Protect the explicit primary independently. Production on this account is
 	// authoritative even when a handled scheduler bypassed selector.Pick.
 	primaryID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	namespace, _ := opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey].(string)
 	model, _ := opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string)
-	primaryKey := ""
 	if primaryID != "" && namespace != "" {
-		primaryKey = namespace + "::" + cliproxysession.BoundSessionIdentity(primaryID) + "::" + canonicalModelKey(model)
-		if errSave := s.cache.SetProtectedAliases(authID, primaryKey); errSave != nil {
-			return affinityStateError()
-		}
+		primaryKey := namespace + "::" + cliproxysession.BoundSessionIdentity(primaryID) + "::" + canonicalModelKey(model)
+		bindings = append(bindings, primaryKey)
 	}
-	// Capacity eviction must not allow acknowledged evidence to disappear during
-	// this registration, including when a response contains multiple blocks.
-	for _, key := range keys {
-		if retainedID, ok := s.cache.Get(key); !ok || retainedID != authID || !s.cache.IsProtected(key) {
-			return affinityStateError()
+	// All signer groups and the independent primary are retained together and
+	// published synchronously once, before the caller delivers signed bytes.
+	if errSave := s.cache.SetProtectedBindings(ctx, authID, bindings...); errSave != nil {
+		if err := compactionCheckContext(ctx); err != nil {
+			return err
 		}
-	}
-	if primaryKey != "" {
-		if retainedID, ok := s.cache.Get(primaryKey); !ok || retainedID != authID || !s.cache.IsProtected(primaryKey) {
-			return affinityStateError()
-		}
-	}
-	if s.cache.PersistenceError() != nil {
 		return affinityStateError()
 	}
 	return nil

@@ -1416,9 +1416,18 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
+			execOpts := creditsOpts
+			var errIntercept error
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(creditsCtx, c.executor, c.provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel), c.auth.ID)
+			if errIntercept != nil {
+				return cliproxyexecutor.Response{}, false, errIntercept
+			}
+			creditsCtx = syncMetadataSessionToContext(creditsCtx, execOpts.Metadata)
+			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
+			if isRequestStopError(errExec) || isRequestTerminatedError(errExec) {
+				return cliproxyexecutor.Response{}, false, errExec
+			}
+			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -1433,7 +1442,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				}
 				continue
 			}
-			if errSave := m.RecordCompactionOutput(c.auth.ID, creditsOpts, resp.Payload); errSave != nil {
+			if errSave := m.RecordCompactionOutput(c.auth.ID, execOpts, resp.Payload); errSave != nil {
 				// Local signer persistence failure must not publish success or retry credentials.
 				return cliproxyexecutor.Response{}, false, wrapRequestStopError(errSave)
 			}
@@ -1481,6 +1490,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
+			if isRequestStopError(errStream) || isRequestTerminatedError(errStream) {
+				return nil, false, errStream
+			}
 			continue
 		}
 		return result, true, nil

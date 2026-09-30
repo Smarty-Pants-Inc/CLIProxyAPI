@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -84,7 +86,6 @@ func ValidateCompactionJSON(ctx context.Context, payload []byte) error {
 	}
 	decoder := json.NewDecoder(&compactionJSONReader{ctx: ctx, text: string(payload)})
 	decoder.UseNumber()
-	blocks := 0
 	var consume func(int, json.Token) error
 	consume = func(depth int, token json.Token) error {
 		if err := compactionCheckContext(ctx); err != nil {
@@ -119,14 +120,6 @@ func ValidateCompactionJSON(ctx context.Context, payload []byte) error {
 				value, err := decoder.Token()
 				if err != nil {
 					return err
-				}
-				// Count capsules before a large GJSON collection can run.
-				// Repeated identical blocks still consume the budget.
-				if name == "type" && value == "compaction" {
-					blocks++
-					if blocks > maxCompactionBlocks {
-						return compactionJSONError("compaction JSON exceeds 256 block limit", nil)
-					}
 				}
 				if err := consume(depth+1, value); err != nil {
 					return err
@@ -269,6 +262,17 @@ func compactionAffinityKeysChecked(ctx context.Context, opts cliproxyexecutor.Op
 	}
 	if len(opts.OriginalRequest) == 0 {
 		return nil, nil
+	}
+	// Image edits declare their rebuilt multipart representation explicitly.
+	// Require both that declaration and its wire boundary: a JSON body with a
+	// misleading multipart header must still undergo ambiguity validation.
+	if opts.SourceFormat.String() == "openai-image" {
+		mediaType, params, err := mime.ParseMediaType(opts.Headers.Get("Content-Type"))
+		boundary := params["boundary"]
+		if err == nil && mediaType == "multipart/form-data" && boundary != "" &&
+			bytes.HasPrefix(opts.OriginalRequest, []byte("--"+boundary+"\r\n")) {
+			return nil, compactionCheckContext(ctx)
+		}
 	}
 	if err := ValidateCompactionJSON(ctx, opts.OriginalRequest); err != nil {
 		return nil, err

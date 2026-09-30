@@ -50,8 +50,19 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	auth, errPick := origin.pick(ctx, provider, model, opts, auths)
 	if errPick == nil && auth != nil {
 		keys, _ := opts.Metadata[compactionAffinityMetadataKey].([]string)
-		for _, key := range keys {
-			origin.cache.Touch(key, auth.ID)
+		if len(keys) > 0 {
+			if err := compactionCheckContext(ctx); err != nil {
+				return nil, err
+			}
+			if errTouch := origin.cache.touchProtectedBindings(ctx, auth.ID, keys...); errTouch != nil {
+				if err := compactionCheckContext(ctx); err != nil {
+					return nil, err
+				}
+				if origin.cache.PersistenceError() != nil {
+					return nil, affinityStateError()
+				}
+				return nil, compactedAuthUnavailableError()
+			}
 		}
 	}
 	if errState := origin.cache.PersistenceError(); errState != nil {
@@ -169,7 +180,10 @@ func (s *SessionAffinitySelector) prepareCompactionAffinity(provider, model stri
 	}
 	if primaryID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata); primaryID != "" {
 		primaryKey := provider + "::" + cliproxysession.BoundSessionIdentity(primaryID) + "::" + canonicalModelKey(model)
-		if errProtect := s.cache.SetProtectedAliases(authID, primaryKey); errProtect != nil {
+		if errProtect := s.cache.SetProtectedBindings(ctx, authID, primaryKey); errProtect != nil {
+			if err := compactionCheckContext(ctx); err != nil {
+				return "", err
+			}
 			if s.cache.PersistenceError() != nil {
 				return "", affinityStateError()
 			}
