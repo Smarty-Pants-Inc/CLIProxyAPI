@@ -129,7 +129,19 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	go func() {
 		defer close(out)
 		defer cancelProducer()
-		var failed bool
+		var failed, completed bool
+		// Cancellation can win the receive race with the producer's typed tail.
+		// Account Claude OAuth cancellation once without waiting for that tail;
+		// local refusals and already-accounted upstream failures stay separate.
+		defer func() {
+			if !failed && !completed && !ephemeralResult {
+				if errCancel := claudeOAuthRequestCancellation(ctx, auth, nil); errCancel != nil {
+					rerr := resultErrorFromError(errCancel)
+					rerr.Code = requestScopedErrorCode
+					m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts}, auth, ephemeralResult)
+				}
+			}
+		}()
 		forward := true
 		var rewriter *StreamRewriter
 		if aliasResult.ForceMapping && strings.TrimSpace(aliasResult.OriginalAlias) != "" {
@@ -159,13 +171,19 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return false
 			}
 			if chunk.Err != nil {
-				cancelProducer()
+				localStop := IsLocalCompactionAffinityStop(chunk.Err)
+				if localStop {
+					cancelProducer()
+				}
 				select {
 				case <-ctx.Done():
-					forward = false
+					return false
 				case out <- chunk:
 				}
-				return false
+				forward = false
+				// Ordinary upstream errors stop delivery, not source ownership.
+				// Drain in this receiver until close or downstream cancellation.
+				return !localStop
 			}
 			if len(chunk.Payload) == 0 {
 				return true
@@ -201,6 +219,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if ctx.Err() != nil {
 				return false
+			}
+			if !forward {
+				return true
 			}
 			if observer != nil && len(chunk.Payload) > 0 {
 				payloads, errSave := observer.pushChunks(chunk.Payload)
@@ -250,6 +271,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				}
 			}
 		}
+		if !forward {
+			return
+		}
 		if observer != nil {
 			payloads, errSave := observer.finishChunks()
 			if errSave != nil {
@@ -269,6 +293,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed && ctx.Err() == nil && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
+			completed = true
 			m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: true, Options: opts}, auth, ephemeralResult)
 		}
 	}()
@@ -455,6 +480,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			// This also owns the replacement producer after a bootstrap 401 retry.
+			// Cancel before every stop, return, or model-pool failover below.
+			cancelAttempt()
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)

@@ -14,6 +14,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -28,11 +29,19 @@ func TestImagesMultipartCompactionRound2RealHandlerAdmission(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			const model = "round2-compat-image"
+			const compatName = "round2-compat"
+			providerKey := util.OpenAICompatibleProviderKey(compatName)
 			var executions atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				executions.Add(1)
-				if r.URL.Path != "/images/edits" {
-					t.Errorf("upstream path = %q", r.URL.Path)
+				if r.Method != http.MethodPost || r.URL.Path != "/images/edits" {
+					t.Errorf("upstream request = %s %q", r.Method, r.URL.Path)
+				}
+				if r.Header.Get("User-Agent") != "cli-proxy-openai-compat" {
+					t.Errorf("upstream executor attribution = %q", r.Header.Get("User-Agent"))
+				}
+				if stream && r.Header.Get("Accept") != "text/event-stream" {
+					t.Errorf("upstream stream Accept = %q", r.Header.Get("Accept"))
 				}
 				if r.Header.Get("Authorization") != "Bearer round2-key" {
 					t.Errorf("upstream account attribution = %q", r.Header.Get("Authorization"))
@@ -43,6 +52,16 @@ func TestImagesMultipartCompactionRound2RealHandlerAdmission(t *testing.T) {
 					return
 				}
 				defer r.MultipartForm.RemoveAll()
+				if r.FormValue("model") != model {
+					t.Errorf("upstream model = %q, want %q", r.FormValue("model"), model)
+				}
+				wantStream := ""
+				if stream {
+					wantStream = "true"
+				}
+				if r.FormValue("stream") != wantStream {
+					t.Errorf("upstream stream = %q, want %q", r.FormValue("stream"), wantStream)
+				}
 				file, _, err := r.FormFile("image")
 				if err != nil {
 					t.Errorf("upstream missing image: %v", err)
@@ -66,17 +85,32 @@ func TestImagesMultipartCompactionRound2RealHandlerAdmission(t *testing.T) {
 			defer origin.Stop()
 			manager := coreauth.NewManager(nil, origin, nil)
 			manager.SetRetryConfig(0, 0, 0)
-			manager.RegisterExecutor(runtimeexecutor.NewOpenAICompatExecutor("openai-compatibility", &internalconfig.Config{
-				OpenAICompatibility: []internalconfig.OpenAICompatibility{{Name: "round2-compat"}},
-			}))
+			cfg := &internalconfig.Config{
+				OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+					Name:          compatName,
+					BaseURL:       upstream.URL,
+					APIKeyEntries: []internalconfig.OpenAICompatibilityAPIKey{{APIKey: "round2-key"}},
+					Models:        []internalconfig.OpenAICompatibilityModel{{Name: model, Alias: model, Image: true}},
+				}},
+			}
+			manager.SetConfig(cfg)
+			// Named compat auths select by the namespaced key, not the generic provider.
+			manager.RegisterExecutor(runtimeexecutor.NewOpenAICompatExecutor(providerKey, cfg))
 			id := "round2-images-" + name
 			if _, err := manager.Register(context.Background(), &coreauth.Auth{
-				ID: id, Provider: "openai-compatibility", Status: coreauth.StatusActive,
-				Attributes: map[string]string{"base_url": upstream.URL, "api_key": "round2-key", "compat_name": "round2-compat", "provider_key": "round2-compat"},
+				ID: id, Provider: providerKey, Label: compatName, Status: coreauth.StatusActive,
+				Attributes: map[string]string{
+					"base_url":                    upstream.URL,
+					"api_key":                     "round2-key",
+					"compat_name":                 compatName,
+					"provider_key":                providerKey,
+					coreauth.AttributeSource:      "config:round2-compat[round2]",
+					coreauth.AttributeConfigIndex: "0",
+				},
 			}); err != nil {
 				t.Fatal(err)
 			}
-			registry.GetGlobalRegistry().RegisterClient(id, "openai-compatibility", []*registry.ModelInfo{{ID: model, Object: "model", OwnedBy: "round2-compat", Type: registry.OpenAIImageModelType}})
+			registry.GetGlobalRegistry().RegisterClient(id, providerKey, []*registry.ModelInfo{{ID: model, Object: "model", OwnedBy: compatName, Type: registry.OpenAIImageModelType}})
 			defer registry.GetGlobalRegistry().UnregisterClient(id)
 			handler := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
 			var body bytes.Buffer

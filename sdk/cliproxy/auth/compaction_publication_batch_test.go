@@ -87,7 +87,7 @@ func populatedCompactionPublicationSelector(t *testing.T) (*SessionAffinitySelec
 	dir := t.TempDir()
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		StatePath: filepath.Join(dir, "affinity.state"),
-		Fallback: &FillFirstSelector{},
+		Fallback:  &FillFirstSelector{},
 	})
 	t.Cleanup(selector.Stop)
 	for i := 0; i < 128; i++ {
@@ -112,9 +112,9 @@ func TestCompactionReplayPublicationBatch(t *testing.T) {
 	}
 	count := watchCompactionPublications(t, dir)
 	picked, err := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatOpenAIResponse,
-		OriginalRequest: []byte(`{"input":[`+blocks+`]}`),
-		Metadata: make(map[string]any),
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: []byte(`{"input":[` + blocks + `]}`),
+		Metadata:        make(map[string]any),
 	}, []*Auth{{ID: "A"}, {ID: "B"}})
 	if err != nil || picked == nil || picked.ID != "A" {
 		t.Fatalf("known replay = %v, %v", picked, err)
@@ -131,7 +131,7 @@ func TestCompactionOutputPublicationBatch(t *testing.T) {
 		OriginalRequest: []byte(`{"prompt_cache_key":"publication-primary"}`),
 		Metadata: map[string]any{
 			cliproxyexecutor.SessionAffinityProviderMetadataKey: "codex",
-			cliproxyexecutor.SessionAffinityModelMetadataKey: "model",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "model",
 		},
 	}
 	if err := selector.RecordCompactionOutput("A", opts, []byte(`{"output":[`+publicationCompactionBlocks(32)+`]}`)); err != nil {
@@ -196,9 +196,9 @@ func TestCompactionCanceledReplayHasZeroPublications(t *testing.T) {
 	defer replaySelector.Stop()
 	count := watchCompactionPublications(t, dir)
 	picked, err := replaySelector.Pick(ctx, "codex", "model", cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatOpenAIResponse,
-		OriginalRequest: []byte(`{"input":[`+blocks+`]}`),
-		Metadata: make(map[string]any),
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: []byte(`{"input":[` + blocks + `]}`),
+		Metadata:        make(map[string]any),
 	}, []*Auth{{ID: "A"}})
 	publications := count()
 	if publications != 0 || picked != nil || err == nil {
@@ -219,7 +219,7 @@ func TestCompactionOutputBatchPrechecksLateConflict(t *testing.T) {
 	}
 	beforeLen := selector.Cache().Len()
 	count := watchCompactionPublications(t, dir)
-	payload := []byte(`{"output":[{"type":"compaction","encrypted_content":"new-before-conflict"},`+known+`]}`)
+	payload := []byte(`{"output":[{"type":"compaction","encrypted_content":"new-before-conflict"},` + known + `]}`)
 	if err := selector.RecordCompactionOutput("A", cliproxyexecutor.Options{}, payload); err == nil {
 		t.Fatal("late signer conflict accepted")
 	}
@@ -263,7 +263,7 @@ func TestCompactionOutputBatchPreservesExistingAliasGroups(t *testing.T) {
 		OriginalRequest: []byte(`{"prompt_cache_key":"publication-primary"}`),
 		Metadata: map[string]any{
 			cliproxyexecutor.SessionAffinityProviderMetadataKey: "codex",
-			cliproxyexecutor.SessionAffinityModelMetadataKey: "model",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "model",
 		},
 	}
 	if err := selector.RecordCompactionOutput("A", opts, []byte(`{"output":[`+publicationCompactionBlocks(32)+`]}`)); err != nil {

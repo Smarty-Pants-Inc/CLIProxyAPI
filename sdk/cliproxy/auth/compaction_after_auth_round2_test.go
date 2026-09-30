@@ -262,7 +262,7 @@ func (e *round2CreditsHTTPExecutor) ExecuteStream(ctx context.Context, a *auth.A
 
 type round2HomeDispatch struct{ selected *auth.Auth }
 
-func (*round2HomeDispatch) HeartbeatOK() bool { return true }
+func (*round2HomeDispatch) HeartbeatOK() bool       { return true }
 func (*round2HomeDispatch) AbortAmbiguousDispatch() {}
 func (d *round2HomeDispatch) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
 	return json.Marshal(d.selected)

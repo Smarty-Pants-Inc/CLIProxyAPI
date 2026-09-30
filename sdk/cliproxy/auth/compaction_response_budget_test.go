@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 	"testing"
+	"time"
 
 	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -17,8 +17,8 @@ import (
 // The stream observer receives decoded JSON after its existing SSE framing.
 func TestCompactionDuplexLogicalResponseBudget(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		responses int
+		name       string
+		responses  int
 		blockBytes int
 	}{
 		{"occurrences", 130, 16},
@@ -38,7 +38,7 @@ func TestCompactionDuplexLogicalResponseBudget(t *testing.T) {
 					fmt.Sprintf(`{"type":"response.output_item.done","response_id":"r%d","item":%s}`, i, block),
 					fmt.Sprintf(`{"type":"response.completed","response":{"id":"r%d","output":[%s]}}`, i, block),
 				} {
-					wire := []byte("data: "+payload+"\n\n")
+					wire := []byte("data: " + payload + "\n\n")
 					want = append(want, wire...)
 					chunks <- core.StreamChunk{Payload: wire}
 				}
