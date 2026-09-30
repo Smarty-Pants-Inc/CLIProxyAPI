@@ -187,9 +187,16 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		var observer *compactionOutputStream
 		format := cliproxyexecutor.ResponseFormatOrSource(opts)
-		if m.compactionOutputStore(opts) != nil && (format == sdktranslator.FormatOpenAIResponse || format == sdktranslator.FormatCodex) {
-			observer = &compactionOutputStream{record: func(payload []byte) error {
-				return m.RecordCompactionOutput(auth.ID, opts, payload)
+		if store := m.compactionOutputStore(opts); store != nil && (format == sdktranslator.FormatOpenAIResponse || format == sdktranslator.FormatCodex || format == sdktranslator.FormatClaude) {
+			// One bounded collector spans all event shapes in this response.
+			// Repeated added/done/completed occurrences consume its budget too.
+			collector := newCompactionKeyCollector(ctx)
+			observer = &compactionOutputStream{native: format == sdktranslator.FormatClaude, ctx: ctx, record: func(payload []byte) error {
+				var current []string
+				if errCollect := collectCompactionOutput(ctx, payload, collector, &current); errCollect != nil {
+					return errCollect
+				}
+				return store.recordCompactionOutputKeys(auth.ID, opts, current)
 			}}
 		}
 		forwardPayloads := func(payloads [][]byte) bool {

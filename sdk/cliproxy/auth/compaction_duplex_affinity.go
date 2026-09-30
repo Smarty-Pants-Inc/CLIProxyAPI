@@ -18,9 +18,13 @@ func (m *Manager) prepareCompactionDuplexValidation(opts cliproxyexecutor.Option
 		delete(opts.Metadata, cliproxyexecutor.CompactionAffinityValidatorMetadataKey)
 		return
 	}
+	ctx := compactionContext(opts)
 	opts.Metadata[cliproxyexecutor.CompactionAffinityValidatorMetadataKey] = func(authID string, payload []byte) (err error) {
 		defer func() { err = wrapRequestStopError(err) }()
-		keys := compactionAffinityKeys(cliproxyexecutor.Options{OriginalRequest: payload})
+		keys, errCollect := compactionAffinityKeysChecked(ctx, cliproxyexecutor.Options{OriginalRequest: payload})
+		if errCollect != nil {
+			return errCollect
+		}
 		if len(keys) == 0 {
 			return nil
 		}

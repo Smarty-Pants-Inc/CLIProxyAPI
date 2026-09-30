@@ -123,12 +123,15 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
-	req, opts = cliproxysession.Enrich(req, opts)
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = req.Payload
+	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts)
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
 	if errOrigin != nil {
 		return cliproxyexecutor.Response{}, errOrigin
 	}
+	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -188,12 +191,15 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
-	req, opts = cliproxysession.Enrich(req, opts)
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = req.Payload
+	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts)
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
 	if errOrigin != nil {
 		return cliproxyexecutor.Response{}, errOrigin
 	}
+	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -246,12 +252,15 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
-	req, opts = cliproxysession.Enrich(req, opts)
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = req.Payload
+	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts)
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
 	if errOrigin != nil {
 		return nil, errOrigin
 	}
+	req, opts = cliproxysession.Enrich(req, opts)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()

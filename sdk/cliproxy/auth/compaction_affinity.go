@@ -2,14 +2,11 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"net/http"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -34,7 +31,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		// must not attach a new local authority to that request.
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
-	authID, errPrepare := origin.prepareCompactionAffinity(provider, model, opts)
+	authID, errPrepare := origin.prepareCompactionAffinity(provider, model, opts, ctx)
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
@@ -52,7 +49,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	auth, errPick := origin.pick(ctx, provider, model, opts, auths)
 	if errPick == nil && auth != nil {
-		for _, key := range compactionAffinityKeys(opts) {
+		keys, _ := opts.Metadata[compactionAffinityMetadataKey].([]string)
+		for _, key := range keys {
 			origin.cache.Touch(key, auth.ID)
 		}
 	}
@@ -83,9 +81,12 @@ func (m *Manager) prepareSessionAffinitySelection(provider, model string, opts c
 // attempt-local metadata clones. HTTP bootstrap reinvocations must reuse the
 // returned options. A present typed nil store is an explicit negative decision;
 // only an absent key permits origin discovery.
-func (m *Manager) PrepareCompactionRequest(model string, opts cliproxyexecutor.Options) (cliproxyexecutor.Options, error) {
+func (m *Manager) PrepareCompactionRequest(model string, opts cliproxyexecutor.Options, contexts ...context.Context) (cliproxyexecutor.Options, error) {
 	routeModel := authSelectionModelFromOptions(opts, model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	if len(contexts) > 0 && contexts[0] != nil {
+		opts.Metadata[compactionRequestContextMetadataKey] = contexts[0]
+	}
 	if _, captured := opts.Metadata[compactionAffinityStoreMetadataKey]; !captured {
 		var origin *SessionAffinitySelector
 		if !m.HomeEnabled() {
@@ -114,19 +115,27 @@ func IsLocalCompactionAffinityStop(err error) bool {
 		return false
 	}
 	switch local.Code {
-	case "affinity_state_unavailable", "compaction_affinity_missing", "compaction_affinity_conflict":
+	case "affinity_state_unavailable", "compaction_affinity_missing", "compaction_affinity_conflict", "compaction_json_rejected":
 		return true
 	default:
 		return false
 	}
 }
 
-func (s *SessionAffinitySelector) prepareCompactionAffinity(provider, model string, opts cliproxyexecutor.Options) (string, error) {
+func (s *SessionAffinitySelector) prepareCompactionAffinity(provider, model string, opts cliproxyexecutor.Options, contexts ...context.Context) (string, error) {
+	ctx := compactionContext(opts)
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	keys, errCollect := compactionAffinityKeysChecked(ctx, opts)
+	if errCollect != nil {
+		return "", errCollect
+	}
 	if errState := s.cache.PersistenceError(); errState != nil {
 		return "", affinityStateError()
 	}
-	keys := compactionAffinityKeys(opts)
 	if len(keys) == 0 {
+		delete(opts.Metadata, compactionAffinityMetadataKey)
 		primaryID, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 		primaryKey := provider + "::" + cliproxysession.BoundSessionIdentity(primaryID) + "::" + canonicalModelKey(model)
 		if primaryID == "" || !s.cache.IsProtected(primaryKey) {
@@ -190,31 +199,4 @@ func affinityStateError() *Error {
 
 func compactedAuthUnavailableError() *Error {
 	return &Error{Code: "auth_unavailable", Message: "signed compaction account is unavailable; refusing account failover", HTTPStatus: http.StatusServiceUnavailable}
-}
-
-func compactionAffinityKeys(opts cliproxyexecutor.Options) []string {
-	keys := compactionBlockKeys(gjson.GetBytes(opts.OriginalRequest, "input"))
-	gjson.GetBytes(opts.OriginalRequest, "messages").ForEach(func(_, message gjson.Result) bool {
-		keys = mergeSessionAliases(keys, compactionBlockKeys(message.Get("content"))...)
-		return true
-	})
-	return keys
-}
-
-// Each block has an independent key: changing list shape or ordinary turns must
-// never bypass a known signer's constraint. Persist no block or conversation text.
-func compactionBlockKeys(items gjson.Result) []string {
-	var keys []string
-	items.ForEach(func(_, item gjson.Result) bool {
-		if item.Get("type").String() == "compaction" {
-			block := item.Get("encrypted_content").String()
-			if block == "" {
-				block = item.Raw
-			}
-			digest := sha256.Sum256([]byte(block))
-			keys = mergeSessionAliases(keys, fmt.Sprintf("compaction::%x", digest))
-		}
-		return true
-	})
-	return keys
 }

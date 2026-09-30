@@ -1433,6 +1433,10 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				}
 				continue
 			}
+			if errSave := m.RecordCompactionOutput(c.auth.ID, creditsOpts, resp.Payload); errSave != nil {
+				// Local signer persistence failure must not publish success or retry credentials.
+				return cliproxyexecutor.Response{}, false, wrapRequestStopError(errSave)
+			}
 			m.MarkResult(creditsCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, c.auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)

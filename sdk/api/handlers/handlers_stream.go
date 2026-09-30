@@ -349,6 +349,22 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		ProxyURL:                    execOptions.ProxyURL,
 	}
 	opts.Metadata = reqMeta
+	// Bound raw input before hierarchy extraction or request interceptors scan it.
+	// Preserve the captured origin (including a negative origin) through clones.
+	var errOrigin error
+	if h.AuthManager == nil {
+		errOrigin = fmt.Errorf("auth manager is unavailable")
+	} else {
+		opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	}
+	if errOrigin != nil {
+		errMsg := executionErrorMessage(errOrigin)
+		lifecycle.completeError(ctx, errMsg)
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	var interceptErr *interfaces.ErrorMessage
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
@@ -359,11 +375,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		close(errChan)
 		return nil, nil, errChan
 	}
-	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	// Keep the same origin and signer pin across HTTP bootstrap reinvocations,
-	// not just the Manager's internal retry rounds.
-	var errOrigin error
-	opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts)
+	// and validate any interceptor replacement before hierarchy extraction.
+	opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
 	if errOrigin != nil {
 		errMsg := executionErrorMessage(errOrigin)
 		lifecycle.completeError(ctx, errMsg)
@@ -372,6 +386,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		close(errChan)
 		return nil, nil, errChan
 	}
+	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)

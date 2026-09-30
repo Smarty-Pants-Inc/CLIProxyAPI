@@ -2,18 +2,27 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"strings"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // RecordCompactionOutput records signer evidence, not a guess from input affinity.
 // Each block has its own protected group, independent of mutable session aliases.
 // The caller must pass the auth that actually executed the producing request.
 func (s *SessionAffinitySelector) RecordCompactionOutput(authID string, opts cliproxyexecutor.Options, payload []byte) error {
-	keys := compactionOutputKeys(payload)
+	collector := newCompactionKeyCollector(compactionContext(opts))
+	if errCollect := collectCompactionOutput(compactionContext(opts), payload, collector); errCollect != nil {
+		return errCollect
+	}
+	return s.recordCompactionOutputKeys(authID, opts, collector.keys)
+}
+
+func (s *SessionAffinitySelector) recordCompactionOutputKeys(authID string, opts cliproxyexecutor.Options, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -77,32 +86,92 @@ func (m *Manager) compactionOutputStore(opts cliproxyexecutor.Options) *SessionA
 	return affinity
 }
 
+// compactionOutputKeys is a compatibility helper for tests. Production must
+// propagate collection errors before mutating signer state or delivering bytes.
 func compactionOutputKeys(payload []byte) []string {
-	if !gjson.ValidBytes(payload) {
+	collector := newCompactionKeyCollector(context.Background())
+	if collectCompactionOutput(context.Background(), payload, collector) != nil {
 		return nil
 	}
+	return collector.keys
+}
+
+func completeCompactionOutput(item gjson.Result) bool {
+	if item.Get("type").String() != "compaction" {
+		return false
+	}
+	if item.Get("encrypted_content").String() != "" {
+		return true
+	}
+	content := item.Get("content")
+	return content.Exists() && content.Type != gjson.Null && (content.Type != gjson.String || content.String() != "")
+}
+
+func collectCompactionOutput(ctx context.Context, payload []byte, collector *compactionKeyCollector, current ...*[]string) error {
+	if err := compactionCheckContext(ctx); err != nil {
+		return err
+	}
+	trimmed := bytes.TrimSpace(payload)
+	// Ordinary SDK success payloads may be opaque or empty. Only JSON
+	// containers can carry signer evidence; validate every such container,
+	// not just those with recognizable compaction fields (which may be escaped).
+	if bytes.Equal(trimmed, []byte("[DONE]")) || len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return compactionCheckContext(ctx)
+	}
+	if errValidate := ValidateCompactionJSON(ctx, payload); errValidate != nil {
+		return errValidate
+	}
 	root := gjson.ParseBytes(payload)
-	var keys []string
-	collect := func(items gjson.Result) {
-		// An added item may be only a skeleton. Do not attribute it until the
-		// complete encrypted value is present in a complete JSON event.
-		items.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "compaction" && item.Get("encrypted_content").String() != "" {
-				keys = mergeSessionAliases(keys, compactionBlockKeys(gjson.Parse("["+item.Raw+"]"))...)
+	var errCollect error
+	seen := make(map[string]struct{})
+	add := func(item gjson.Result) error {
+		if err := collector.add(item); err != nil {
+			return err
+		}
+		// Global dedup bounds collection, but every signed acknowledgement
+		// must refresh/recheck its own evidence even if an earlier event had it.
+		if len(current) > 0 && current[0] != nil {
+			key := collector.lastKey
+			if _, duplicate := seen[key]; !duplicate {
+				seen[key] = struct{}{}
+				*current[0] = append(*current[0], key)
 			}
-			return true
+		}
+		return nil
+	}
+	collect := func(items gjson.Result, nativeComplete bool) {
+		items.ForEach(func(_, item gjson.Result) bool {
+			if errCollect = compactionCheckContext(ctx); errCollect != nil {
+				return false
+			}
+			content := item.Get("content")
+			// content[] is a completed native response (or an assembled stop),
+			// unlike content_block_start where an empty string is a skeleton.
+			if completeCompactionOutput(item) || (nativeComplete && item.Get("type").String() == "compaction" && content.Exists() && content.Type != gjson.Null) {
+				errCollect = add(item)
+			}
+			return errCollect == nil
 		})
 	}
-	collect(root.Get("output"))
-	collect(root.Get("response.output"))
+	for _, path := range []string{"output", "response.output", "content"} {
+		collect(root.Get(path), path == "content")
+		if errCollect != nil {
+			return errCollect
+		}
+	}
 	switch root.Get("type").String() {
 	case "response.output_item.added", "response.output_item.done":
 		item := root.Get("item")
-		if item.Exists() {
-			collect(gjson.Parse("[" + item.Raw + "]"))
+		if completeCompactionOutput(item) {
+			return add(item)
+		}
+	case "content_block_start":
+		item := root.Get("content_block")
+		if completeCompactionOutput(item) {
+			return add(item)
 		}
 	}
-	return keys
+	return compactionCheckContext(ctx)
 }
 
 // compactionOutputStream holds only a partial wire event, never durable raw
@@ -117,9 +186,129 @@ type compactionOutputStream struct {
 	parsed   []byte
 	units    [][]byte
 	released [][]byte
+
+	// Native Claude sends a skeleton followed by content deltas. Only these
+	// signed block bytes wait for completion; ordinary SSE remains immediate.
+	native        bool
+	ctx           context.Context
+	nativeBlock   []byte
+	nativeIndex   int64
+	nativeHold    bool
+	nativeWire    [][]byte
+	nativeBytes   int
+	nativeContent strings.Builder
 }
 
 func (s *compactionOutputStream) push(payload []byte) ([]byte, error) {
+	if s.ctx != nil {
+		if err := compactionCheckContext(s.ctx); err != nil {
+			return nil, err
+		}
+	}
+	ready, err := s.pushEvent(payload)
+	if err != nil {
+		s.nativeWire, s.nativeBlock = nil, nil
+		return nil, err
+	}
+	if !s.native || (!s.nativeHold && len(s.nativeWire) == 0) {
+		return ready, nil
+	}
+	units := s.released
+	s.released = nil
+	if units == nil && len(ready) > 0 {
+		units = [][]byte{ready}
+	}
+	for _, unit := range units {
+		s.nativeBytes += len(unit)
+		if s.nativeBytes > maxCompactionJSONBytes {
+			s.nativeWire, s.nativeBlock = nil, nil
+			return nil, affinityStateError()
+		}
+		s.nativeWire = append(s.nativeWire, bytes.Clone(unit))
+	}
+	if s.nativeHold {
+		return nil, nil
+	}
+	s.released = s.nativeWire
+	ready = bytes.Join(s.nativeWire, nil)
+	s.nativeWire, s.nativeBytes = nil, 0
+	return ready, nil
+}
+
+func (s *compactionOutputStream) recordEvent(data []byte) error {
+	if !s.native || bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+		return s.record(data)
+	}
+	if errValidate := ValidateCompactionJSON(s.ctx, data); errValidate != nil {
+		return errValidate
+	}
+	root := gjson.ParseBytes(data)
+	switch root.Get("type").String() {
+	case "content_block_start":
+		block := root.Get("content_block")
+		if block.Get("type").String() != "compaction" {
+			break
+		}
+		if s.nativeBlock != nil || root.Get("index").Type != gjson.Number || root.Get("index").Int() < 0 {
+			return affinityStateError()
+		}
+		s.nativeBlock = []byte(block.Raw)
+		s.nativeIndex = root.Get("index").Int()
+		s.nativeContent.Reset()
+		if block.Get("content").Type == gjson.String {
+			s.nativeContent.WriteString(block.Get("content").String())
+		}
+		s.nativeHold = !completeCompactionOutput(block)
+	case "content_block_delta":
+		if s.nativeBlock == nil {
+			break
+		}
+		if root.Get("index").Type != gjson.Number || root.Get("index").Int() != s.nativeIndex {
+			return affinityStateError()
+		}
+		content := root.Get("delta.content")
+		if content.Type != gjson.String {
+			return affinityStateError()
+		}
+		previous := gjson.GetBytes(s.nativeBlock, "content")
+		if previous.Exists() && previous.Type != gjson.String && previous.Type != gjson.Null {
+			return affinityStateError()
+		}
+		if s.nativeContent.Len()+len(content.String()) > maxCompactionJSONBytes {
+			return affinityStateError()
+		}
+		s.nativeContent.WriteString(content.String())
+		s.nativeHold = true
+	case "content_block_stop":
+		if s.nativeBlock == nil {
+			break
+		}
+		if root.Get("index").Type != gjson.Number || root.Get("index").Int() != s.nativeIndex {
+			return affinityStateError()
+		}
+		// Assemble once, not once per delta (which would be quadratic).
+		if s.nativeHold {
+			var errSet error
+			s.nativeBlock, errSet = sjson.SetBytes(s.nativeBlock, "content", s.nativeContent.String())
+			if errSet != nil {
+				return affinityStateError()
+			}
+		}
+		// Reuse the output collector and replay identity, never hash SSE JSON.
+		if errSave := s.record([]byte(`{"content":[` + string(s.nativeBlock) + `]}`)); errSave != nil {
+			return errSave
+		}
+		s.nativeBlock, s.nativeHold = nil, false
+		s.nativeContent.Reset()
+	case "message_stop":
+		if s.nativeHold {
+			return affinityStateError()
+		}
+	}
+	return s.record(data)
+}
+
+func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 	// Scanner removes line endings. A new recognized line unit ends the
 	// previous control unit; otherwise a fragmented raw control line continues.
 	_, _, scannerLine := extractSSEDataLine(payload)
@@ -146,13 +335,13 @@ func (s *compactionOutputStream) push(payload []byte) ([]byte, error) {
 		}
 		data := compactionSSEData(s.parsed)
 		if !gjson.ValidBytes(data) && !bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-			if compactionSSEFrameEnd(s.parsed) != 0 || len(s.pending) > 32<<20 {
+			if compactionSSEFrameEnd(s.parsed) != 0 || len(s.pending) > maxCompactionJSONBytes {
 				s.pending, s.parsed, s.units = nil, nil, nil
 				return nil, affinityStateError()
 			}
 			return nil, nil
 		}
-		if errSave := s.record(data); errSave != nil {
+		if errSave := s.recordEvent(data); errSave != nil {
 			s.pending, s.parsed, s.units = nil, nil, nil
 			return nil, errSave
 		}
@@ -198,7 +387,7 @@ func (s *compactionOutputStream) push(payload []byte) ([]byte, error) {
 			s.pending = nil
 			return nil, affinityStateError()
 		}
-		if errSave := s.record(data); errSave != nil {
+		if errSave := s.recordEvent(data); errSave != nil {
 			s.pending = nil
 			return nil, errSave
 		}
@@ -209,7 +398,7 @@ func (s *compactionOutputStream) push(payload []byte) ([]byte, error) {
 		s.pending = nil
 	}
 	// Do not buffer an unbounded malformed event or emit an unregistered block.
-	if len(s.pending) > 32<<20 {
+	if len(s.pending) > maxCompactionJSONBytes {
 		s.pending = nil
 		return nil, affinityStateError()
 	}
@@ -254,8 +443,8 @@ func (s *compactionOutputStream) finish() ([]byte, error) {
 	if errSave != nil {
 		return nil, errSave
 	}
-	if len(s.pending) != 0 {
-		s.pending = nil
+	if len(s.pending) != 0 || s.nativeHold {
+		s.pending, s.nativeWire, s.nativeBlock = nil, nil, nil
 		return nil, affinityStateError()
 	}
 	return ready, nil
