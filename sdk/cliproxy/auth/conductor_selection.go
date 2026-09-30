@@ -1016,6 +1016,9 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		return nil, false, nil
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
+		if errValidate := validateCompactionSelectedAuthWithRefresh(ctx, selected.ID, opts, true); errValidate != nil {
+			return nil, true, errValidate
+		}
 		return selected, true, nil
 	}
 
@@ -1023,7 +1026,13 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if !okStrategy {
 		return nil, false, nil
 	}
-	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	selected, builtinHandled, errBuiltin := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	if errBuiltin == nil && builtinHandled && selected != nil {
+		if errValidate := validateCompactionSelectedAuthWithRefresh(ctx, selected.ID, opts, true); errValidate != nil {
+			return nil, true, errValidate
+		}
+	}
+	return selected, builtinHandled, errBuiltin
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {

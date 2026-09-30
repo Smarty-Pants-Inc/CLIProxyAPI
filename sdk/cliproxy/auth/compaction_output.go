@@ -175,10 +175,28 @@ type compactionOutputStream struct {
 	pending     []byte
 	record      func([]byte) error
 	controlLine bool
-	// Parser-only line boundaries must never change exposed wire units.
-	parsed   []byte
-	units    [][]byte
-	released [][]byte
+	// Only new bytes enter the lexical checkpoint. Scanner line boundaries
+	// affect data, never the retained original wire units.
+	units       [][]byte
+	released    [][]byte
+	data        []byte
+	linePrefix  []byte
+	lineMode    byte // 0 prefix, 1 data, 2 control, 3 raw JSON
+	lineBytes   int
+	lineCR      bool
+	dataSpace   bool
+	jsonDepth   int
+	jsonStarted bool
+	jsonString  bool
+	jsonEscape  bool
+	jsonDone    bool
+	jsonBad     bool
+	jsonScalar  byte // 1 quoted string, 2 number/literal
+	jsonLiteral string
+	jsonScalarPos int
+	jsonNumberLast byte
+	framed      bool // literal SSE data LF requires a blank-line boundary
+	sse         bool
 
 	// Native Claude sends a skeleton followed by content deltas. Only these
 	// signed block bytes wait for completion; ordinary SSE remains immediate.
@@ -190,6 +208,7 @@ type compactionOutputStream struct {
 	nativeWire    [][]byte
 	nativeBytes   int
 	nativeContent strings.Builder
+	nativeContentType gjson.Type
 }
 
 func (s *compactionOutputStream) push(payload []byte) ([]byte, error) {
@@ -212,11 +231,11 @@ func (s *compactionOutputStream) push(payload []byte) ([]byte, error) {
 		units = [][]byte{ready}
 	}
 	for _, unit := range units {
-		s.nativeBytes += len(unit)
-		if s.nativeBytes > maxCompactionJSONBytes {
+		if len(unit) > maxCompactionJSONBytes-s.nativeBytes || len(s.nativeWire) >= maxCompactionWireUnits {
 			s.nativeWire, s.nativeBlock = nil, nil
 			return nil, affinityStateError()
 		}
+		s.nativeBytes += len(unit)
 		s.nativeWire = append(s.nativeWire, bytes.Clone(unit))
 	}
 	if s.nativeHold {
@@ -247,6 +266,7 @@ func (s *compactionOutputStream) recordEvent(data []byte) error {
 		}
 		s.nativeBlock = []byte(block.Raw)
 		s.nativeIndex = root.Get("index").Int()
+		s.nativeContentType = block.Get("content").Type
 		s.nativeContent.Reset()
 		if block.Get("content").Type == gjson.String {
 			s.nativeContent.WriteString(block.Get("content").String())
@@ -263,8 +283,7 @@ func (s *compactionOutputStream) recordEvent(data []byte) error {
 		if content.Type != gjson.String {
 			return affinityStateError()
 		}
-		previous := gjson.GetBytes(s.nativeBlock, "content")
-		if previous.Exists() && previous.Type != gjson.String && previous.Type != gjson.Null {
+		if s.nativeContentType != gjson.String && s.nativeContentType != gjson.Null {
 			return affinityStateError()
 		}
 		if s.nativeContent.Len()+len(content.String()) > maxCompactionJSONBytes {
@@ -301,101 +320,295 @@ func (s *compactionOutputStream) recordEvent(data []byte) error {
 	return s.record(data)
 }
 
+// The unit ceiling bounds slice headers even for one-byte SDK fragments. It
+// admits the 100k-line (<1 MiB) Scanner event independently of the byte ceiling.
+const maxCompactionWireUnits = 1 << 20
+
+// Test-only observation uses a private context key, not a public SDK option.
+// The receipt counts actual lexical visits and the single completed-data scan.
+type compactionFramingWorkKey struct{}
+
+func (s *compactionOutputStream) framingWork(n int) {
+	if s.ctx != nil {
+		if observe, ok := s.ctx.Value(compactionFramingWorkKey{}).(func(int)); ok {
+			observe(n)
+		}
+	}
+}
+
+func (s *compactionOutputStream) dataByte(b byte) error {
+	if len(s.data) >= maxCompactionJSONBytes {
+		return affinityStateError()
+	}
+	s.framingWork(1)
+	s.data = append(s.data, b)
+	if s.jsonString {
+		if s.jsonEscape {
+			s.jsonEscape = false
+		} else if b == '\\' {
+			s.jsonEscape = true
+		} else if b == '"' {
+			s.jsonString = false
+			if s.jsonScalar == 1 { s.jsonDone = true }
+		}
+		return nil
+	}
+	if s.jsonScalar == 2 {
+		if b == ' ' || b == '\t' || b == '\r' || b == '\n' { return nil }
+		if s.jsonLiteral != "" {
+			if s.jsonScalarPos >= len(s.jsonLiteral) || b != s.jsonLiteral[s.jsonScalarPos] {
+				s.jsonBad, s.jsonDone = true, true
+			} else {
+				s.jsonScalarPos++
+				s.jsonDone = s.jsonScalarPos == len(s.jsonLiteral)
+			}
+		} else {
+			s.jsonNumberLast = b
+		}
+		return nil
+	}
+	if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+		return nil
+	}
+	if s.jsonDone {
+		s.jsonBad = true
+		return nil
+	}
+	if !s.jsonStarted {
+		s.jsonStarted = true
+		if b == '"' {
+			s.jsonScalar = 1
+		} else if b != '{' && b != '[' {
+			// A scalar has no nesting checkpoint. Inspect it once at the
+			// unit/blank-line boundary, never on each raw fragment byte.
+			s.jsonScalar = 2
+			s.jsonNumberLast = b
+			switch b {
+			case 't': s.jsonLiteral = "true"
+			case 'f': s.jsonLiteral = "false"
+			case 'n': s.jsonLiteral = "null"
+			}
+			s.jsonScalarPos = 1
+			if s.jsonLiteral == "" && b != '-' && (b < '0' || b > '9') { s.jsonBad, s.jsonDone = true, true }
+			return nil
+		}
+	}
+	switch b {
+	case '"':
+		s.jsonString = true
+	case '{', '[':
+		s.jsonDepth++
+		if s.jsonDepth > maxCompactionJSONDepth {
+			return affinityStateError()
+		}
+	case '}', ']':
+		s.jsonDepth--
+		if s.jsonDepth <= 0 {
+			s.jsonDone = true
+		}
+	}
+	return nil
+}
+
+func (s *compactionOutputStream) resetLine() {
+	s.linePrefix = nil
+	s.lineMode, s.lineBytes = 0, 0
+	s.lineCR, s.dataSpace, s.controlLine = false, false, false
+}
+
+func (s *compactionOutputStream) resetData() {
+	s.data = nil
+	s.jsonDepth = 0
+	s.jsonScalar, s.jsonNumberLast, s.jsonScalarPos = 0, 0, 0
+	s.jsonLiteral = ""
+	s.framed, s.sse = false, false
+	s.jsonStarted, s.jsonString, s.jsonEscape, s.jsonDone, s.jsonBad = false, false, false, false, false
+}
+
+func (s *compactionOutputStream) releaseUnits() {
+	s.released = append(s.released, s.units...)
+	s.pending, s.units = nil, nil
+}
+
+func (s *compactionOutputStream) completeCandidate() bool {
+	return s.jsonDone || (s.jsonScalar == 2 && s.jsonLiteral == "" && s.jsonNumberLast >= '0' && s.jsonNumberLast <= '9')
+}
+
+func (s *compactionOutputStream) completeEvent() error {
+	data := bytes.TrimSpace(s.data)
+	s.framingWork(len(data))
+	// This is the only whole-data syntax scan. The recorder still owns
+	// recursive duplicate rejection, collection and protected publication.
+	if s.jsonBad || (!bytes.Equal(data, []byte("[DONE]")) && !gjson.ValidBytes(data)) {
+		return affinityStateError()
+	}
+	if err := s.recordEvent(data); err != nil {
+		return err
+	}
+	s.releaseUnits()
+	s.resetData()
+	return nil
+}
+
+func (s *compactionOutputStream) endLine() error {
+	if s.lineMode == 1 || s.lineMode == 3 {
+		if err := s.dataByte('\n'); err != nil {
+			return err
+		}
+	}
+	s.resetLine()
+	return nil
+}
+
 func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
-	// Scanner removes line endings. A new recognized line unit ends the
-	// previous control unit; otherwise a fragmented raw control line continues.
+	s.released = nil
 	_, _, scannerLine := extractSSEDataLine(payload)
-	if s.controlLine && (compactionControlLine(payload) || scannerLine ||
-		(gjson.ValidBytes(payload) && bytes.HasPrefix(bytes.TrimSpace(payload), []byte("{")))) {
-		s.controlLine = false
-	}
-	// Match the HTTP validator's recognized-unit boundary rule, but retain
-	// original chunks separately. Raw LF/CRLF fragments need no synthesis.
-	if len(s.pending) > 0 && len(payload) > 0 &&
-		!bytes.HasSuffix(s.pending, []byte("\n")) && !bytes.HasPrefix(payload, []byte("\n")) &&
-		(scannerLine || bytes.HasPrefix(payload, []byte("event:"))) {
-		if s.parsed == nil {
-			s.parsed = bytes.Clone(s.pending)
-			s.units = [][]byte{bytes.Clone(s.pending)}
+	recognized := scannerLine || compactionControlLine(payload)
+	if s.lineBytes > 0 && recognized && !(s.jsonStarted && !s.sse) {
+		// Scanner strips delimiters; only the new unit's prefix is examined.
+		if err := s.endLine(); err != nil {
+			return nil, err
 		}
-		s.parsed = append(s.parsed, '\n')
-	}
-	if s.parsed != nil {
-		s.parsed = append(s.parsed, payload...)
-		s.pending = append(s.pending, payload...)
-		if len(payload) > 0 {
-			s.units = append(s.units, bytes.Clone(payload))
+	} else if s.controlLine {
+		trimmed := bytes.TrimSpace(payload)
+		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+			s.resetLine()
 		}
-		data := compactionSSEData(s.parsed)
-		if !gjson.ValidBytes(data) && !bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-			if compactionSSEFrameEnd(s.parsed) != 0 || len(s.pending) > maxCompactionJSONBytes {
-				s.pending, s.parsed, s.units = nil, nil, nil
-				return nil, affinityStateError()
+	}
+	start := 0
+	hold := func(end int) error {
+		if end == start {
+			return nil
+		}
+		if len(s.units) >= maxCompactionWireUnits {
+			return affinityStateError()
+		}
+		s.units = append(s.units, bytes.Clone(payload[start:end]))
+		start = end
+		return nil
+	}
+	fail := func(err error) ([]byte, error) {
+		s.pending, s.units, s.released = nil, nil, nil
+		s.resetLine()
+		s.resetData()
+		return nil, err
+	}
+	for i, b := range payload {
+		if i&1023 == 0 && s.ctx != nil {
+			if err := compactionCheckContext(s.ctx); err != nil {
+				return fail(err)
 			}
-			return nil, nil
 		}
-		if errSave := s.recordEvent(data); errSave != nil {
-			s.pending, s.parsed, s.units = nil, nil, nil
-			return nil, errSave
+		// Bound both raw wire and unit headers BEFORE their append, including
+		// complete events that could otherwise bypass the old partial limit.
+		if len(s.pending) >= maxCompactionJSONBytes || len(s.units) >= maxCompactionWireUnits {
+			return fail(affinityStateError())
 		}
-		ready := s.pending
-		s.released = s.units
-		s.pending, s.parsed, s.units = nil, nil, nil
-		return ready, nil
-	}
-	s.pending = append(s.pending, payload...)
-	var ready []byte
-	for len(s.pending) > 0 {
-		// Control lines contain no signed data. Release even bare Scanner
-		// comments/event:/id:/retry: units promptly, without adding delimiters.
-		if s.controlLine || compactionControlLine(s.pending) {
-			end := len(s.pending)
-			s.controlLine = true
-			if newline := bytes.IndexByte(s.pending, '\n'); newline >= 0 {
-				end = newline + 1
-				s.controlLine = false
+		s.pending = append(s.pending, b)
+		s.framingWork(1)
+		if b == '\n' {
+			blank := s.lineBytes == 0 || (s.lineBytes == 1 && s.lineCR)
+			if s.lineMode == 1 {
+				s.framed = true
 			}
-			ready = append(ready, s.pending[:end]...)
-			s.pending = s.pending[end:]
+			completed := blank && s.completeCandidate()
+			if completed {
+				if err := hold(i+1); err != nil {
+					return fail(err)
+				}
+				if err := s.completeEvent(); err != nil {
+					return fail(err)
+				}
+			} else if blank && len(s.data) > 0 && s.sse {
+				return fail(affinityStateError())
+			} else if len(s.data) == 0 && len(s.linePrefix) == 0 {
+				if err := hold(i+1); err != nil {
+					return fail(err)
+				}
+				s.releaseUnits()
+			}
+			if completed {
+				s.resetLine()
+			} else if err := s.endLine(); err != nil {
+				return fail(err)
+			}
 			continue
 		}
-		if len(bytes.TrimSpace(s.pending)) == 0 {
-			ready = append(ready, s.pending...)
-			s.pending = nil
-			break
-		}
-		end := compactionSSEFrameEnd(s.pending)
-		if end == 0 {
-			// Most executors emit a complete JSON event per chunk without SSE
-			// separators; waiting for a separator would deadlock their consumers.
-			data := compactionSSEData(s.pending)
-			if !gjson.ValidBytes(data) && !bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-				break
+		s.lineBytes++
+		s.lineCR = b == '\r'
+		switch s.lineMode {
+		case 1:
+			if s.dataSpace {
+				s.dataSpace = false
+				if b == ' ' {
+					continue
+				}
 			}
-			end = len(s.pending)
+			if err := s.dataByte(b); err != nil {
+				return fail(err)
+			}
+		case 2:
+			// Control bytes never enter JSON, even inside a held SSE event.
+		case 3:
+			if err := s.dataByte(b); err != nil {
+				return fail(err)
+			}
+		default:
+			// Once raw JSON starts, later line prefixes are JSON bytes, not
+			// SSE controls that could hide an invalid suffix from validation.
+			if s.jsonStarted && !s.sse {
+				s.lineMode = 3
+				if err := s.dataByte(b); err != nil {
+					return fail(err)
+				}
+				continue
+			}
+			if len(s.linePrefix) == 0 && (b == ' ' || b == '\t' || b == '\r') {
+				continue
+			}
+			s.linePrefix = append(s.linePrefix, b)
+			prefix := s.linePrefix
+			if bytes.Equal(prefix, []byte("data:")) {
+				s.sse = true
+				s.lineMode, s.dataSpace = 1, true
+				s.linePrefix = nil
+				continue
+			}
+			if compactionControlLine(prefix) {
+				s.lineMode, s.controlLine = 2, true
+				s.linePrefix = nil
+				continue
+			}
+			possible := false
+			for _, name := range []string{"data:", "event:", "id:", "retry:"} {
+				if bytes.HasPrefix([]byte(name), prefix) {
+					possible = true
+					break
+				}
+			}
+			if possible {
+				continue
+			}
+			s.lineMode, s.linePrefix = 3, nil
+			for _, value := range prefix {
+				if err := s.dataByte(value); err != nil {
+					return fail(err)
+				}
+			}
 		}
-		frame := s.pending[:end]
-		data := compactionSSEData(frame)
-		if !gjson.ValidBytes(data) && !bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-			s.pending = nil
-			return nil, affinityStateError()
+	}
+	if err := hold(len(payload)); err != nil {
+		return fail(err)
+	}
+	if s.completeCandidate() && !s.framed {
+		if err := s.completeEvent(); err != nil {
+			return fail(err)
 		}
-		if errSave := s.recordEvent(data); errSave != nil {
-			s.pending = nil
-			return nil, errSave
-		}
-		ready = append(ready, frame...)
-		s.pending = s.pending[end:]
+		s.resetLine()
+	} else if len(s.data) == 0 && len(s.linePrefix) == 0 && s.lineMode != 1 {
+		s.releaseUnits()
 	}
-	if len(s.pending) == 0 {
-		s.pending = nil
-	}
-	// Do not buffer an unbounded malformed event or emit an unregistered block.
-	if len(s.pending) > maxCompactionJSONBytes {
-		s.pending = nil
-		return nil, affinityStateError()
-	}
-	return ready, nil
+	return bytes.Join(s.released, nil), nil
 }
 
 // pushChunks is the Manager boundary: synthesized parser separators are not

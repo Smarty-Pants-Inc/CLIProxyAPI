@@ -50,20 +50,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	auth, errPick := origin.pick(ctx, provider, model, opts, auths)
 	if errPick == nil && auth != nil {
 		keys, _ := opts.Metadata[compactionAffinityMetadataKey].([]string)
-		if len(keys) > 0 {
-			if err := compactionCheckContext(ctx); err != nil {
-				return nil, err
-			}
-			if errTouch := origin.cache.touchProtectedBindings(ctx, auth.ID, keys...); errTouch != nil {
-				if err := compactionCheckContext(ctx); err != nil {
-					return nil, err
-				}
-				if origin.cache.PersistenceError() != nil {
-					return nil, affinityStateError()
-				}
-				return nil, compactedAuthUnavailableError()
-			}
+		if errRefresh := refreshCompactionSignerBindings(ctx, origin, auth.ID, keys); errRefresh != nil {
+			return nil, errRefresh
 		}
+		rememberCompactionSelectionRefresh(origin, auth.ID, keys, opts)
 	}
 	if errState := origin.cache.PersistenceError(); errState != nil {
 		return nil, affinityStateError()
@@ -95,6 +85,8 @@ func (m *Manager) prepareSessionAffinitySelection(provider, model string, opts c
 func (m *Manager) PrepareCompactionRequest(model string, opts cliproxyexecutor.Options, contexts ...context.Context) (cliproxyexecutor.Options, error) {
 	routeModel := authSelectionModelFromOptions(opts, model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	// Root/bootstrap re-entry must not inherit an earlier selection's receipt.
+	delete(opts.Metadata, compactionSelectionRefreshMetadataKey)
 	if len(contexts) > 0 && contexts[0] != nil {
 		opts.Metadata[compactionRequestContextMetadataKey] = contexts[0]
 	}

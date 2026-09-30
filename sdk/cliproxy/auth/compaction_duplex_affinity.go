@@ -51,6 +51,8 @@ func (m *Manager) prepareCompactionDuplexValidation(opts cliproxyexecutor.Option
 		if authID == "" || authID != signerID {
 			return &Error{Code: "compaction_affinity_conflict", Message: "signed compaction account does not match this websocket; start a new connection on its producing account", HTTPStatus: http.StatusConflict}
 		}
-		return nil
+		// Each create/append/steer is a new admission on this socket. Do not
+		// reuse the initial selection's receipt for these later messages.
+		return refreshCompactionSignerBindings(ctx, origin, authID, keys)
 	}
 }

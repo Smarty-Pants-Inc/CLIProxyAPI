@@ -112,11 +112,20 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 }
 
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options, producerCancels ...context.CancelFunc) *cliproxyexecutor.StreamResult {
+	return m.wrapStreamResultWithCompletion(ctx, auth, provider, resultModel, routeModel, headers, buffered, remaining, aliasResult, ephemeralResult, opts, nil, producerCancels...)
+}
+
+func (m *Manager) wrapStreamResultWithCompletion(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options, complete func(bool), producerCancels ...context.CancelFunc) *cliproxyexecutor.StreamResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// The consumer retains the live parent context so canceling a rejected
-	// producer cannot suppress delivery of its typed local terminal error.
+	// Exact-connection retirement can end Home and cancel this attempt context.
+	// Only typed local stops use captured root authority for terminal delivery;
+	// ordinary payloads, errors and source ownership remain attempt-scoped.
+	localDeliveryCtx := ctx
+	if requestCtx, ok := opts.Metadata[compactionRequestContextMetadataKey].(context.Context); ok && requestCtx != nil {
+		localDeliveryCtx = requestCtx
+	}
 	cancelProducer := func() {
 		for _, cancel := range producerCancels {
 			if cancel != nil {
@@ -148,12 +157,15 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
 		forwardChunk := func(chunk cliproxyexecutor.StreamChunk) bool {
-			if ctx.Err() != nil {
-				return false
-			}
-			if IsLocalCompactionAffinityStop(chunk.Err) {
-				// Local admission failures are not upstream execution results.
+			localStop := IsLocalCompactionAffinityStop(chunk.Err)
+			deliveryCtx := ctx
+			if localStop {
+				// Set neutral disposition before retirement or any result hook.
 				failed = true
+				deliveryCtx = localDeliveryCtx
+			}
+			if deliveryCtx.Err() != nil {
+				return false
 			}
 			if chunk.Err != nil && !failed {
 				failed = true
@@ -171,12 +183,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return false
 			}
 			if chunk.Err != nil {
-				localStop := IsLocalCompactionAffinityStop(chunk.Err)
 				if localStop {
 					cancelProducer()
+					if deliveryCtx.Err() != nil {
+						return false
+					}
 				}
 				select {
-				case <-ctx.Done():
+				case <-deliveryCtx.Done():
 					return false
 				case out <- chunk:
 				}
@@ -217,11 +231,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			return true
 		}
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if !forward {
+				return ctx.Err() == nil
+			}
+			if IsLocalCompactionAffinityStop(chunk.Err) {
+				return forwardChunk(chunk)
+			}
 			if ctx.Err() != nil {
 				return false
-			}
-			if !forward {
-				return true
 			}
 			if observer != nil && len(chunk.Payload) > 0 {
 				payloads, errSave := observer.pushChunks(chunk.Payload)
@@ -293,11 +310,26 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed && ctx.Err() == nil && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
+			if complete != nil {
+				complete(true)
+			}
 			completed = true
 			m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: true, Options: opts}, auth, ephemeralResult)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+}
+
+// streamAttemptCancel rejects the consumer disposition before canceling the
+// producer. Completion callbacks are idempotent, so an accepted stream's normal
+// deferred cancellation cannot retire a connection already approved for reuse.
+func streamAttemptCancel(cancel context.CancelFunc, result *cliproxyexecutor.StreamResult) context.CancelFunc {
+	return func() {
+		if result != nil && result.Complete != nil {
+			result.Complete(false)
+		}
+		cancel()
+	}
 }
 
 func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, routing *apiKeyModelRoutingSnapshot, allowRetry bool, ephemeralResult bool) (*cliproxyexecutor.StreamResult, error) {
@@ -340,7 +372,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		// Own only the producer context. Keep request authority/metadata and
 		// consumer delivery on the parent, never in a retained cancelable child.
 		producerCtx, cancelAttempt := context.WithCancel(ctx)
+		execOpts.StreamResultValidation = true
 		streamResult, errStream := executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
+		cancelAttempt = streamAttemptCancel(cancelAttempt, streamResult)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
 			upstreamErr = errStream
@@ -363,6 +397,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					producerCtx, cancelAttempt = context.WithCancel(ctx)
 					startRetry := time.Now()
 					streamResult, errStream = executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
+					cancelAttempt = streamAttemptCancel(cancelAttempt, streamResult)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
 						upstreamErr = errStream
@@ -443,6 +478,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					producerCtx, cancelAttempt = context.WithCancel(ctx)
 					startRetry := time.Now()
 					retryStream, retryErr := executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
+					cancelAttempt = streamAttemptCancel(cancelAttempt, retryStream)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
@@ -563,7 +599,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			remaining = closedCh
 		}
 		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts, cancelAttempt), nil
+		return m.wrapStreamResultWithCompletion(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts, streamResult.Complete, cancelAttempt), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

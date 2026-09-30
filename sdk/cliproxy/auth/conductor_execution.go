@@ -356,6 +356,11 @@ func isRequestTerminatedError(err error) bool {
 
 func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string, selectedAuthIDs ...string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if opts.RequestAfterAuthInterceptor == nil {
+		if len(selectedAuthIDs) > 0 {
+			if errValidate := validateCompactionSelectedAuth(ctx, selectedAuthIDs[0], opts); errValidate != nil {
+				return req, opts, errValidate
+			}
+		}
 		return req, opts, nil
 	}
 	toFormat := requestToFormat(provider, executor, req, opts)
@@ -1194,7 +1199,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
-			if isRequestStopError(errStream) {
+			if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
 				if selection != nil {
 					releaseAttempt()
 					selection.End("local_request_stop")
