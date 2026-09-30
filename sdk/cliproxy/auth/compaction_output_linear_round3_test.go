@@ -89,7 +89,7 @@ func TestCompactionOutputRound3HundredThousandUnitsLinear(t *testing.T) {
 			}
 			last := `data: 0],"item":{"type":"message","content":[]}}`
 			if signed {
-				last = `data: 0],"item":`+producedCompaction+`}`
+				last = `data: 0],"item":` + producedCompaction + `}`
 			}
 			units = append(units, []byte(last))
 			wireBytes, work, records := 0, 0, 0
@@ -107,7 +107,9 @@ func TestCompactionOutputRound3HundredThousandUnitsLinear(t *testing.T) {
 			for _, unit := range units {
 				wireBytes += len(unit)
 				ready, err := observer.pushChunks(unit)
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				for _, output := range ready {
 					if !bytes.Equal(output, units[index]) || records != 1 || registered != signed {
 						t.Fatalf("unit %d changed or not registered before release", index)
@@ -123,7 +125,7 @@ func TestCompactionOutputRound3HundredThousandUnitsLinear(t *testing.T) {
 }
 
 func TestCompactionOutputRound3RawFragmentCheckpointLinear(t *testing.T) {
-	wire := []byte(`data: {"type":"response.output_item.done","padding":"`+strings.Repeat("x", 100000)+`","item":`+producedCompaction+"}\r\n\r\n")
+	wire := []byte(`data: {"type":"response.output_item.done","padding":"` + strings.Repeat("x", 100000) + `","item":` + producedCompaction + "}\r\n\r\n")
 	work, records := 0, 0
 	ctx := Round3FramingWorkContext(context.Background(), func(n int) { work += n })
 	observer := &compactionOutputStream{ctx: ctx, record: func(data []byte) error {
@@ -133,10 +135,14 @@ func TestCompactionOutputRound3RawFragmentCheckpointLinear(t *testing.T) {
 	var delivered []byte
 	for _, b := range wire {
 		ready, err := observer.push([]byte{b})
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		delivered = append(delivered, ready...)
 	}
-	if _, err := observer.finish(); err != nil { t.Fatal(err) }
+	if _, err := observer.finish(); err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(delivered, wire) || records != 1 || work > 3*len(wire) {
 		t.Fatalf("raw wire changed or rescanned: records=%d work=%d bytes=%d", records, work, len(wire))
 	}
@@ -145,7 +151,9 @@ func TestCompactionOutputRound3RawFragmentCheckpointLinear(t *testing.T) {
 func TestCompactionOutputRound3UnitBoundBeforeAppend(t *testing.T) {
 	records := 0
 	observer := &compactionOutputStream{record: func([]byte) error { records++; return nil }}
-	if _, err := observer.pushChunks([]byte(`data: {"padding":"`)); err != nil { t.Fatal(err) }
+	if _, err := observer.pushChunks([]byte(`data: {"padding":"`)); err != nil {
+		t.Fatal(err)
+	}
 	// One-byte raw fragments remain under the 16 MiB byte ceiling, but must
 	// not allocate unbounded unit headers. No completed event can escape it.
 	for i := 1; i < maxCompactionWireUnits; i++ {
@@ -160,7 +168,7 @@ func TestCompactionOutputRound3UnitBoundBeforeAppend(t *testing.T) {
 
 func TestCompactionOutputRound3RawFrameRejectsMultipleRoots(t *testing.T) {
 	for _, wire := range []string{
-		`data: {"type":"response.output_item.done","item":`+producedCompaction+"}\ndata: {\"extra\":1}\n\n",
+		`data: {"type":"response.output_item.done","item":` + producedCompaction + "}\ndata: {\"extra\":1}\n\n",
 		"{\"a\":1}\n{\"b\":2}",
 		"{\"a\":1}\nid: extra",
 		"{\"a\":1}\nevent: extra",
@@ -171,28 +179,39 @@ func TestCompactionOutputRound3RawFrameRejectsMultipleRoots(t *testing.T) {
 		// permit trailing whitespace and cannot be revoked by later units.
 		for split := 0; split <= len(wire); split++ {
 			firstLF := strings.IndexByte(wire, '\n')
-			if split == firstLF || (wire[0] == '{' && split == firstLF+1) { continue }
+			if split == firstLF || (wire[0] == '{' && split == firstLF+1) {
+				continue
+			}
 			records := 0
 			observer := &compactionOutputStream{record: func([]byte) error { records++; return nil }}
 			parts := []string{wire}
-			if split > 0 && split < len(wire) { parts = []string{wire[:split], wire[split:]} }
+			if split > 0 && split < len(wire) {
+				parts = []string{wire[:split], wire[split:]}
+			}
 			refused := false
 			for _, part := range parts {
 				ready, err := observer.pushChunks([]byte(part))
-				if err != nil { refused = true; break }
-				if len(ready) > 0 { t.Fatalf("split %d released multi-root raw frame", split) }
+				if err != nil {
+					refused = true
+					break
+				}
+				if len(ready) > 0 {
+					t.Fatalf("split %d released multi-root raw frame", split)
+				}
 			}
 			if !refused {
 				_, err := observer.finishChunks()
 				refused = err != nil
 			}
-			if !refused || records != 0 { t.Fatalf("split %d accepted/registered multi-root raw frame", split) }
+			if !refused || records != 0 {
+				t.Fatalf("split %d accepted/registered multi-root raw frame", split)
+			}
 		}
 	}
 }
 
 func TestCompactionOutputRound3SignedRawControlSuffixRejectsBeforeRegistration(t *testing.T) {
-	root := `{"type":"response.output_item.done","item":`+producedCompaction+`}`
+	root := `{"type":"response.output_item.done","item":` + producedCompaction + `}`
 	// Prove this fixture carries recognized signer evidence, not just an
 	// ordinary JSON object whose callback happens to be counted.
 	if keys := compactionOutputKeys([]byte(root)); len(keys) != 1 {
@@ -205,7 +224,7 @@ func TestCompactionOutputRound3SignedRawControlSuffixRejectsBeforeRegistration(t
 				records++
 				return ValidateCompactionJSON(context.Background(), data)
 			}}
-			if ready, err := observer.pushChunks([]byte(root+"\n"+suffix)); err == nil || len(ready) != 0 || records != 0 {
+			if ready, err := observer.pushChunks([]byte(root + "\n" + suffix)); err == nil || len(ready) != 0 || records != 0 {
 				t.Fatalf("signed raw suffix registered/released: units=%d records=%d error=%v", len(ready), records, err)
 			}
 		})
@@ -221,7 +240,9 @@ func TestCompactionOutputRound3LeadingSSEControlsAndSeparateRawUnits(t *testing.
 		records := 0
 		observer := &compactionOutputStream{record: func(data []byte) error {
 			records++
-			if string(data) != `{"a":1}` { t.Fatalf("SSE controls entered data: %q", data) }
+			if string(data) != `{"a":1}` {
+				t.Fatalf("SSE controls entered data: %q", data)
+			}
 			return nil
 		}}
 		ready, err := observer.push([]byte(wire))
@@ -236,9 +257,13 @@ func TestCompactionOutputRound3LeadingSSEControlsAndSeparateRawUnits(t *testing.
 	}}
 	for _, wire := range []string{"{\"a\":1}\n", "{\"b\":2}\t\r\n"} {
 		ready, err := observer.push([]byte(wire))
-		if err != nil || string(ready) != wire { t.Fatalf("separate raw unit changed/refused: %q %v", ready, err) }
+		if err != nil || string(ready) != wire {
+			t.Fatalf("separate raw unit changed/refused: %q %v", ready, err)
+		}
 	}
-	if _, err := observer.finish(); err != nil || records != 2 { t.Fatalf("separate raw units: records=%d error=%v", records, err) }
+	if _, err := observer.finish(); err != nil || records != 2 {
+		t.Fatalf("separate raw units: records=%d error=%v", records, err)
+	}
 }
 
 func TestCompactionOutputRound3NativeLargeInitialSmallDeltasLinear(t *testing.T) {
@@ -247,62 +272,76 @@ func TestCompactionOutputRound3NativeLargeInitialSmallDeltasLinear(t *testing.T)
 	assembled := false
 	observer := &compactionOutputStream{native: true, ctx: context.Background(), record: func(data []byte) error {
 		if bytes.HasPrefix(data, []byte(`{"content":[`)) {
-			want := `{"content":[{"type":"compaction","content":"`+initial+strings.Repeat("x", count)+`"}]}`
+			want := `{"content":[{"type":"compaction","content":"` + initial + strings.Repeat("x", count) + `"}]}`
 			assembled = string(data) == want
 		}
 		return nil
 	}}
-	start := []byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"compaction\",\"content\":\""+initial+"\"}}\n\n")
-	if ready, err := observer.pushChunks(start); err != nil || len(ready) == 0 { t.Fatalf("nonempty native start=%v %v", len(ready), err) }
+	start := []byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"compaction\",\"content\":\"" + initial + "\"}}\n\n")
+	if ready, err := observer.pushChunks(start); err != nil || len(ready) == 0 {
+		t.Fatalf("nonempty native start=%v %v", len(ready), err)
+	}
 	delta := []byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"content\":\"x\"}}\n\n")
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	for i := 0; i < count; i++ {
-		if ready, err := observer.pushChunks(delta); err != nil || len(ready) != 0 { t.Fatalf("delta %d=%v %v", i, len(ready), err) }
+		if ready, err := observer.pushChunks(delta); err != nil || len(ready) != 0 {
+			t.Fatalf("delta %d=%v %v", i, len(ready), err)
+		}
 	}
 	if ready, err := observer.pushChunks([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")); err != nil || len(ready) != count+1 || !assembled {
 		t.Fatalf("native stop=%d %v assembled=%v", len(ready), err, assembled)
 	}
 	runtime.ReadMemStats(&after)
-	if allocated := after.TotalAlloc-before.TotalAlloc; allocated > 64<<20 {
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 64<<20 {
 		t.Fatalf("native initial content rescanned per delta: allocated=%d", allocated)
 	}
 }
 
 func TestCompactionOutputRound3RawPrettyAndLiteralFragments(t *testing.T) {
-	for _, wire := range []string{"{\"a\":\n 1}", "{\"a\":\n\n 1}\r\n", "[\n1,2\n]\n", "{\"a\":1}\n", `{"a":"escaped\\\"text"}`+"\t\r\n"} {
+	for _, wire := range []string{"{\"a\":\n 1}", "{\"a\":\n\n 1}\r\n", "[\n1,2\n]\n", "{\"a\":1}\n", `{"a":"escaped\\\"text"}` + "\t\r\n"} {
 		records := 0
 		observer := &compactionOutputStream{record: func(data []byte) error {
 			records++
 			return ValidateCompactionJSON(context.Background(), data)
 		}}
 		ready, err := observer.push([]byte(wire))
-		if err != nil || string(ready) != wire || records != 1 { t.Fatalf("raw pretty unit=%q err=%v records=%d", ready, err, records) }
-		if _, err := observer.finish(); err != nil { t.Fatal(err) }
+		if err != nil || string(ready) != wire || records != 1 {
+			t.Fatalf("raw pretty unit=%q err=%v records=%d", ready, err, records)
+		}
+		if _, err := observer.finish(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, literal := range []string{"true", "false", "null", `"escaped\\\"text"`} {
-		wire := "data: "+literal
+		wire := "data: " + literal
 		for split := 1; split < len(wire); split++ {
 			records := 0
 			observer := &compactionOutputStream{record: func([]byte) error { records++; return nil }}
 			var delivered []byte
 			for _, part := range []string{wire[:split], wire[split:]} {
 				ready, err := observer.push([]byte(part))
-				if err != nil { t.Fatalf("literal %s split %d: %v", literal, split, err) }
+				if err != nil {
+					t.Fatalf("literal %s split %d: %v", literal, split, err)
+				}
 				delivered = append(delivered, ready...)
 			}
-			if string(delivered) != wire || records != 1 { t.Fatalf("literal split %d changed", split) }
+			if string(delivered) != wire || records != 1 {
+				t.Fatalf("literal split %d changed", split)
+			}
 		}
 	}
 }
 
 func TestCompactionOutputRound3AllowedScalarAndDoneUnits(t *testing.T) {
 	for _, value := range []string{"true", "42", `"ordinary"`, "null", "[DONE]"} {
-		for _, wire := range []string{value, "data: "+value, "data: "+value+"\r\n\r\n"} {
+		for _, wire := range []string{value, "data: " + value, "data: " + value + "\r\n\r\n"} {
 			records := 0
 			observer := &compactionOutputStream{record: func(data []byte) error {
 				records++
-				if string(data) != value { t.Fatalf("scalar changed: %q", data) }
+				if string(data) != value {
+					t.Fatalf("scalar changed: %q", data)
+				}
 				return nil
 			}}
 			ready, err := observer.push([]byte(wire))
@@ -315,25 +354,35 @@ func TestCompactionOutputRound3AllowedScalarAndDoneUnits(t *testing.T) {
 
 func TestCompactionOutputRound3RawStringSSEPrefixFragments(t *testing.T) {
 	for _, prefix := range []string{"id:", "retry:", ":", "data:", "event:"} {
-		wire := `{"a":"`+prefix+` ordinary"}`
+		wire := `{"a":"` + prefix + ` ordinary"}`
 		for split := 1; split < len(wire); split++ {
 			records := 0
 			observer := &compactionOutputStream{record: func(data []byte) error {
 				records++
-				if string(data) != wire { t.Fatalf("prefix %q split %d: parser changed raw string: %q", prefix, split, data) }
+				if string(data) != wire {
+					t.Fatalf("prefix %q split %d: parser changed raw string: %q", prefix, split, data)
+				}
 				return ValidateCompactionJSON(context.Background(), data)
 			}}
 			var delivered []byte
 			for _, part := range []string{wire[:split], wire[split:]} {
 				ready, err := observer.pushChunks([]byte(part))
-				if err != nil { t.Fatalf("prefix %q split %d: %v", prefix, split, err) }
+				if err != nil {
+					t.Fatalf("prefix %q split %d: %v", prefix, split, err)
+				}
 				for _, unit := range ready {
-					if records != 1 { t.Fatalf("raw string released before record: prefix %q split %d", prefix, split) }
+					if records != 1 {
+						t.Fatalf("raw string released before record: prefix %q split %d", prefix, split)
+					}
 					delivered = append(delivered, unit...)
 				}
 			}
-			if ready, err := observer.finishChunks(); err != nil || len(ready) != 0 { t.Fatalf("raw string tail: %q %v", ready, err) }
-			if string(delivered) != wire || records != 1 { t.Fatalf("prefix %q split %d: wire changed or records=%d", prefix, split, records) }
+			if ready, err := observer.finishChunks(); err != nil || len(ready) != 0 {
+				t.Fatalf("raw string tail: %q %v", ready, err)
+			}
+			if string(delivered) != wire || records != 1 {
+				t.Fatalf("prefix %q split %d: wire changed or records=%d", prefix, split, records)
+			}
 		}
 	}
 }
@@ -345,27 +394,39 @@ func TestCompactionOutputRound3BareControlThenWhitespaceSignedRaw(t *testing.T) 
 	// recorder probe; do not claim production root-array signer registration.
 	keyPayload := func(data []byte) []byte {
 		trimmed := bytes.TrimSpace(data)
-		if len(trimmed) > 0 && trimmed[0] == '[' { return []byte(`{"output":`+string(trimmed)+`}`) }
+		if len(trimmed) > 0 && trimmed[0] == '[' {
+			return []byte(`{"output":` + string(trimmed) + `}`)
+		}
 		return data
 	}
 	for _, raw := range []string{root, `[{"type":"compaction","encrypted_content":"x"}]`} {
 		wantKeys := compactionOutputKeys(keyPayload([]byte(raw)))
-		if len(wantKeys) != 1 { t.Fatalf("signed fixture has %d keys", len(wantKeys)) }
+		if len(wantKeys) != 1 {
+			t.Fatalf("signed fixture has %d keys", len(wantKeys))
+		}
 		for _, control := range []string{": ping", "event: ordinary", "id: extra", "retry: 1000"} {
 			for _, space := range []string{" ", "\t", "\r", " \t\r "} {
 				records := 0
 				observer := &compactionOutputStream{record: func(data []byte) error {
 					records++
 					keys := compactionOutputKeys(keyPayload(data))
-					if len(keys) != 1 || keys[0] != wantKeys[0] { t.Fatalf("control %q: signed raw key not recognized: %q", control, data) }
+					if len(keys) != 1 || keys[0] != wantKeys[0] {
+						t.Fatalf("control %q: signed raw key not recognized: %q", control, data)
+					}
 					return ValidateCompactionJSON(context.Background(), data)
 				}}
 				ready, err := observer.pushChunks([]byte(control))
-				if err != nil || !bytes.Equal(bytes.Join(ready, nil), []byte(control)) || records != 0 { t.Fatalf("bare control not prompt: %q %v records=%d", ready, err, records) }
-				wire := []byte(space+raw)
+				if err != nil || !bytes.Equal(bytes.Join(ready, nil), []byte(control)) || records != 0 {
+					t.Fatalf("bare control not prompt: %q %v records=%d", ready, err, records)
+				}
+				wire := []byte(space + raw)
 				ready, err = observer.pushChunks(wire)
-				if err != nil || records != 1 || !bytes.Equal(bytes.Join(ready, nil), wire) { t.Fatalf("control %q whitespace %q signed raw released without record: %q %v records=%d", control, space, ready, err, records) }
-				if ready, err := observer.finishChunks(); err != nil || len(ready) != 0 { t.Fatalf("signed raw tail: %q %v", ready, err) }
+				if err != nil || records != 1 || !bytes.Equal(bytes.Join(ready, nil), wire) {
+					t.Fatalf("control %q whitespace %q signed raw released without record: %q %v records=%d", control, space, ready, err, records)
+				}
+				if ready, err := observer.finishChunks(); err != nil || len(ready) != 0 {
+					t.Fatalf("signed raw tail: %q %v", ready, err)
+				}
 			}
 		}
 	}
@@ -377,23 +438,37 @@ func TestCompactionOutputRound3ControlFragmentsAndScannerData(t *testing.T) {
 		observer := &compactionOutputStream{record: func([]byte) error { records++; return nil }}
 		for _, part := range parts {
 			ready, err := observer.pushChunks([]byte(part))
-			if err != nil || string(bytes.Join(ready, nil)) != part || records != 0 { t.Fatalf("ordinary control fragment changed: %q %v records=%d", ready, err, records) }
+			if err != nil || string(bytes.Join(ready, nil)) != part || records != 0 {
+				t.Fatalf("ordinary control fragment changed: %q %v records=%d", ready, err, records)
+			}
 		}
-		if _, err := observer.finishChunks(); err != nil { t.Fatal(err) }
+		if _, err := observer.finishChunks(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	records := 0
 	observer := &compactionOutputStream{record: func(data []byte) error {
 		records++
-		if string(data) != "{\"a\":1,\n\"b\":2}" { t.Fatalf("Scanner data lost parser LF: %q", data) }
+		if string(data) != "{\"a\":1,\n\"b\":2}" {
+			t.Fatalf("Scanner data lost parser LF: %q", data)
+		}
 		return ValidateCompactionJSON(context.Background(), data)
 	}}
 	var delivered []byte
 	parts := []string{`data: {"a":1,`, `id: extra`, `data: "b":2}`}
 	for _, part := range parts {
 		ready, err := observer.pushChunks([]byte(part))
-		if err != nil { t.Fatal(err) }
-		for _, unit := range ready { delivered = append(delivered, unit...) }
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, unit := range ready {
+			delivered = append(delivered, unit...)
+		}
 	}
-	if string(delivered) != parts[0]+parts[1]+parts[2] || records != 1 { t.Fatalf("Scanner units changed: %q records=%d", delivered, records) }
-	if _, err := observer.finishChunks(); err != nil { t.Fatal(err) }
+	if string(delivered) != parts[0]+parts[1]+parts[2] || records != 1 {
+		t.Fatalf("Scanner units changed: %q records=%d", delivered, records)
+	}
+	if _, err := observer.finishChunks(); err != nil {
+		t.Fatal(err)
+	}
 }

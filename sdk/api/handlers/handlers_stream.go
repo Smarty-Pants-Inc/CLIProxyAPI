@@ -808,15 +808,19 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 			s.pending = append(s.pending, '\n')
 		}
 	}
+	// Scan only the new bytes (plus one for a split "\n\n"): a multi-line event
+	// arrives one Scanner line per chunk and must not be rescanned per line.
+	searchFrom := max(len(s.pending)-1, 0)
 	s.pending = append(s.pending, chunk...)
 
 	var output []byte
 	for {
-		frameEnd := bytes.Index(s.pending, []byte("\n\n"))
+		frameEnd := bytes.Index(s.pending[searchFrom:], []byte("\n\n"))
 		if frameEnd < 0 {
 			break
 		}
-		frameEnd += 2
+		frameEnd += searchFrom + 2
+		searchFrom = 0
 		frame := s.pending[:frameEnd]
 		if errValidate := validateSSEFrameDataJSON(frame); errValidate != nil {
 			if len(output) > 0 {
@@ -835,6 +839,9 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 		s.pending = s.pending[:0]
 		return output, nil
 	}
+	if sseJSONValidationDataIncomplete(s.pending) {
+		return output, nil
+	}
 	payload, found := sseJSONValidationDataPayload(s.pending)
 	payload = bytes.TrimSpace(payload)
 	if !found || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload) {
@@ -842,6 +849,16 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 		s.pending = s.pending[:0]
 	}
 	return output, nil
+}
+
+// sseJSONValidationDataIncomplete reports, from the last line only, a data
+// payload that cannot be valid JSON yet: no JSON text ends in ',', ':', '[' or
+// '{'. It skips the whole-event rescan that made a 100k-line event quadratic.
+func sseJSONValidationDataIncomplete(pending []byte) bool {
+	line := bytes.TrimSpace(pending[bytes.LastIndexByte(pending, '\n')+1:])
+	data, ok := bytes.CutPrefix(line, []byte("data:"))
+	data = bytes.TrimSpace(data)
+	return ok && len(data) > 0 && bytes.IndexByte([]byte(",:[{"), data[len(data)-1]) >= 0
 }
 
 func (s *sseJSONValidationState) Finish() error {

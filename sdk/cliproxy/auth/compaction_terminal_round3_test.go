@@ -44,9 +44,12 @@ func (e *terminalRound3Executor) ExecuteStream(_ context.Context, a *Auth, _ cor
 }
 
 type terminalRound3Selector struct{ first string }
+
 func (s terminalRound3Selector) Pick(_ context.Context, _, _ string, _ core.Options, candidates []*Auth) (*Auth, error) {
 	for _, a := range candidates {
-		if a.ID == s.first { return a, nil }
+		if a.ID == s.first {
+			return a, nil
+		}
 	}
 	return candidates[0], nil
 }
@@ -55,11 +58,12 @@ type terminalRound3Hook struct {
 	NoopHook
 	results int
 }
+
 func (h *terminalRound3Hook) OnResult(context.Context, Result) { h.results++ }
 
 func terminalRound3Manager(t *testing.T) (*Manager, *terminalRound3Executor, *terminalRound3Hook, []string, string) {
 	t.Helper()
-	ids := []string{t.Name()+"-A", t.Name()+"-B"}
+	ids := []string{t.Name() + "-A", t.Name() + "-B"}
 	model := "terminal-round3-model"
 	hook := &terminalRound3Hook{}
 	m := NewManager(nil, terminalRound3Selector{first: ids[0]}, hook)
@@ -67,7 +71,9 @@ func terminalRound3Manager(t *testing.T) (*Manager, *terminalRound3Executor, *te
 	e := &terminalRound3Executor{}
 	m.RegisterExecutor(e)
 	for _, id := range ids {
-		if _, err := m.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); err != nil { t.Fatal(err) }
+		if _, err := m.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); err != nil {
+			t.Fatal(err)
+		}
 		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 	}
@@ -85,9 +91,17 @@ func terminalRound3Run(ctx context.Context, m *Manager, path, model string, opts
 		return err
 	default:
 		stream, err := m.ExecuteStream(ctx, []string{"codex"}, req, opts)
-		if err != nil { return err }
-		if stream == nil { return fmt.Errorf("nil stream") }
-		for chunk := range stream.Chunks { if chunk.Err != nil { return chunk.Err } }
+		if err != nil {
+			return err
+		}
+		if stream == nil {
+			return fmt.Errorf("nil stream")
+		}
+		for chunk := range stream.Chunks {
+			if chunk.Err != nil {
+				return chunk.Err
+			}
+		}
 		return nil
 	}
 }
@@ -99,7 +113,9 @@ func TestCompactionTerminalRound3PreservesFirstDirectResponse(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%d/later-terminal-%t", path, status, laterTerminates), func(t *testing.T) {
 					m, e, hook, ids, model := terminalRound3Manager(t)
 					before := make(map[string]*Auth)
-					for _, id := range ids { before[id], _ = m.GetByID(id) }
+					for _, id := range ids {
+						before[id], _ = m.GetByID(id)
+					}
 					calls := 0
 					body := []byte("original plugin response\n")
 					headers := http.Header{"Content-Type": {"text/plain"}, "Retry-After": {"7"}, "X-Terminal": {"first", "retained"}}
@@ -107,7 +123,9 @@ func TestCompactionTerminalRound3PreservesFirstDirectResponse(t *testing.T) {
 					opts.RequestAfterAuthInterceptor = func(_ context.Context, in core.RequestAfterAuthInterceptRequest) core.RequestAfterAuthInterceptResponse {
 						calls++
 						if calls == 1 {
-							if in.Metadata[core.SelectedAuthMetadataKey] != ids[0] { t.Errorf("first selected account = %v", in.Metadata[core.SelectedAuthMetadataKey]) }
+							if in.Metadata[core.SelectedAuthMetadataKey] != ids[0] {
+								t.Errorf("first selected account = %v", in.Metadata[core.SelectedAuthMetadataKey])
+							}
 							return core.RequestAfterAuthInterceptResponse{Terminate: true, StatusCode: status, ResponseHeaders: headers, ResponseBody: body}
 						}
 						return core.RequestAfterAuthInterceptResponse{Terminate: laterTerminates, StatusCode: http.StatusForbidden, ResponseHeaders: http.Header{"X-Terminal": {"replacement"}}, ResponseBody: []byte("later response")}
@@ -115,12 +133,22 @@ func TestCompactionTerminalRound3PreservesFirstDirectResponse(t *testing.T) {
 					ctx := context.Background()
 					err := terminalRound3Run(ctx, m, path, model, opts)
 					var direct *core.RequestTerminatedError
-					if !errors.As(err, &direct) { t.Errorf("error = %T %v, want original direct response", err, err) } else if direct.StatusCode() != status || !reflect.DeepEqual(direct.ResponseHeaders(), headers) || string(direct.ResponseBody()) != string(body) { t.Errorf("direct response replaced: %+v", direct) }
-					if calls != 1 || len(e.calls) != 0 || hook.results != 0 { t.Errorf("hook=%d executor=%v results=%d, want 1/none/0", calls, e.calls, hook.results) }
-					if ctx.Err() != nil { t.Errorf("caller canceled: %v", ctx.Err()) }
+					if !errors.As(err, &direct) {
+						t.Errorf("error = %T %v, want original direct response", err, err)
+					} else if direct.StatusCode() != status || !reflect.DeepEqual(direct.ResponseHeaders(), headers) || string(direct.ResponseBody()) != string(body) {
+						t.Errorf("direct response replaced: %+v", direct)
+					}
+					if calls != 1 || len(e.calls) != 0 || hook.results != 0 {
+						t.Errorf("hook=%d executor=%v results=%d, want 1/none/0", calls, e.calls, hook.results)
+					}
+					if ctx.Err() != nil {
+						t.Errorf("caller canceled: %v", ctx.Err())
+					}
 					for _, id := range ids {
 						a, _ := m.GetByID(id)
-						if a.Unavailable || !a.NextRetryAfter.IsZero() || a.LastError != nil || !reflect.DeepEqual(a.ModelStates, before[id].ModelStates) { t.Errorf("terminal response changed account availability: %+v", a) }
+						if a.Unavailable || !a.NextRetryAfter.IsZero() || a.LastError != nil || !reflect.DeepEqual(a.ModelStates, before[id].ModelStates) {
+							t.Errorf("terminal response changed account availability: %+v", a)
+						}
 					}
 				})
 			}
@@ -135,30 +163,48 @@ func TestCompactionTerminalRound3NoInterceptorStillValidatesSelectedAuth(t *test
 		t.Run(control, func(t *testing.T) {
 			origin := NewSessionAffinitySelector(terminalRound3Selector{first: "A"})
 			defer origin.Stop()
-			if err := origin.RecordCompactionOutput("A", core.Options{}, []byte(`{"output":[{"type":"compaction","encrypted_content":"nil-hook-signed-A"}]}`)); err != nil { t.Fatal(err) }
+			if err := origin.RecordCompactionOutput("A", core.Options{}, []byte(`{"output":[{"type":"compaction","encrypted_content":"nil-hook-signed-A"}]}`)); err != nil {
+				t.Fatal(err)
+			}
 			m := NewManager(nil, origin, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			body := []byte(`{"input":[{"type":"compaction","encrypted_content":"nil-hook-signed-A"}]}`)
 			opts, err := m.PrepareCompactionRequest("model", core.Options{OriginalRequest: body}, ctx)
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			selected := []string{"A"}
-			if control == "wrong-signer" { selected[0] = "B" }
-			if control == "canceled" { cancel() }
+			if control == "wrong-signer" {
+				selected[0] = "B"
+			}
+			if control == "canceled" {
+				cancel()
+			}
 			if control == "negative-origin" {
 				opts.Metadata[compactionAffinityStoreMetadataKey] = (*SessionAffinitySelector)(nil)
 				selected[0] = "B"
 			}
-			if control == "legacy-no-selected-id" { selected = nil }
+			if control == "legacy-no-selected-id" {
+				selected = nil
+			}
 			req := core.Request{Model: "model", Payload: body}
 			finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(ctx, nil, "codex", req, opts, "model", selected...)
 			if control == "wrong-signer" {
 				var local *Error
-				if !IsLocalCompactionAffinityStop(err) || !errors.As(err, &local) || local.StatusCode() != http.StatusConflict { t.Errorf("nil-hook mismatch error=%v, want typed local 409", err) }
+				if !IsLocalCompactionAffinityStop(err) || !errors.As(err, &local) || local.StatusCode() != http.StatusConflict {
+					t.Errorf("nil-hook mismatch error=%v, want typed local 409", err)
+				}
 			} else if control == "canceled" {
-				if !errors.Is(err, context.Canceled) { t.Errorf("nil-hook cancellation error=%v", err) }
-			} else if err != nil { t.Errorf("allowed nil-hook control %s: %v", control, err) }
-			if !reflect.DeepEqual(finalReq, req) || string(finalOpts.OriginalRequest) != string(body) { t.Error("nil-hook admission rewrote original request") }
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("nil-hook cancellation error=%v", err)
+				}
+			} else if err != nil {
+				t.Errorf("allowed nil-hook control %s: %v", control, err)
+			}
+			if !reflect.DeepEqual(finalReq, req) || string(finalOpts.OriginalRequest) != string(body) {
+				t.Error("nil-hook admission rewrote original request")
+			}
 		})
 	}
 }
@@ -172,19 +218,26 @@ func TestCompactionTerminalRound3OrdinaryUpstreamStillFailsOver(t *testing.T) {
 		selected = append(selected, in.Metadata[core.SelectedAuthMetadataKey].(string))
 		return core.RequestAfterAuthInterceptResponse{}
 	}
-	if err := terminalRound3Run(context.Background(), m, "stream", model, opts); err != nil { t.Fatal(err) }
-	if !reflect.DeepEqual(e.calls, ids) || !reflect.DeepEqual(selected, ids) { t.Fatalf("ordinary retry executor=%v hooks=%v, want A then B=%v", e.calls, selected, ids) }
+	if err := terminalRound3Run(context.Background(), m, "stream", model, opts); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(e.calls, ids) || !reflect.DeepEqual(selected, ids) {
+		t.Fatalf("ordinary retry executor=%v hooks=%v, want A then B=%v", e.calls, selected, ids)
+	}
 }
 
 type terminalRound3HomeDispatcher struct {
-	calls int
+	calls   int
 	payload []byte
 }
-func (*terminalRound3HomeDispatcher) HeartbeatOK() bool { return true }
+
+func (*terminalRound3HomeDispatcher) HeartbeatOK() bool       { return true }
 func (*terminalRound3HomeDispatcher) AbortAmbiguousDispatch() {}
 func (d *terminalRound3HomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
 	d.calls++
-	if d.calls > 1 { return nil, errors.New("unexpected redispatch after terminal response") }
+	if d.calls > 1 {
+		return nil, errors.New("unexpected redispatch after terminal response")
+	}
 	return d.payload, nil
 }
 
@@ -200,8 +253,12 @@ func TestCompactionTerminalRound3HomeReleasesCanceledAttemptOnce(t *testing.T) {
 			var attempt context.Context
 			reg.SetReleaseSink(func(group executionregistry.ReleaseGroup, seq int64) {
 				releases++
-				if group.CredentialID != "home-A" || group.Model != model || seq != 1 { t.Errorf("release = %+v sequence=%d", group, seq) }
-				if attempt == nil || attempt.Err() != context.Canceled { t.Error("Home scope released before attempt cancellation") }
+				if group.CredentialID != "home-A" || group.Model != model || seq != 1 {
+					t.Errorf("release = %+v sequence=%d", group, seq)
+				}
+				if attempt == nil || attempt.Err() != context.Canceled {
+					t.Error("Home scope released before attempt cancellation")
+				}
 			})
 			calls := 0
 			opts := core.Options{Stream: true, SourceFormat: translator.FormatOpenAIResponse, OriginalRequest: []byte(`{"input":[]}`)}
@@ -213,11 +270,21 @@ func TestCompactionTerminalRound3HomeReleasesCanceledAttemptOnce(t *testing.T) {
 			ctx := context.Background()
 			err := terminalRound3Run(ctx, m, "stream", model, opts)
 			var direct *core.RequestTerminatedError
-			if !errors.As(err, &direct) || direct.StatusCode() != status || string(direct.ResponseBody()) != "home terminal" || direct.ResponseHeaders().Get("X-Terminal") != "home" { t.Errorf("Home response = %v", err) }
-			if calls != 1 || dispatch.calls != 1 || len(e.calls) != 0 || hook.results != 0 || releases != 1 { t.Errorf("hooks=%d dispatch=%d executor=%v results=%d releases=%d", calls, dispatch.calls, e.calls, hook.results, releases) }
-			if attempt == nil || attempt.Err() != context.Canceled || ctx.Err() != nil { t.Error("attempt must be canceled while parent remains live") }
-			if frozen := reg.FreezeInFlight(time.Now()); len(frozen.Executions) != 0 { t.Errorf("leaked Home execution: %+v", frozen) }
-			if releases != 1 { t.Errorf("release repeated during freeze: %d", releases) }
+			if !errors.As(err, &direct) || direct.StatusCode() != status || string(direct.ResponseBody()) != "home terminal" || direct.ResponseHeaders().Get("X-Terminal") != "home" {
+				t.Errorf("Home response = %v", err)
+			}
+			if calls != 1 || dispatch.calls != 1 || len(e.calls) != 0 || hook.results != 0 || releases != 1 {
+				t.Errorf("hooks=%d dispatch=%d executor=%v results=%d releases=%d", calls, dispatch.calls, e.calls, hook.results, releases)
+			}
+			if attempt == nil || attempt.Err() != context.Canceled || ctx.Err() != nil {
+				t.Error("attempt must be canceled while parent remains live")
+			}
+			if frozen := reg.FreezeInFlight(time.Now()); len(frozen.Executions) != 0 {
+				t.Errorf("leaked Home execution: %+v", frozen)
+			}
+			if releases != 1 {
+				t.Errorf("release repeated during freeze: %d", releases)
+			}
 		})
 	}
 }

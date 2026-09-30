@@ -177,37 +177,37 @@ type compactionOutputStream struct {
 	controlLine bool
 	// Only new bytes enter the lexical checkpoint. Scanner line boundaries
 	// affect data, never the retained original wire units.
-	units       [][]byte
-	released    [][]byte
-	data        []byte
-	linePrefix  []byte
-	lineMode    byte // 0 prefix, 1 data, 2 control, 3 raw JSON
-	lineBytes   int
-	lineCR      bool
-	dataSpace   bool
-	jsonDepth   int
-	jsonStarted bool
-	jsonString  bool
-	jsonEscape  bool
-	jsonDone    bool
-	jsonBad     bool
-	jsonScalar  byte // 1 quoted string, 2 number/literal
-	jsonLiteral string
-	jsonScalarPos int
+	units          [][]byte
+	released       [][]byte
+	data           []byte
+	linePrefix     []byte
+	lineMode       byte // 0 prefix, 1 data, 2 control, 3 raw JSON
+	lineBytes      int
+	lineCR         bool
+	dataSpace      bool
+	jsonDepth      int
+	jsonStarted    bool
+	jsonString     bool
+	jsonEscape     bool
+	jsonDone       bool
+	jsonBad        bool
+	jsonScalar     byte // 1 quoted string, 2 number/literal
+	jsonLiteral    string
+	jsonScalarPos  int
 	jsonNumberLast byte
-	framed      bool // literal SSE data LF requires a blank-line boundary
-	sse         bool
+	framed         bool // literal SSE data LF requires a blank-line boundary
+	sse            bool
 
 	// Native Claude sends a skeleton followed by content deltas. Only these
 	// signed block bytes wait for completion; ordinary SSE remains immediate.
-	native        bool
-	ctx           context.Context
-	nativeBlock   []byte
-	nativeIndex   int64
-	nativeHold    bool
-	nativeWire    [][]byte
-	nativeBytes   int
-	nativeContent strings.Builder
+	native            bool
+	ctx               context.Context
+	nativeBlock       []byte
+	nativeIndex       int64
+	nativeHold        bool
+	nativeWire        [][]byte
+	nativeBytes       int
+	nativeContent     strings.Builder
 	nativeContentType gjson.Type
 }
 
@@ -349,12 +349,16 @@ func (s *compactionOutputStream) dataByte(b byte) error {
 			s.jsonEscape = true
 		} else if b == '"' {
 			s.jsonString = false
-			if s.jsonScalar == 1 { s.jsonDone = true }
+			if s.jsonScalar == 1 {
+				s.jsonDone = true
+			}
 		}
 		return nil
 	}
 	if s.jsonScalar == 2 {
-		if b == ' ' || b == '\t' || b == '\r' || b == '\n' { return nil }
+		if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+			return nil
+		}
 		if s.jsonLiteral != "" {
 			if s.jsonScalarPos >= len(s.jsonLiteral) || b != s.jsonLiteral[s.jsonScalarPos] {
 				s.jsonBad, s.jsonDone = true, true
@@ -384,12 +388,17 @@ func (s *compactionOutputStream) dataByte(b byte) error {
 			s.jsonScalar = 2
 			s.jsonNumberLast = b
 			switch b {
-			case 't': s.jsonLiteral = "true"
-			case 'f': s.jsonLiteral = "false"
-			case 'n': s.jsonLiteral = "null"
+			case 't':
+				s.jsonLiteral = "true"
+			case 'f':
+				s.jsonLiteral = "false"
+			case 'n':
+				s.jsonLiteral = "null"
 			}
 			s.jsonScalarPos = 1
-			if s.jsonLiteral == "" && b != '-' && (b < '0' || b > '9') { s.jsonBad, s.jsonDone = true, true }
+			if s.jsonLiteral == "" && b != '-' && (b < '0' || b > '9') {
+				s.jsonBad, s.jsonDone = true, true
+			}
 			return nil
 		}
 	}
@@ -460,10 +469,22 @@ func (s *compactionOutputStream) endLine() error {
 	return nil
 }
 
+// continuesLine reports a payload that can only be a fragment of the open
+// line, so it must not end that line even though it looks like a Scanner unit.
+// A partial field name ("data" + ": {") or a JSON string cannot span a line,
+// and a leading ':' after a partial JSON value is JSON syntax, not a comment.
+func (s *compactionOutputStream) continuesLine(payload []byte) bool {
+	if s.lineBytes == 0 || len(payload) == 0 {
+		return false
+	}
+	return s.jsonString || (s.lineMode == 0 && len(s.linePrefix) > 0) ||
+		(s.lineMode == 1 && payload[0] == ':' && s.jsonStarted && !s.jsonDone)
+}
+
 func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 	s.released = nil
 	_, _, scannerLine := extractSSEDataLine(payload)
-	recognized := scannerLine || compactionControlLine(payload)
+	recognized := (scannerLine || compactionControlLine(payload)) && !s.continuesLine(payload)
 	if s.lineBytes > 0 && recognized && !(s.jsonStarted && !s.sse) {
 		// Scanner strips delimiters; only the new unit's prefix is examined.
 		if err := s.endLine(); err != nil {
@@ -513,7 +534,7 @@ func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 			}
 			completed := blank && s.completeCandidate()
 			if completed {
-				if err := hold(i+1); err != nil {
+				if err := hold(i + 1); err != nil {
 					return fail(err)
 				}
 				if err := s.completeEvent(); err != nil {
@@ -522,7 +543,7 @@ func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 			} else if blank && len(s.data) > 0 && s.sse {
 				return fail(affinityStateError())
 			} else if len(s.data) == 0 && len(s.linePrefix) == 0 {
-				if err := hold(i+1); err != nil {
+				if err := hold(i + 1); err != nil {
 					return fail(err)
 				}
 				s.releaseUnits()

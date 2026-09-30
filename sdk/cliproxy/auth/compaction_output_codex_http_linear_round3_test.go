@@ -81,7 +81,7 @@ func round3RealCodexHTTP(t *testing.T, count int, signed, cancelTail bool, decor
 	manager := cliproxyauth.NewManager(nil, selector, nil)
 	manager.SetRetryConfig(0, 0, 0)
 	manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(&config.Config{}))
-	id := t.Name()+"-A"
+	id := t.Name() + "-A"
 	registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
 	defer registry.GetGlobalRegistry().UnregisterClient(id)
 	if _, err := manager.Register(context.Background(), &cliproxyauth.Auth{
@@ -165,7 +165,7 @@ bootstrapDone:
 	}
 	// Upstream translator and final validation are included. A generous linear
 	// ceiling permits their ordinary allocations, but not O(N^2) prefix copies.
-	if allocated := after.TotalAlloc-before.TotalAlloc; allocated > uint64(count)*4096+16<<20 {
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > uint64(count)*4096+16<<20 {
 		t.Fatalf("real HTTP path allocated %d bytes for %d short units", allocated, count)
 	}
 }

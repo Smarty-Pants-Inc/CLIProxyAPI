@@ -17,7 +17,7 @@ func round3NeutralSigner(t *testing.T, authID string) (*SessionAffinitySelector,
 	t.Helper()
 	origin := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		StatePath: filepath.Join(t.TempDir(), "affinity.state"),
-		Fallback: &compactionAffinityFallback{preferredID: authID},
+		Fallback:  &compactionAffinityFallback{preferredID: authID},
 	})
 	t.Cleanup(origin.Stop)
 	origin.Cache().Stop()
@@ -83,8 +83,8 @@ func TestCompactionRetentionNeutralRound3CapturedDuplexPostSaveRefusal(t *testin
 // the real Manager receiver, with a live downstream parent.
 type round3NeutralDuplexExecutor struct {
 	compactionAffinityExecutor
-	origin *SessionAffinitySelector
-	payload []byte
+	origin   *SessionAffinitySelector
+	payload  []byte
 	upstream bool
 	terminal error
 }
@@ -131,7 +131,7 @@ func TestCompactionRetentionNeutralRound3PublicManagerReceiverCompositional(t *t
 			m.SetRetryConfig(0, 0, 0)
 			e := &round3NeutralDuplexExecutor{
 				compactionAffinityExecutor: compactionAffinityExecutor{provider: "codex", firstID: authID},
-				origin: origin, payload: payload, upstream: upstream,
+				origin:                     origin, payload: payload, upstream: upstream,
 			}
 			m.RegisterExecutor(e)
 			if _, err := m.Register(WithSkipPersist(context.Background()), &Auth{
@@ -154,8 +154,12 @@ func TestCompactionRetentionNeutralRound3PublicManagerReceiverCompositional(t *t
 			var received error
 			var payloads int
 			for chunk := range stream.Chunks {
-				if len(chunk.Payload) > 0 { payloads++ }
-				if chunk.Err != nil { received = chunk.Err }
+				if len(chunk.Payload) > 0 {
+					payloads++
+				}
+				if chunk.Err != nil {
+					received = chunk.Err
+				}
 			}
 			if parent.Err() != nil || received != e.terminal || payloads != 1 || len(e.attempts) != 1 {
 				t.Fatalf("receiver path: parent=%v error=%v payloads=%d attempts=%d", parent.Err(), received, payloads, len(e.attempts))
@@ -171,7 +175,9 @@ func TestCompactionRetentionNeutralRound3PublicManagerReceiverCompositional(t *t
 				if !IsLocalCompactionAffinityStop(received) || result != nil || current.Failed != 0 || current.Success != 0 || current.Unavailable || !current.NextRetryAfter.IsZero() || current.LastError != nil || len(current.ModelStates) != 0 {
 					t.Fatalf("local retention refusal changed result/availability: result=%+v auth=%+v", result, current)
 				}
-				if origin.Cache().PersistenceError() != nil { t.Fatal("expected post-save retention failure, not I/O failure") }
+				if origin.Cache().PersistenceError() != nil {
+					t.Fatal("expected post-save retention failure, not I/O failure")
+				}
 			}
 		})
 	}
@@ -180,12 +186,14 @@ func TestCompactionRetentionNeutralRound3PublicManagerReceiverCompositional(t *t
 func TestCompactionRetentionNeutralRound3RenewalCancellationAndAccountUnavailableControls(t *testing.T) {
 	origin, _, keys := round3NeutralSigner(t, "A")
 	before := round3SignerExpiry(t, origin, keys[0])
-	origin.Cache().SetTTL(12*time.Hour)
+	origin.Cache().SetTTL(12 * time.Hour)
 	if err := refreshCompactionSignerBindings(context.Background(), origin, "A", keys); err != nil {
 		t.Fatalf("normal renewal refused: %v", err)
 	}
 	after := round3SignerExpiry(t, origin, keys[0])
-	if !after.After(before) { t.Fatal("normal renewal did not advance signer expiry") }
+	if !after.After(before) {
+		t.Fatal("normal renewal did not advance signer expiry")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := refreshCompactionSignerBindings(ctx, origin, "A", keys); !errors.Is(err, context.Canceled) {
@@ -193,14 +201,18 @@ func TestCompactionRetentionNeutralRound3RenewalCancellationAndAccountUnavailabl
 	}
 	m := NewManager(nil, origin, nil)
 	opts, err := m.PrepareCompactionRequest("model", core.Options{OriginalRequest: []byte(`{"input":[]}`)}, context.Background())
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	opts.Metadata[compactionRequestContextMetadataKey] = ctx
 	m.prepareCompactionDuplexValidation(opts)
 	validate := opts.Metadata[core.CompactionAffinityValidatorMetadataKey].(func(string, []byte) error)
 	if err := validate("A", []byte(`{"input":[{"type":"compaction","encrypted_content":"neutral-round3-signed"}]}`)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("captured callback erased cancellation cause: %v", err)
 	}
-	if !round3SignerExpiry(t, origin, keys[0]).Equal(after) { t.Fatal("canceled renewal changed signer expiry") }
+	if !round3SignerExpiry(t, origin, keys[0]).Equal(after) {
+		t.Fatal("canceled renewal changed signer expiry")
+	}
 	ordinary := wrapRequestStopError(compactedAuthUnavailableError())
 	var unavailable *Error
 	if IsLocalCompactionAffinityStop(ordinary) || !errors.As(ordinary, &unavailable) || unavailable.Code != "auth_unavailable" {

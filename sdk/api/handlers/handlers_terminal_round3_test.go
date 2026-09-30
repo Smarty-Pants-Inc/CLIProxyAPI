@@ -37,12 +37,16 @@ func TestHandlerTerminalRound3StreamPreservesFirstHTTPResponse(t *testing.T) {
 				handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
 				handler.AuthManager.SetRetryConfig(0, 0, 0)
 				secondID := "handler-terminal-second-" + model
-				if _, err := handler.AuthManager.Register(context.Background(), &coreauth.Auth{ID: secondID, Provider: "codex", Status: coreauth.StatusActive}); err != nil { t.Fatal(err) }
+				if _, err := handler.AuthManager.Register(context.Background(), &coreauth.Auth{ID: secondID, Provider: "codex", Status: coreauth.StatusActive}); err != nil {
+					t.Fatal(err)
+				}
 				registry.GetGlobalRegistry().RegisterClient(secondID, "codex", []*registry.ModelInfo{{ID: model}})
 				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(secondID) })
-				ids := []string{"handler-interceptor-"+model, secondID}
+				ids := []string{"handler-interceptor-" + model, secondID}
 				before := make(map[string]*coreauth.Auth)
-				for _, id := range ids { before[id], _ = handler.AuthManager.GetByID(id) }
+				for _, id := range ids {
+					before[id], _ = handler.AuthManager.GetByID(id)
+				}
 				afterCalls, completions := 0, 0
 				var completion pluginapi.RequestCompletion
 				var firstRequestID string
@@ -63,22 +67,38 @@ func TestHandlerTerminalRound3StreamPreservesFirstHTTPResponse(t *testing.T) {
 				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"`+model+`","input":[],"stream":true}`))
 				ctx := context.WithValue(c.Request.Context(), "gin", c)
 				data, headers, errs := handler.ExecuteStreamWithAuthManager(ctx, "openai-response", model, []byte(`{"model":"`+model+`","input":[],"stream":true}`), "")
-				if data != nil || headers != nil { t.Error("terminal bootstrap exposed a data stream or upstream headers") }
+				if data != nil || headers != nil {
+					t.Error("terminal bootstrap exposed a data stream or upstream headers")
+				}
 				select {
 				case msg, ok := <-errs:
-					if !ok || msg == nil { t.Fatal("missing terminal response") }
-					if !msg.DirectResponse || msg.StatusCode != status || string(msg.Body) != body { t.Errorf("bootstrap response = %+v", msg) }
+					if !ok || msg == nil {
+						t.Fatal("missing terminal response")
+					}
+					if !msg.DirectResponse || msg.StatusCode != status || string(msg.Body) != body {
+						t.Errorf("bootstrap response = %+v", msg)
+					}
 					handler.WriteErrorResponse(c, msg)
 				case <-time.After(time.Second):
 					t.Fatal("terminal bootstrap did not return its direct response")
 				}
-				if recorder.Code != status || recorder.Body.String() != body || recorder.Header().Get("Content-Type") != "text/plain" || recorder.Header().Get("Retry-After") != "7" || !reflect.DeepEqual(recorder.Header().Values("X-Terminal"), []string{"first", "retained"}) { t.Errorf("HTTP response changed: status=%d headers=%v body=%q", recorder.Code, recorder.Header(), recorder.Body.String()) }
-				if afterCalls != 1 || executorCalls != 0 || completions != 1 { t.Errorf("after-auth=%d executor=%d completions=%d, want 1/0/1", afterCalls, executorCalls, completions) }
-				if completion.Outcome != pluginapi.RequestCompletionRejected || completion.RequestID != firstRequestID || completion.StatusCode != status { t.Errorf("completion=%+v", completion) }
-				if ctx.Err() != nil { t.Error("terminal response canceled HTTP parent") }
+				if recorder.Code != status || recorder.Body.String() != body || recorder.Header().Get("Content-Type") != "text/plain" || recorder.Header().Get("Retry-After") != "7" || !reflect.DeepEqual(recorder.Header().Values("X-Terminal"), []string{"first", "retained"}) {
+					t.Errorf("HTTP response changed: status=%d headers=%v body=%q", recorder.Code, recorder.Header(), recorder.Body.String())
+				}
+				if afterCalls != 1 || executorCalls != 0 || completions != 1 {
+					t.Errorf("after-auth=%d executor=%d completions=%d, want 1/0/1", afterCalls, executorCalls, completions)
+				}
+				if completion.Outcome != pluginapi.RequestCompletionRejected || completion.RequestID != firstRequestID || completion.StatusCode != status {
+					t.Errorf("completion=%+v", completion)
+				}
+				if ctx.Err() != nil {
+					t.Error("terminal response canceled HTTP parent")
+				}
 				for _, id := range ids {
 					a, _ := handler.AuthManager.GetByID(id)
-					if a.Unavailable || !a.NextRetryAfter.IsZero() || a.LastError != nil || !reflect.DeepEqual(a.ModelStates, before[id].ModelStates) { t.Errorf("terminal HTTP response changed cooldown for %s: %+v", id, a) }
+					if a.Unavailable || !a.NextRetryAfter.IsZero() || a.LastError != nil || !reflect.DeepEqual(a.ModelStates, before[id].ModelStates) {
+						t.Errorf("terminal HTTP response changed cooldown for %s: %+v", id, a)
+					}
 				}
 			})
 		}

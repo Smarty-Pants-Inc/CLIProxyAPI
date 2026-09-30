@@ -230,7 +230,7 @@ func TestCodexCachedWebsocketValidationOwnsReuse(t *testing.T) {
 			}
 			type outcome struct {
 				stream *core.StreamResult
-				err error
+				err    error
 			}
 			competing := make(chan outcome, 1)
 			started := make(chan struct{})
