@@ -778,6 +778,13 @@ type sseJSONValidationState struct {
 	pending        []byte
 	pendingErr     error
 	prevEndsWithCR bool
+	// lex holds the incremental state of pending; see sseDataLexer.
+	lex sseDataLexer
+	// insertedLF is 1 + the index of the LF this validator added between two
+	// units, so that LF starts a line at a unit boundary, not a wire LF.
+	insertedLF int
+	sawLF      bool // a unit carried LF: not a line-per-unit Scanner stream
+	events     int  // released data events
 }
 
 func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
@@ -802,67 +809,126 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	chunk = bytes.ReplaceAll(chunk, []byte("\r\n"), []byte("\n"))
 	chunk = bytes.ReplaceAll(chunk, []byte("\r"), []byte("\n"))
 	s.prevEndsWithCR = endsWithCR
+	if bytes.IndexByte(chunk, '\n') >= 0 {
+		s.sawLF = true
+	}
 	if len(s.pending) > 0 && !bytes.HasSuffix(s.pending, []byte("\n")) && !bytes.HasPrefix(chunk, []byte("\n")) {
 		first := bytes.TrimSpace(bytes.SplitN(chunk, []byte("\n"), 2)[0])
-		if bytes.HasPrefix(first, []byte("data:")) || bytes.HasPrefix(first, []byte("event:")) {
+		if bytes.HasPrefix(first, []byte("data:")) || bytes.HasPrefix(first, []byte("event:")) || s.startsLine(chunk) {
 			s.pending = append(s.pending, '\n')
+			s.insertedLF = len(s.pending)
 		}
 	}
 	// Scan only the new bytes (plus one for a split "\n\n"): a multi-line event
 	// arrives one Scanner line per chunk and must not be rescanned per line.
-	searchFrom := max(len(s.pending)-1, 0)
+	from := max(len(s.pending)-1, 0)
 	s.pending = append(s.pending, chunk...)
 
 	var output []byte
+	start := 0
 	for {
-		frameEnd := bytes.Index(s.pending[searchFrom:], []byte("\n\n"))
+		frameEnd := bytes.Index(s.pending[from:], []byte("\n\n"))
 		if frameEnd < 0 {
 			break
 		}
-		frameEnd += searchFrom + 2
-		searchFrom = 0
-		frame := s.pending[:frameEnd]
+		frameEnd += from + 2
+		frame := s.pending[start:frameEnd]
 		if errValidate := validateSSEFrameDataJSON(frame); errValidate != nil {
 			if len(output) > 0 {
-				s.pending = s.pending[:0]
+				s.clearPending(true)
 				s.pendingErr = errValidate
 				return output, nil
 			}
 			return nil, errValidate
 		}
 		output = append(output, frame...)
-		copy(s.pending, s.pending[frameEnd:])
-		s.pending = s.pending[:len(s.pending)-frameEnd]
+		start, from = frameEnd, frameEnd
 	}
-
-	if len(bytes.TrimSpace(s.pending)) == 0 {
-		s.pending = s.pending[:0]
+	if start > 0 {
+		// Drop all complete frames with one copy, then lex the rest afresh:
+		// it follows a wire "\n\n", so it is at most this unit's bytes.
+		s.pending = s.pending[:copy(s.pending, s.pending[start:])]
+		s.lex = sseDataLexer{afterLF: true}
+		s.insertedLF = 0
+	}
+	s.lexPending()
+	if !s.lex.content && !s.lex.stopped {
+		s.clearPending(s.lex.afterLF)
 		return output, nil
 	}
-	if sseJSONValidationDataIncomplete(s.pending) {
-		return output, nil
-	}
-	payload, found := sseJSONValidationDataPayload(s.pending)
-	payload = bytes.TrimSpace(payload)
-	if !found || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload) {
+	if s.pendingMayRelease() {
+		if s.lex.root != 0 {
+			s.events++
+		}
 		output = append(output, s.pending...)
-		s.pending = s.pending[:0]
+		s.clearPending(false)
 	}
 	return output, nil
 }
 
-// sseJSONValidationDataIncomplete reports, from the last line only, a data
-// payload that cannot be valid JSON yet: no JSON text ends in ',', ':', '[' or
-// '{'. It skips the whole-event rescan that made a 100k-line event quadratic.
-func sseJSONValidationDataIncomplete(pending []byte) bool {
-	line := bytes.TrimSpace(pending[bytes.LastIndexByte(pending, '\n')+1:])
-	data, ok := bytes.CutPrefix(line, []byte("data:"))
-	data = bytes.TrimSpace(data)
-	return ok && len(data) > 0 && bytes.IndexByte([]byte(",:[{"), data[len(data)-1]) >= 0
+func (s *sseJSONValidationState) clearPending(afterLF bool) {
+	s.pending = s.pending[:0]
+	s.lex = sseDataLexer{afterLF: afterLF}
+	s.insertedLF = 0
+}
+
+// pendingMayRelease gives the old whole-event answer (release when the joined
+// data payload is empty, [DONE] or valid JSON) without rescanning per unit:
+// the lexer proves "not valid yet" for an open value, and the whole-event
+// check runs once per complete root.
+func (s *sseJSONValidationState) pendingMayRelease() bool {
+	l := &s.lex
+	switch {
+	case l.stopped && l.line == 1:
+		return false // an incomplete rune is not trimmed as space
+	case l.root == 0:
+		return true // no data, or only space
+	case l.bad || l.inStr:
+		return false
+	case l.root == 3 && !l.done:
+		// A valid number or literal is released at once, which resets state.
+		return l.tokenValid() && sseJSONValidationPendingValid(s.pending)
+	case !l.done:
+		return false
+	case !l.checked:
+		// Only space can follow a complete root without setting bad, so this
+		// answer holds for the rest of the event.
+		l.checked, l.valid = true, sseJSONValidationPendingValid(s.pending)
+	}
+	return l.valid
+}
+
+// startsLine reports a Scanner control line that arrives while a data value is
+// open: ':' comments, id: and retry: are SSE lines, never JSON outside a
+// string. A ':' unit continues the line instead when it can be a TCP fragment:
+// the open line began after a wire LF, or JSON needs ':' after an object key
+// and the stream has not proven one line per unit. The compaction observer in
+// sdk/cliproxy/auth uses the same rule.
+func (s *sseJSONValidationState) startsLine(chunk []byte) bool {
+	l := &s.lex
+	if l.line != 1 || l.inStr {
+		return false
+	}
+	if bytes.HasPrefix(chunk, []byte("id:")) || bytes.HasPrefix(chunk, []byte("retry:")) {
+		return true
+	}
+	if chunk[0] != ':' {
+		return false
+	}
+	scanner := s.events > 0 && !s.sawLF
+	open := l.root != 0 && !l.done
+	return !(open && (l.afterLF || (l.colon && !scanner)))
+}
+
+func sseJSONValidationPendingValid(pending []byte) bool {
+	payload, found := sseJSONValidationDataPayload(pending)
+	payload = bytes.TrimSpace(payload)
+	return !found || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload)
 }
 
 func (s *sseJSONValidationState) Finish() error {
 	s.prevEndsWithCR = false
+	s.lex, s.insertedLF = sseDataLexer{}, 0
 	if s.pendingErr != nil {
 		errPending := s.pendingErr
 		s.pendingErr = nil

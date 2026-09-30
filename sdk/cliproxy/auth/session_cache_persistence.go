@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -142,6 +143,14 @@ func writeSessionCacheFile(path string, state sessionCacheFile) error {
 		return errors.New("session cache persistence: encode failed")
 	}
 	dir := filepath.Dir(path)
+	// Directories that MkdirAll creates need their own entries synced too.
+	syncDirs := []string{dir}
+	for missing := dir; ; missing = filepath.Dir(missing) {
+		if _, errStat := os.Stat(missing); !errors.Is(errStat, os.ErrNotExist) || filepath.Dir(missing) == missing {
+			break
+		}
+		syncDirs = append(syncDirs, filepath.Dir(missing))
+	}
 	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
 		return errors.New("session cache persistence: create directory failed")
 	}
@@ -163,5 +172,25 @@ func writeSessionCacheFile(path string, state sessionCacheFile) error {
 	if errRename := os.Rename(tmp, path); errRename != nil {
 		return errors.New("session cache persistence: replace file failed")
 	}
+	// The rename is durable across a crash only once the directory is synced.
+	for _, syncDir := range syncDirs {
+		if errSync := sessionCacheSyncDir(syncDir); errSync != nil {
+			return errors.New("session cache persistence: sync directory failed")
+		}
+	}
 	return nil
+}
+
+// sessionCacheSyncDir is a variable so tests can check its order and failure.
+var sessionCacheSyncDir = func(dir string) error {
+	if runtime.GOOS == "windows" {
+		// ponytail: Windows cannot fsync a directory handle; NTFS journals the rename.
+		return nil
+	}
+	handle, errOpen := os.Open(dir)
+	if errOpen != nil {
+		return errOpen
+	}
+	errSync := handle.Sync()
+	return errors.Join(errSync, handle.Close())
 }

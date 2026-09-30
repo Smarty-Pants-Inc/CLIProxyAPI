@@ -163,7 +163,9 @@ func TestCompactionStreamRound2RealClaudeProducerCancellation(t *testing.T) {
 				callerCancel()
 			}
 			var terminal error
-			timer := time.NewTimer(5 * time.Second)
+			// A hang bound, not a speed check: budget-refusal first makes 256
+			// durable publications (file and directory fsync each, ~20 ms on Dev1).
+			timer := time.NewTimer(20 * time.Second)
 			defer timer.Stop()
 		readStream:
 			for {

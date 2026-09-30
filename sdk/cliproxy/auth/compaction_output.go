@@ -197,6 +197,17 @@ type compactionOutputStream struct {
 	jsonNumberLast byte
 	framed         bool // literal SSE data LF requires a blank-line boundary
 	sse            bool
+	// Line provenance for a unit that starts with ':' (F2). A line that began
+	// after a wire LF can only be continued by the next unit; a Scanner never
+	// sends LF, so a stream with complete events and no LF is Scanner-framed.
+	lineAfterLF bool
+	sawLF       bool
+	events      int
+	// jsonColon: the last JSON token is an object key, so only ':' may follow.
+	jsonColon     bool
+	jsonPrev      byte
+	jsonKey       bool
+	jsonContainer []byte
 
 	// Native Claude sends a skeleton followed by content deltas. Only these
 	// signed block bytes wait for completion; ordinary SSE remains immediate.
@@ -349,6 +360,7 @@ func (s *compactionOutputStream) dataByte(b byte) error {
 			s.jsonEscape = true
 		} else if b == '"' {
 			s.jsonString = false
+			s.jsonPrev, s.jsonColon = '"', s.jsonKey
 			if s.jsonScalar == 1 {
 				s.jsonDone = true
 			}
@@ -402,6 +414,9 @@ func (s *compactionOutputStream) dataByte(b byte) error {
 			return nil
 		}
 	}
+	inObject := len(s.jsonContainer) > 0 && s.jsonContainer[len(s.jsonContainer)-1] == '{'
+	s.jsonKey = b == '"' && inObject && (s.jsonPrev == '{' || s.jsonPrev == ',')
+	s.jsonPrev, s.jsonColon = b, false
 	switch b {
 	case '"':
 		s.jsonString = true
@@ -410,8 +425,12 @@ func (s *compactionOutputStream) dataByte(b byte) error {
 		if s.jsonDepth > maxCompactionJSONDepth {
 			return affinityStateError()
 		}
+		s.jsonContainer = append(s.jsonContainer, b)
 	case '}', ']':
 		s.jsonDepth--
+		if n := len(s.jsonContainer); n > 0 {
+			s.jsonContainer = s.jsonContainer[:n-1]
+		}
 		if s.jsonDepth <= 0 {
 			s.jsonDone = true
 		}
@@ -422,7 +441,7 @@ func (s *compactionOutputStream) dataByte(b byte) error {
 func (s *compactionOutputStream) resetLine() {
 	s.linePrefix = nil
 	s.lineMode, s.lineBytes = 0, 0
-	s.lineCR, s.dataSpace, s.controlLine = false, false, false
+	s.lineCR, s.dataSpace, s.controlLine, s.lineAfterLF = false, false, false, false
 }
 
 func (s *compactionOutputStream) resetData() {
@@ -432,6 +451,7 @@ func (s *compactionOutputStream) resetData() {
 	s.jsonLiteral = ""
 	s.framed, s.sse = false, false
 	s.jsonStarted, s.jsonString, s.jsonEscape, s.jsonDone, s.jsonBad = false, false, false, false, false
+	s.jsonColon, s.jsonPrev, s.jsonKey, s.jsonContainer = false, 0, false, s.jsonContainer[:0]
 }
 
 func (s *compactionOutputStream) releaseUnits() {
@@ -454,6 +474,7 @@ func (s *compactionOutputStream) completeEvent() error {
 	if err := s.recordEvent(data); err != nil {
 		return err
 	}
+	s.events++
 	s.releaseUnits()
 	s.resetData()
 	return nil
@@ -471,14 +492,21 @@ func (s *compactionOutputStream) endLine() error {
 
 // continuesLine reports a payload that can only be a fragment of the open
 // line, so it must not end that line even though it looks like a Scanner unit.
-// A partial field name ("data" + ": {") or a JSON string cannot span a line,
-// and a leading ':' after a partial JSON value is JSON syntax, not a comment.
+// A partial field name ("data" + ": {") or a JSON string cannot span a line.
+// A leading ':' in an open data value is a fragment when the line began after
+// a wire LF (a raw byte stream, not a Scanner), or when JSON needs ':' after
+// an object key and Scanner framing is not proven. Otherwise it is a Scanner
+// comment line: ':' cannot legally continue that JSON anyway.
 func (s *compactionOutputStream) continuesLine(payload []byte) bool {
 	if s.lineBytes == 0 || len(payload) == 0 {
 		return false
 	}
-	return s.jsonString || (s.lineMode == 0 && len(s.linePrefix) > 0) ||
-		(s.lineMode == 1 && payload[0] == ':' && s.jsonStarted && !s.jsonDone)
+	if s.jsonString || (s.lineMode == 0 && len(s.linePrefix) > 0) {
+		return true
+	}
+	scanner := s.events > 0 && !s.sawLF
+	return s.lineMode == 1 && payload[0] == ':' && s.jsonStarted && !s.jsonDone &&
+		(s.lineAfterLF || (s.jsonColon && !scanner))
 }
 
 func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
@@ -553,6 +581,7 @@ func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 			} else if err := s.endLine(); err != nil {
 				return fail(err)
 			}
+			s.sawLF, s.lineAfterLF = true, true
 			continue
 		}
 		s.lineBytes++
