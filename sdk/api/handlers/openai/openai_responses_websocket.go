@@ -154,15 +154,35 @@ func (w *responsesWebsocketWriter) closeWithoutError() (bool, error) {
 	return true, w.conn.Close()
 }
 
+// lockForWrite lets data and ping writers leave on a terminal close claim,
+// even if they were already waiting for an in-flight frame. An unconditional
+// Lock after checking closing could strand teardown behind the terminal write.
+func (w *responsesWebsocketWriter) lockForWrite() error {
+	for {
+		if w.closing.Load() {
+			return websocket.ErrCloseSent
+		}
+		if w.writeMu.TryLock() {
+			// The close claim can race with acquisition; never start a new
+			// ordinary write after observing it, and leave writeMu available.
+			if w.closing.Load() {
+				w.writeMu.Unlock()
+				return websocket.ErrCloseSent
+			}
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (w *responsesWebsocketWriter) writePing() error {
 	if w == nil || w.conn == nil {
 		return errors.New("responses websocket: writer is nil")
 	}
-	w.writeMu.Lock()
-	defer w.writeMu.Unlock()
-	if w.closing.Load() {
-		return websocket.ErrCloseSent
+	if err := w.lockForWrite(); err != nil {
+		return err
 	}
+	defer w.writeMu.Unlock()
 	return w.conn.WriteControl(websocket.PingMessage, nil, time.Time{})
 }
 
