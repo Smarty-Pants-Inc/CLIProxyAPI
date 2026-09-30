@@ -108,6 +108,9 @@ type responsesWebsocketWriter struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
 	closing atomic.Bool
+	// terminalMu is held by a typed terminal error write from its claim of
+	// closing to its close, so session teardown cannot close the socket under it.
+	terminalMu sync.Mutex
 }
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
@@ -151,15 +154,35 @@ func (w *responsesWebsocketWriter) closeWithoutError() (bool, error) {
 	return true, w.conn.Close()
 }
 
+// lockForWrite lets data and ping writers leave on a terminal close claim,
+// even if they were already waiting for an in-flight frame. An unconditional
+// Lock after checking closing could strand teardown behind the terminal write.
+func (w *responsesWebsocketWriter) lockForWrite() error {
+	for {
+		if w.closing.Load() {
+			return websocket.ErrCloseSent
+		}
+		if w.writeMu.TryLock() {
+			// The close claim can race with acquisition; never start a new
+			// ordinary write after observing it, and leave writeMu available.
+			if w.closing.Load() {
+				w.writeMu.Unlock()
+				return websocket.ErrCloseSent
+			}
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (w *responsesWebsocketWriter) writePing() error {
 	if w == nil || w.conn == nil {
 		return errors.New("responses websocket: writer is nil")
 	}
-	w.writeMu.Lock()
-	defer w.writeMu.Unlock()
-	if w.closing.Load() {
-		return websocket.ErrCloseSent
+	if err := w.lockForWrite(); err != nil {
+		return err
 	}
+	defer w.writeMu.Unlock()
 	return w.conn.WriteControl(websocket.PingMessage, nil, time.Time{})
 }
 
@@ -167,10 +190,23 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	if w == nil || w.conn == nil {
 		return false, nil
 	}
+	// A duplicate terminal call must not wait behind the first caller's network
+	// write: that caller claims closing right after it takes terminalMu, so a
+	// waiter sees closing and returns, and teardown can close the socket.
+	for !w.terminalMu.TryLock() {
+		if w.closing.Load() {
+			return false, nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	defer w.terminalMu.Unlock()
 	if !w.closing.CompareAndSwap(false, true) {
 		return false, nil
 	}
-	if !w.writeMu.TryLock() {
+	// The typed error must not be lost because a data frame is in flight:
+	// closing is set, so that writer exits after its current frame. A writer
+	// stuck on a slow client is still unblocked by Close after the bound.
+	if !tryLockWithin(&w.writeMu, websocketTerminalPayloadWait) {
 		return false, w.conn.Close()
 	}
 	defer w.writeMu.Unlock()
@@ -181,6 +217,29 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 		return false, errWrite
 	}
 	return true, errClose
+}
+
+// ponytail: one in-flight frame finishes far inside this bound on a live client.
+const websocketTerminalPayloadWait = 250 * time.Millisecond
+
+func tryLockWithin(mu *sync.Mutex, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for !mu.TryLock() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// awaitTerminalWrite lets a typed terminal error write that already claimed the
+// socket finish before teardown closes it. The data writer returns as soon as it
+// sees closing, so without this the error write can hit a closed connection.
+func (w *responsesWebsocketWriter) awaitTerminalWrite() {
+	if w != nil && tryLockWithin(&w.terminalMu, 2*websocketTerminalPayloadWait) {
+		w.terminalMu.Unlock()
+	}
 }
 
 func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
@@ -335,6 +394,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
 		wsTimelineLog.SetContext(c)
+		writer.awaitTerminalWrite()
 		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
 			log.Warnf("responses websocket: close connection error: %v", errClose)
 		}

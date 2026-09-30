@@ -119,6 +119,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errTerminate
 		case chunk, ok := <-data:
 			if !ok {
+				if len(errs) > 0 {
+					// The producer buffers its terminal error before closing data;
+					// select may see the close first. Deliver the typed error.
+					data = nil
+					continue
+				}
 				if opts.duplexStream != nil && opts.duplexStream() {
 					// A duplex stream ends with its socket, not an individual response.
 					// The data channel may close before select observes its final error.

@@ -58,6 +58,16 @@ func TestEnsureExecutorsForAuthWithMode_CodexForceReplace(t *testing.T) {
 		t.Fatal("expected codex executor after first bind")
 	}
 
+	// A Codex executor is built only from the config, so a forced rebind to the
+	// same config keeps it (replacing it would only close live WS sessions).
+	service.ensureExecutorsForAuthWithMode(auth, true)
+	if sameConfig, _ := service.coreManager.Executor("codex"); sameConfig != firstExecutor {
+		t.Fatal("forced rebind to the same config replaced the codex executor")
+	}
+
+	service.cfgMu.Lock()
+	service.cfg = &config.Config{}
+	service.cfgMu.Unlock()
 	service.ensureExecutorsForAuthWithMode(auth, true)
 	secondExecutor, okSecond := service.coreManager.Executor("codex")
 	if !okSecond || secondExecutor == nil {
@@ -65,7 +75,7 @@ func TestEnsureExecutorsForAuthWithMode_CodexForceReplace(t *testing.T) {
 	}
 
 	if firstExecutor == secondExecutor {
-		t.Fatal("expected codex executor replacement in force mode")
+		t.Fatal("expected codex executor replacement in force mode for a new config")
 	}
 }
 
