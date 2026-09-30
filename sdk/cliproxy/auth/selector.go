@@ -906,14 +906,18 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 	return true, blockReasonOther, time.Time{}
 }
 
+// DefaultSessionAffinityTTL exceeds the gateway's two-hour idle acceptance window.
+const DefaultSessionAffinityTTL = 6 * time.Hour
+
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
 // It extracts session ID from multiple sources and maintains session-to-auth
-// mappings with automatic failover when the bound auth becomes unavailable.
+// mappings with automatic failover only for conversations without signed compaction.
 type SessionAffinitySelector struct {
 	fallback         Selector
 	cache            *SessionCache
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
+	stopOnce         sync.Once
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -921,13 +925,20 @@ type SessionAffinityConfig struct {
 	Fallback         Selector
 	TTL              time.Duration
 	SubagentAffinity *bool
+	// StatePath persists affinity bindings; empty retains in-memory SDK behavior.
+	StatePath string
+	// Cache reuses one binding-store owner across selector/config rebuilds.
+	// StatePath is loaded only when Cache is nil.
+	Cache *SessionCache
+	// InitializationError prevents routing when the state directory cannot be resolved.
+	InitializationError error
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
 func NewSessionAffinitySelector(fallback Selector) *SessionAffinitySelector {
 	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		Fallback: fallback,
-		TTL:      time.Hour,
+		TTL:      DefaultSessionAffinityTTL,
 	})
 }
 
@@ -937,18 +948,40 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.Fallback = &RoundRobinSelector{}
 	}
 	if cfg.TTL <= 0 {
-		cfg.TTL = time.Hour
+		cfg.TTL = DefaultSessionAffinityTTL
 	}
 	subagentAffinity := true
 	if cfg.SubagentAffinity != nil {
 		subagentAffinity = *cfg.SubagentAffinity
 	}
+	cache := cfg.Cache
+	if cache == nil {
+		cache = NewSessionCache(cfg.TTL)
+		cache.mu.Lock()
+		cache.persistenceErr = cfg.InitializationError
+		cache.mu.Unlock()
+		if cfg.InitializationError == nil && cfg.StatePath != "" {
+			if errLoad := cache.EnablePersistence(cfg.StatePath); errLoad != nil {
+				log.WithError(errLoad).Error("failed to load session affinity state; routing will fail closed")
+			}
+		}
+	}
+	cache.SetTTL(cfg.TTL)
+	cache.retainSelector()
 	return &SessionAffinitySelector{
 		fallback:         cfg.Fallback,
-		cache:            NewSessionCache(cfg.TTL),
+		cache:            cache,
 		matcher:          cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 		subagentAffinity: subagentAffinity,
 	}
+}
+
+// Cache returns the shared binding-store owner for runtime selector rebuilds.
+func (s *SessionAffinitySelector) Cache() *SessionCache {
+	if s == nil {
+		return nil
+	}
+	return s.cache
 }
 
 // Trees returns a backward-compatible in-memory session tree store.
@@ -970,7 +1003,7 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
-func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *SessionAffinitySelector) pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
@@ -1064,6 +1097,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
+		if s.cache.IsProtected(cacheKey) {
+			return nil, compactedAuthUnavailableError()
+		}
 		// Cached auth not available, reselect via fallback selector for even distribution
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 		if err != nil {
@@ -1091,6 +1127,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						return auth, nil
 					}
 				}
+			}
+			if (!isSubagent || s.subagentAffinity) && s.cache.IsProtected(fallbackKey) {
+				return nil, compactedAuthUnavailableError()
 			}
 		}
 	}
@@ -1332,12 +1371,14 @@ func (s *SessionAffinitySelector) Stop() {
 	if s == nil {
 		return
 	}
-	if s.cache != nil {
-		s.cache.Stop()
-	}
-	if s.matcher != nil {
-		s.matcher.Clear()
-	}
+	s.stopOnce.Do(func() {
+		if s.cache != nil {
+			s.cache.releaseSelector()
+		}
+		if s.matcher != nil {
+			s.matcher.Clear()
+		}
+	})
 }
 
 // InvalidateAuth removes all session bindings for a specific auth.
@@ -1476,6 +1517,10 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		nsModel = canonicalModelKey(raw)
 	}
 
+	if _, compacted := res.Options.Metadata[compactionAffinityMetadataKey]; compacted && !res.Success {
+		// A signed block is account-bound even when its account returns an error.
+		return
+	}
 	if res.Error != nil && shouldSkipCredentialCooldown(res.Error) {
 		// Request-scoped or caller-attributed failures are not evidence that the
 		// selected credential is unhealthy, so preserve both explicit and LCP bindings.

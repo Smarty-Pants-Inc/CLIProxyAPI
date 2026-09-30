@@ -7,6 +7,7 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
@@ -131,7 +132,11 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		if aliasResult.ForceMapping && strings.TrimSpace(aliasResult.OriginalAlias) != "" {
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
-		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+		forwardChunk := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if IsLocalCompactionAffinityStop(chunk.Err) {
+				// Local admission failures are not upstream execution results.
+				failed = true
+			}
 			if chunk.Err != nil && !failed {
 				failed = true
 				entry := logEntryWithRequestID(ctx)
@@ -180,6 +185,49 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return true
 			}
 		}
+		var observer *compactionOutputStream
+		format := cliproxyexecutor.ResponseFormatOrSource(opts)
+		if m.compactionOutputStore(opts) != nil && (format == sdktranslator.FormatOpenAIResponse || format == sdktranslator.FormatCodex) {
+			observer = &compactionOutputStream{record: func(payload []byte) error {
+				return m.RecordCompactionOutput(auth.ID, opts, payload)
+			}}
+		}
+		forwardPayloads := func(payloads [][]byte) bool {
+			for _, payload := range payloads {
+				if len(payload) > 0 && !forwardChunk(cliproxyexecutor.StreamChunk{Payload: payload}) {
+					return false
+				}
+			}
+			return true
+		}
+		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if observer != nil && len(chunk.Payload) > 0 {
+				payloads, errSave := observer.pushChunks(chunk.Payload)
+				if errSave != nil {
+					// Fail closed before these event bytes are visible. This local
+					// error must not enter upstream failure/cooldown accounting.
+					failed = true
+					forwardChunk(cliproxyexecutor.StreamChunk{Err: wrapRequestStopError(errSave)})
+					return false
+				}
+				if !forwardPayloads(payloads) {
+					return false
+				}
+				chunk.Payload = nil
+			}
+			if observer != nil && chunk.Err != nil {
+				payloads, errSave := observer.finishChunks()
+				if errSave != nil {
+					failed = true
+					forwardChunk(cliproxyexecutor.StreamChunk{Err: wrapRequestStopError(errSave)})
+					return false
+				}
+				if !forwardPayloads(payloads) {
+					return false
+				}
+			}
+			return forwardChunk(chunk)
+		}
 		for _, chunk := range buffered {
 			if ok := emit(chunk); !ok {
 				discardStreamChunks(remaining)
@@ -192,9 +240,20 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return
 			}
 		}
+		if observer != nil {
+			payloads, errSave := observer.finishChunks()
+			if errSave != nil {
+				failed = true
+				forwardChunk(cliproxyexecutor.StreamChunk{Err: wrapRequestStopError(errSave)})
+				return
+			}
+			if !forwardPayloads(payloads) {
+				return
+			}
+		}
 		if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
 			tailChunk := cliproxyexecutor.StreamChunk{Payload: tail}
-			if !emit(tailChunk) {
+			if !forwardChunk(tailChunk) {
 				return
 			}
 		}

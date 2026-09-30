@@ -27,6 +27,12 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// CompactionAffinityValidatorMetadataKey carries an optional func(authID string, payload []byte) error.
+// The Manager captures the request's local signer store; duplex executors invoke
+// the callback with the socket's actual auth and final payload before each write.
+// Absence preserves requests whose origin has no local compaction affinity.
+const CompactionAffinityValidatorMetadataKey = "compaction_affinity_validator"
+
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"

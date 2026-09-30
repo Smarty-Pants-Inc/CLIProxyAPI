@@ -90,6 +90,9 @@ func unwrapUpstreamExecutionAttempt(err error) error {
 }
 
 func unwrapExecutionBoundaryError(err error) error {
+	if IsLocalCompactionAffinityStop(err) {
+		return err
+	}
 	err = unwrapRequestStopError(err)
 	return unwrapUpstreamExecutionAttempt(err)
 }
@@ -121,6 +124,11 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
+	var errOrigin error
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts)
+	if errOrigin != nil {
+		return cliproxyexecutor.Response{}, errOrigin
+	}
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -181,6 +189,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
+	var errOrigin error
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts)
+	if errOrigin != nil {
+		return cliproxyexecutor.Response{}, errOrigin
+	}
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -234,6 +247,11 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
+	var errOrigin error
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts)
+	if errOrigin != nil {
+		return nil, errOrigin
+	}
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()
@@ -645,6 +663,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					break
 				}
 				continue
+			}
+			if errSave := m.RecordCompactionOutput(auth.ID, execOpts, resp.Payload); errSave != nil {
+				// Local persistence failure is not an upstream credential failure.
+				// Stop retries without publishing success or cooling this account.
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errSave)
 			}
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
@@ -1157,6 +1180,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
+			if isRequestStopError(errStream) {
+				if selection != nil {
+					releaseAttempt()
+					selection.End("local_request_stop")
+				}
+				return nil, errStream
+			}
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
 			}

@@ -1760,6 +1760,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+	if errAffinity := m.prepareSessionAffinitySelection(provider, model, opts); errAffinity != nil {
+		return nil, nil, errAffinity
+	}
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -2078,6 +2081,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
+	if errAffinity := m.prepareSessionAffinitySelection("mixed", model, opts); errAffinity != nil {
+		return nil, nil, "", errAffinity
+	}
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
