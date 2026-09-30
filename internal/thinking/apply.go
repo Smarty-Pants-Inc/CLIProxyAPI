@@ -228,7 +228,11 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		modelInfo = registry.LookupModelInfo(baseModel, providerKey)
 	}
 
-	// Resolve source intent before stripping unsupported target input items.
+	// Resolve source update intent before stripping unsupported target input items.
+	// Ordinary Responses effort belongs to the normalized target body: the update
+	// change flag does not report a plugin's baseline rewrites or deletions.
+	responseTarget := providerFormat == "codex" || providerFormat == "xai"
+	responsesRoute := responseTarget && isResponsesFormat(fromFormat)
 	updatesChanged := len(normalizedUpdatesChanged) > 0 && normalizedUpdatesChanged[0]
 	var sourceConfig ThinkingConfig
 	if isResponsesFormat(fromFormat) {
@@ -236,11 +240,12 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		if !updatesChanged && len(sourceBody) > 0 {
 			sourceRequest = sourceBody
 		}
-		if !updatesChanged || providerFormat == "codex" || providerFormat == "xai" {
+		if responseTarget {
+			sourceConfig = extractConfigurationUpdateConfig(sourceRequest)
+		} else if !updatesChanged {
 			sourceConfig = extractCodexUsageConfig(sourceRequest)
 		}
 	}
-	responseTarget := providerFormat == "codex" || providerFormat == "xai"
 	supportsUpdates := modelInfo != nil && modelInfo.SupportConfigurationUpdate
 	if responseTarget && !supportsUpdates {
 		body = stripConfigurationUpdates(body)
@@ -321,7 +326,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		}).Debug("thinking: config from model suffix |")
 	} else {
 		config = sourceConfig
-		if !hasThinkingConfig(config) && !updatesChanged && modelInfoResolved && len(sourceBody) > 0 {
+		if !hasThinkingConfig(config) && !updatesChanged && modelInfoResolved && len(sourceBody) > 0 && !responsesRoute {
 			config = extractSourceThinkingConfig(sourceBody, fromFormat)
 		}
 		if !hasThinkingConfig(config) {

@@ -62,14 +62,16 @@ func TestApplyThinkingWithModelInfoMapsOpenAICompatibilityHighIntent(t *testing.
 	}
 }
 
-func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T) {
+func TestApplyThinkingWithModelInfoMapsResponsesUpdateToCodexHighIntent(t *testing.T) {
 	modelInfo := &registry.ModelInfo{
 		ID:       "codex-upstream",
 		Type:     "codex",
 		Thinking: &registry.ThinkingSupport{Levels: []string{"high", "xhigh"}},
 	}
 	body := []byte(`{"reasoning":{"effort":"high"}}`)
-	source := []byte(`{"reasoning":{"effort":"max"}}`)
+	// Only update intent is recovered from the source. Ordinary effort belongs
+	// to the normalized target body, even when it caps max/xhigh at high.
+	source := []byte(`{"reasoning":{"effort":"max"},"input":[{"type":"configuration_update","reasoning":{"effort":"max"}}]}`)
 	out, err := thinking.ApplyThinkingWithModelInfo(body, source, "codex-upstream", "openai-response", "codex", "codex", modelInfo)
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)

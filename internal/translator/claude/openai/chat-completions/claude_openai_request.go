@@ -45,6 +45,7 @@ func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byt
 
 func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
+	toolNames := common.NewClaudeToolNames(rawJSON)
 
 	userID := common.DeriveClaudeUserID(rawJSON)
 
@@ -229,7 +230,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 							function := toolCall.Get("function")
 							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 							toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(function.Get("name").String()))
+							toolUse, _ = sjson.SetBytes(toolUse, "name", toolNames.ToClaude(function.Get("name").String()))
 
 							// Parse arguments for the tool call
 							if args := function.Get("arguments"); args.Exists() {
@@ -335,7 +336,6 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			}
 			if fnName != "" {
 				allowedToolNames[fnName] = struct{}{}
-				allowedToolNames[util.SanitizeClaudeFunctionName(fnName)] = struct{}{}
 			}
 		}
 		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
@@ -353,12 +353,10 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
 				fnName := function.Get("name").String()
-				sanitizedFnName := util.SanitizeClaudeFunctionName(fnName)
+				sanitizedFnName := toolNames.ToClaude(fnName)
 				if isAllowedTools {
 					if _, ok := allowedToolNames[fnName]; !ok {
-						if _, okSanitized := allowedToolNames[sanitizedFnName]; !okSanitized {
-							return true
-						}
+						return true
 					}
 				}
 				anthropicTool := []byte(`{"name":"","description":""}`)
@@ -438,7 +436,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				}
 				if functionName != "" {
 					toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(functionName))
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", toolNames.ToClaude(functionName))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				} else {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))

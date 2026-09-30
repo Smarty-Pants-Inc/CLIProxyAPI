@@ -38,6 +38,7 @@ type ConvertAnthropicResponseToGeminiParams struct {
 	ToolUseNames map[int]string           // function/tool name per block index
 	ToolUseArgs  map[int]*strings.Builder // accumulates partial_json across deltas
 	ToolUseIDs   map[int]string           // tool use ID per block index
+	ToolNames    translatorcommon.ClaudeToolNames
 }
 
 // ConvertClaudeResponseToGemini converts Claude Code streaming response format to Gemini format.
@@ -60,6 +61,7 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 			Model:      modelName,
 			CreatedAt:  0,
 			ResponseID: "",
+			ToolNames:  translatorcommon.NewClaudeToolNames(originalRequestRawJSON),
 		}
 	}
 
@@ -109,7 +111,7 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames = map[int]string{}
 				}
 				if name := cb.Get("name"); name.Exists() {
-					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames[idx] = name.String()
+					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames[idx] = (*param).(*ConvertAnthropicResponseToGeminiParams).ToolNames.FromClaude(name.String())
 				}
 				if toolID := cb.Get("id").String(); toolID != "" {
 					if (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs == nil {
@@ -344,6 +346,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 		ToolUseNames:      nil,
 		ToolUseArgs:       nil,
 		ToolUseIDs:        nil,
+		ToolNames:         translatorcommon.NewClaudeToolNames(originalRequestRawJSON),
 	}
 
 	// Process each streaming event and collect parts
@@ -382,7 +385,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 						newParam.ToolUseNames = map[int]string{}
 					}
 					if name := cb.Get("name"); name.Exists() {
-						newParam.ToolUseNames[idx] = name.String()
+						newParam.ToolUseNames[idx] = newParam.ToolNames.FromClaude(name.String())
 					}
 					if toolID := cb.Get("id").String(); toolID != "" {
 						if newParam.ToolUseIDs == nil {

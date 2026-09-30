@@ -23,6 +23,15 @@ func (d configurationUpdateHomeDispatcher) RPopAuth(context.Context, string, str
 }
 
 func TestHomeDispatchConfigurationUpdateCapabilityAndLegacyFallback(t *testing.T) {
+	testHomeDispatchConfigurationUpdateCapabilityAndLegacyFallback(t, false)
+}
+
+func TestHomeDispatchConfigurationUpdateCapabilityAndLegacyFallbackExecuteStream(t *testing.T) {
+	testHomeDispatchConfigurationUpdateCapabilityAndLegacyFallback(t, true)
+}
+
+func testHomeDispatchConfigurationUpdateCapabilityAndLegacyFallback(t *testing.T, stream bool) {
+	t.Helper()
 	const model = "gpt-6-luna"
 	for _, tc := range []struct {
 		name, capability string
@@ -80,9 +89,22 @@ func TestHomeDispatchConfigurationUpdateCapabilityAndLegacyFallback(t *testing.T
 			if tc.localSupport {
 				requestModel = "tenant/" + model
 			}
-			response, errExecute := manager.Execute(t.Context(), []string{"codex"}, cliproxyexecutor.Request{Model: requestModel}, cliproxyexecutor.Options{})
-			if errExecute != nil {
-				t.Fatalf("Execute() error = %v; response=%+v", errExecute, response)
+			req := cliproxyexecutor.Request{Model: requestModel}
+			if stream {
+				result, errStream := manager.ExecuteStream(t.Context(), []string{"codex"}, req, cliproxyexecutor.Options{})
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else {
+				response, errExecute := manager.Execute(t.Context(), []string{"codex"}, req, cliproxyexecutor.Options{})
+				if errExecute != nil {
+					t.Fatalf("Execute() error = %v; response=%+v", errExecute, response)
+				}
 			}
 			if len(exec.requests) != 1 {
 				t.Fatalf("executor requests = %d", len(exec.requests))

@@ -377,10 +377,19 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		if since.After(now) {
 			since = now
 		}
-		record.NextRetryAfter = boundQuotaHold(record.NextRetryAfter, since)
+		// Propagated quota or a later non-quota error can coexist with an
+		// independent hold at either scope (for example, a 12-hour 404).
+		// Bound only the quota component of such a record.
+		independentNonQuotaHold := record.LastError != nil && record.LastError.HTTPStatus != 429
+		if !independentNonQuotaHold {
+			record.NextRetryAfter = boundQuotaHold(record.NextRetryAfter, since)
+		}
 		quota.NextRecoverAt = boundQuotaHold(quota.NextRecoverAt, since)
 		if !record.NextRetryAfter.After(now) {
 			return false
+		}
+		if !quota.NextRecoverAt.After(now) {
+			applyCooldownFields(&quota, QuotaState{})
 		}
 	}
 

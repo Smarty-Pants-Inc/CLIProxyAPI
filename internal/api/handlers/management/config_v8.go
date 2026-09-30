@@ -123,18 +123,24 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	if !yamlRequest && c.Request.Method != http.MethodDelete {
 		preserveV8TURNSecrets(root, before)
 	}
-	// Revisions are owned by Home and must not become ordinary editable settings.
+	// Decode the complete trees before checking Home-owned revisions. yaml.v3
+	// safely resolves aliases and merge keys (including root merges), rejecting
+	// cycles, invalid merges, and duplicate keys instead of hiding a revision.
+	var oldEffective, nextEffective map[string]any
+	if err = before.Decode(&oldEffective); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config", "message": err.Error()})
+		return
+	}
+	if err = root.Decode(&nextEffective); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
+		return
+	}
+	// Presence is read-only too: absent and explicit null must not compare equal.
 	for _, field := range []string{"credentials/concurrency/lifecycle-config-revision", "credentials/concurrency/observation-barrier-revision", "plugins/auth-revision"} {
-		old := configV8Node(before, strings.Split(field, "/"))
-		next := configV8Node(root, strings.Split(field, "/"))
-		var a, b any
-		if old != nil {
-			_ = old.Decode(&a)
-		}
-		if next != nil {
-			_ = next.Decode(&b)
-		}
-		if !reflect.DeepEqual(a, b) {
+		parts := strings.Split(field, "/")
+		old, oldPresent := configV8EffectiveValue(oldEffective, parts)
+		next, nextPresent := configV8EffectiveValue(nextEffective, parts)
+		if oldPresent != nextPresent || !reflect.DeepEqual(old, next) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "read_only_field", "field": field})
 			return
 		}
@@ -239,6 +245,26 @@ func preserveV8TURNSecrets(root, before *yaml.Node) {
 			break
 		}
 	}
+}
+
+// Nested YAML mappings may decode with non-string keys when an opaque plugin
+// setting contains them. Look up the string path without dropping its presence.
+func configV8EffectiveValue(root any, parts []string) (any, bool) {
+	for _, part := range parts {
+		var present bool
+		switch mapping := root.(type) {
+		case map[string]any:
+			root, present = mapping[part]
+		case map[any]any:
+			root, present = mapping[part]
+		default:
+			return nil, false
+		}
+		if !present {
+			return nil, false
+		}
+	}
+	return root, true
 }
 
 func configV8Node(root *yaml.Node, parts []string) *yaml.Node {

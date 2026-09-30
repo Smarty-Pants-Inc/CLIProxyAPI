@@ -1114,9 +1114,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
-		if selection != nil && !restoreExecutionModel {
-			execReq = attachResolvedHomeModelInfo(execReq, auth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
-		}
 		streamExecutionModel := ""
 		if restoreExecutionModel {
 			streamExecutionModel = executionModel
@@ -1162,7 +1159,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, selection, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream

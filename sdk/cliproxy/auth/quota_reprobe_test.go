@@ -147,6 +147,98 @@ func TestRestoreCooldownStates_OldMultiDayQuotaHoldIsReprobed(t *testing.T) {
 	}
 }
 
+// A propagated credential quota must not turn an independent model-support
+// deadline into a quota deadline when the persisted state is restored.
+func TestRestoreCooldownStates_CredentialQuotaPreservesIndependentSupportHold(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	for _, tc := range []struct {
+		name      string
+		legacyAge time.Duration
+	}{
+		{name: "current"},
+		{name: "legacy recent quota", legacyAge: 10 * time.Minute},
+		{name: "legacy expired quota", legacyAge: quotaReprobeInterval + time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const modelA = "gpt-restore-support-a"
+			const modelB = "gpt-restore-support-b"
+			manager, auth := newCooldownMonotonicManager(t, modelA, modelB)
+			store := &recordingCooldownStateStore{}
+			manager.SetCooldownStateStore(store)
+			manager.MarkResult(context.Background(), Result{
+				AuthID: auth.ID, Provider: auth.Provider, Model: modelA,
+				Error: &Error{HTTPStatus: http.StatusNotFound, Message: "model not found"},
+			})
+			beforeQuota, _ := manager.GetByID(auth.ID)
+			wantSupportDeadline := beforeQuota.ModelStates[modelA].NextRetryAfter
+			weekly := 94 * time.Hour
+			manager.MarkResult(context.Background(), Result{
+				AuthID: auth.ID, Provider: auth.Provider, Model: modelB,
+				CredentialScope: true, RetryAfter: &weekly,
+				Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+			})
+			records := store.savedRecords()
+			var supportRecord *CooldownStateRecord
+			for i := range records {
+				if records[i].Model == modelA {
+					supportRecord = &records[i]
+				}
+			}
+			if supportRecord == nil || supportRecord.LastError == nil || supportRecord.LastError.HTTPStatus != http.StatusNotFound ||
+				!supportRecord.NextRetryAfter.Equal(wantSupportDeadline) || !supportRecord.Quota.Exceeded ||
+				!supportRecord.Quota.NextRecoverAt.Before(wantSupportDeadline) {
+				t.Fatalf("persisted support/quota precondition failed: %+v", supportRecord)
+			}
+			now := time.Now()
+			if tc.legacyAge > 0 {
+				// Simulate a pre-reprobe release while keeping the real mixed
+				// support/quota state produced by MarkResult and persistence.
+				for i := range records {
+					records[i].UpdatedAt = now.Add(-tc.legacyAge)
+					records[i].Quota.NextRecoverAt = now.Add(weekly)
+					if records[i].Model != modelA {
+						records[i].NextRetryAfter = now.Add(weekly)
+					}
+				}
+			}
+			restored := NewManager(nil, nil, nil)
+			if _, err := restored.Register(WithSkipPersist(context.Background()), auth); err != nil {
+				t.Fatal(err)
+			}
+			restored.SetCooldownStateStore(&mockCooldownStateStore{records: records})
+			if err := restored.RestoreCooldownStates(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := restored.GetByID(auth.ID)
+			state := got.ModelStates[modelA]
+			if state == nil || !state.NextRetryAfter.Equal(wantSupportDeadline) {
+				t.Fatalf("restored independent 404 deadline = %+v, want %v", state, wantSupportDeadline)
+			}
+			if state.Quota.NextRecoverAt.After(now.Add(quotaReprobeInterval)) {
+				t.Fatalf("restored quota component exceeds re-probe bound: %+v", state.Quota)
+			}
+			afterQuota := now.Add(quotaReprobeInterval + time.Minute)
+			if blocked, _, _ := isAuthBlockedForModel(got, modelA, afterQuota); !blocked {
+				t.Fatal("model A lost its independent 12-hour support hold after quota expires")
+			}
+			if blocked, _, next := isAuthBlockedForModel(got, modelB, afterQuota); blocked {
+				t.Fatalf("model B inherited independent support hold or unbounded quota until %v", next)
+			}
+			if blocked, _, _ := isAuthBlockedForModel(got, modelA, wantSupportDeadline.Add(time.Minute)); blocked {
+				t.Fatal("model A remains blocked after its support hold expires")
+			}
+			if tc.legacyAge > quotaReprobeInterval {
+				if blocked, _, _ := isAuthBlockedForModel(got, modelB, now); blocked {
+					t.Fatal("expired legacy quota still blocks model B")
+				}
+			}
+		})
+	}
+}
+
 // An in-flight 429 that lands on an account still carrying a pre-bound
 // multi-day quota deadline must not keep that deadline (max-with-existing).
 func TestManager_MarkResult_DoesNotKeepOldMultiDayQuotaDeadline(t *testing.T) {
