@@ -3,6 +3,7 @@ package openai
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -112,6 +113,89 @@ func TestResponsesWebsocketDisconnectErrorWaitsForInFlightFrame(t *testing.T) {
 	if errRead != nil || messageType != websocket.TextMessage || !strings.Contains(string(payload), "fixture_terminal_refusal") {
 		t.Fatalf("downstream got type=%d payload=%q err=%v, want the typed error frame", messageType, payload, errRead)
 	}
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatal(errServer)
+	}
+}
+
+// With steering off, one Codex typed error reaches both terminal callers: the
+// disconnect subscriber and the handler's forwarder. When the subscriber's
+// terminal write stalls on a client that does not read, the handler's duplicate
+// call waited on terminalMu forever, so its teardown (awaitTerminalWrite and
+// conn.Close) never ran and the stalled writer was never released.
+func TestResponsesWebsocketDuplicateTerminalCallDoesNotWaitOnStalledWriter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if tcp, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
+			_ = tcp.SetWriteBuffer(4096)
+		}
+		writer := newResponsesWebsocketWriter(conn)
+
+		// The subscriber's terminal write: far larger than the socket buffers of
+		// a client that never reads, so it stalls inside WriteMessage.
+		firstDone := make(chan struct{})
+		go func() {
+			_, _ = writer.closeWithPayload(make([]byte, 32<<20))
+			close(firstDone)
+		}()
+		for !writer.closing.Load() {
+			time.Sleep(time.Millisecond)
+		}
+
+		// The handler's forwarder receives the same typed error.
+		handlerDone := make(chan struct{})
+		go func() {
+			defer close(handlerDone)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = r
+			data := make(chan []byte)
+			errCh := make(chan *interfaces.ErrorMessage, 1)
+			errCh <- &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: websocketPinnedFailoverStatusError{status: http.StatusBadRequest, msg: "compaction_json_rejected: fixture refusal"}}
+			close(errCh)
+			close(data)
+			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+			_, _, _, _, _ = h.forwardResponsesWebsocket(ctx, writer, func(...interface{}) {}, data, errCh, newInMemoryWebsocketTimelineLog(), "session-duplicate")
+			// Session teardown, as the handler's defer does it.
+			writer.awaitTerminalWrite()
+			_ = conn.Close()
+		}()
+
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			_ = conn.Close() // release the fixture
+			serverErrCh <- errors.New("duplicate terminal call and teardown did not return within 2s behind a stalled terminal writer")
+			return
+		}
+		select {
+		case <-firstDone:
+			serverErrCh <- nil
+		case <-time.After(2 * time.Second):
+			serverErrCh <- errors.New("teardown close did not release the stalled terminal writer")
+		}
+	}))
+	defer server.Close()
+	dialer := *websocket.DefaultDialer
+	dialer.NetDial = func(network, addr string) (net.Conn, error) {
+		c, err := net.Dial(network, addr)
+		if tcp, ok := c.(*net.TCPConn); ok {
+			_ = tcp.SetReadBuffer(4096)
+		}
+		return c, err
+	}
+	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	// The client does not read, so the first terminal write cannot finish.
 	if errServer := <-serverErrCh; errServer != nil {
 		t.Fatal(errServer)
 	}

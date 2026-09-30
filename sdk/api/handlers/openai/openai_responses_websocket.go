@@ -170,7 +170,15 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	if w == nil || w.conn == nil {
 		return false, nil
 	}
-	w.terminalMu.Lock()
+	// A duplicate terminal call must not wait behind the first caller's network
+	// write: that caller claims closing right after it takes terminalMu, so a
+	// waiter sees closing and returns, and teardown can close the socket.
+	for !w.terminalMu.TryLock() {
+		if w.closing.Load() {
+			return false, nil
+		}
+		time.Sleep(time.Millisecond)
+	}
 	defer w.terminalMu.Unlock()
 	if !w.closing.CompareAndSwap(false, true) {
 		return false, nil
