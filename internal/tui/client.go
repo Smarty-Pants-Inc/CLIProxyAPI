@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -24,6 +25,7 @@ func NewClient(port int, secretKey string) *Client {
 }
 
 // NewClientWithBaseURL creates a new management API client targeting the specified base URL.
+// A schemeless loopback address gets http://; any other schemeless address gets https://.
 func NewClientWithBaseURL(baseURL string, secretKey string) *Client {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
@@ -31,7 +33,11 @@ func NewClientWithBaseURL(baseURL string, secretKey string) *Client {
 	} else {
 		lower := strings.ToLower(baseURL)
 		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-			baseURL = "http://" + baseURL
+			scheme := "https://"
+			if u, err := url.Parse("//" + baseURL); err == nil && isLoopbackHost(u.Hostname()) {
+				scheme = "http://"
+			}
+			baseURL = scheme + baseURL
 		}
 		baseURL = strings.TrimRight(baseURL, "/")
 	}
@@ -40,8 +46,53 @@ func NewClientWithBaseURL(baseURL string, secretKey string) *Client {
 		secretKey: strings.TrimSpace(secretKey),
 		http: &http.Client{
 			Timeout: 10 * time.Second,
+			// A redirect must pass the same transport check, so HTTPS cannot
+			// downgrade the bearer credential to plaintext HTTP.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				return checkManagementTransport(req.URL)
+			},
 		},
 	}
+}
+
+// checkManagementTransport refuses to carry the management credential in
+// plaintext off the host: HTTPS anywhere, plain HTTP only to a loopback address
+// (the local server or an SSH tunnel's local end).
+func checkManagementTransport(u *url.URL) error {
+	if u == nil {
+		return fmt.Errorf("management URL is missing")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("refusing to send the management key over plain HTTP to %s; use https:// or an SSH tunnel to a loopback address", u.Host)
+	default:
+		return fmt.Errorf("unsupported management URL scheme %q", u.Scheme)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// CheckTransport reports whether the base URL may carry the management key.
+func (c *Client) CheckTransport() error {
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return err
+	}
+	return checkManagementTransport(u)
 }
 
 // BaseURL returns the client's configured management API base URL.
@@ -55,9 +106,11 @@ func (c *Client) SetSecretKey(secretKey string) {
 }
 
 func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, error) {
-	url := c.baseURL + path
-	req, err := http.NewRequest(method, url, body)
+	req, err := http.NewRequest(method, c.baseURL+path, body)
 	if err != nil {
+		return nil, 0, err
+	}
+	if err := checkManagementTransport(req.URL); err != nil {
 		return nil, 0, err
 	}
 	if c.secretKey != "" {

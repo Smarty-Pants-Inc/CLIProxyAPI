@@ -370,6 +370,19 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
 	}
+	if quota.Exceeded || (record.LastError != nil && record.LastError.HTTPStatus == 429) {
+		// A quota hold saved before the re-probe bound (e.g. a 94 h weekly
+		// reset) is re-probed within one interval of when it was set.
+		since := updatedAt
+		if since.After(now) {
+			since = now
+		}
+		record.NextRetryAfter = boundQuotaHold(record.NextRetryAfter, since)
+		quota.NextRecoverAt = boundQuotaHold(quota.NextRecoverAt, since)
+		if !record.NextRetryAfter.After(now) {
+			return false
+		}
+	}
 
 	if model == "" {
 		auth.Unavailable = true
@@ -895,8 +908,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
 								credentialNext = next
-								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
-									next = state.Quota.NextRecoverAt
+								if held := boundQuotaHold(state.Quota.NextRecoverAt, now); state.Quota.Exceeded && held.After(next) {
+									next = held
 								}
 							}
 							state.NextRetryAfter = next
@@ -912,8 +925,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										otherState.Unavailable = true
 										otherState.Status = StatusError
 										otherQuotaNext := credentialNext
-										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
-											otherQuotaNext = otherState.Quota.NextRecoverAt
+										if held := boundQuotaHold(otherState.Quota.NextRecoverAt, now); otherState.Quota.Exceeded && held.After(otherQuotaNext) {
+											otherQuotaNext = held
 										}
 										otherRetryAfter := otherQuotaNext
 										// Propagation only extends a sibling's still-live
@@ -932,9 +945,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 								auth.Unavailable = true
 								authNext := credentialNext
-								if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" &&
-									auth.Quota.NextRecoverAt.After(authNext) {
-									authNext = auth.Quota.NextRecoverAt
+								if held := boundQuotaHold(auth.Quota.NextRecoverAt, now); auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" &&
+									held.After(authNext) {
+									authNext = held
 								}
 								auth.Quota.Exceeded = true
 								auth.Quota.Reason = "credential_quota"
@@ -2273,8 +2286,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				}
-				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
-					next = auth.Quota.NextRecoverAt
+				if held := boundQuotaHold(auth.Quota.NextRecoverAt, now); auth.Quota.Exceeded && held.After(next) {
+					next = held
 				}
 			}
 			auth.Quota.NextRecoverAt = next
@@ -2323,9 +2336,19 @@ func quotaRetryAfterCooldown(retryAfter time.Duration) time.Duration {
 	return retryAfter
 }
 
+// boundQuotaHold caps a quota hold deadline at since+quotaReprobeInterval. It
+// covers holds restored from disk or kept from an earlier result, which may
+// predate the bound on new retry-after hints. Non-quota holds are not passed here.
+func boundQuotaHold(deadline, since time.Time) time.Time {
+	if limit := since.Add(quotaReprobeInterval).Round(0); deadline.After(limit) {
+		return limit
+	}
+	return deadline
+}
+
 func quotaCooldownAfterFailure(quota QuotaState, now time.Time) (time.Time, int) {
 	if quota.NextRecoverAt.After(now) {
-		return quota.NextRecoverAt, quota.BackoffLevel
+		return boundQuotaHold(quota.NextRecoverAt, now), quota.BackoffLevel
 	}
 	cooldown, nextLevel := nextQuotaCooldown(quota.BackoffLevel, false)
 	var next time.Time

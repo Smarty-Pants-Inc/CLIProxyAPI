@@ -497,6 +497,9 @@ func Run(port int, secretKey string, hook *LogHook, output io.Writer) error {
 // RunWithBaseURL starts the TUI application targeting the specified management base URL.
 // output specifies where bubbletea renders. If nil, defaults to os.Stdout.
 func RunWithBaseURL(baseURL string, secretKey string, hook *LogHook, output io.Writer) error {
+	if err := NewClientWithBaseURL(baseURL, "").CheckTransport(); err != nil {
+		return err
+	}
 	if output == nil {
 		output = os.Stdout
 	}

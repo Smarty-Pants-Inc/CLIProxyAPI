@@ -29,9 +29,14 @@ func TestNewClientWithBaseURL(t *testing.T) {
 			expectedURL: "HTTPS://proxy.example.com",
 		},
 		{
-			name:        "url without scheme",
+			name:        "remote url without scheme defaults to https",
 			inputURL:    "proxy.example.com:9000",
-			expectedURL: "http://proxy.example.com:9000",
+			expectedURL: "https://proxy.example.com:9000",
+		},
+		{
+			name:        "loopback url without scheme keeps http",
+			inputURL:    "127.0.0.1:8317",
+			expectedURL: "http://127.0.0.1:8317",
 		},
 		{
 			name:        "url with subpath and trailing slash",
