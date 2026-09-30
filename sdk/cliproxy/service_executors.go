@@ -250,13 +250,14 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
-		if !forceReplace {
-			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
-			if hasExecutor {
-				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
-				if isCodexAutoExecutor {
-					return
-				}
+		// Replacing the executor closes every live Codex websocket session, so a
+		// config reload keeps the executor already bound to that exact config.
+		// Compare with the bound executor, not the last committed config: a
+		// superseded commit may never have reached registration.
+		if existingExecutor, hasExecutor := s.coreManager.Executor("codex"); hasExecutor {
+			existingCodexAutoExecutor, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
+			if isCodexAutoExecutor && (!forceReplace || existingCodexAutoExecutor.UsesConfig(cfg)) {
+				return
 			}
 		}
 		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))

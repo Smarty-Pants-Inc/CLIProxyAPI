@@ -284,11 +284,10 @@ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimeline
 	if writer == nil || writer.conn == nil {
 		return fmt.Errorf("responses websocket: writer is nil")
 	}
-	writer.writeMu.Lock()
-	defer writer.writeMu.Unlock()
-	if writer.closing.Load() {
-		return websocket.ErrCloseSent
+	if err := writer.lockForWrite(); err != nil {
+		return err
 	}
+	defer writer.writeMu.Unlock()
 	return writer.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
