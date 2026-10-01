@@ -60,6 +60,18 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 		return
 	}
 
+	localOnly := c.GetBool("keyPolicyLocalHangup") || len(h.authManager.KeyPolicies(c.GetString("userApiKey"))) != 0
+	if localOnly && session.ownerPrincipal == "" {
+		writeRealtimeError(c, http.StatusForbidden, "Realtime call has no authenticated owner", "invalid_request_error", "realtime_call_scope_mismatch")
+		return
+	}
+	// Local owner cleanup must not depend on policy or upstream availability.
+	defer h.sessions.complete(session, "client_hangup")
+	if localOnly {
+		c.Status(http.StatusNoContent)
+		return
+	}
+
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, liveSelectionHeaders(c), nil, map[string]any{
 		coreexecutor.ExecutionSessionMetadataKey: callID,

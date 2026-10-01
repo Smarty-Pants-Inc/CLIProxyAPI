@@ -19,6 +19,9 @@ func init() {
 
 type usageQueuePlugin struct{}
 
+// BuiltinUsageSink identifies the proxy's native accounting sink, not a plugin.
+func (*usageQueuePlugin) BuiltinUsageSink() {}
+
 func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if p == nil {
 		return

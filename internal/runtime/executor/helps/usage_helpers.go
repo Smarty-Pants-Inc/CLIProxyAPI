@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -783,6 +784,9 @@ func APIKeyFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
+	if cliproxyauth.KeyPolicyFromContext(ctx) != nil {
+		return "[REDACTED]"
+	}
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil {
 		return ""
@@ -984,6 +988,14 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 		return usage.Detail{ResponseServiceTier: responseServiceTier}, true
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
+	known := func(node gjson.Result) bool {
+		if node.Type != gjson.Number {
+			return false
+		}
+		n, err := strconv.ParseInt(node.Raw, 10, 64)
+		return err == nil && n >= 0
+	}
+	detail.Incomplete = !known(usageNode.Get("total_tokens")) && !(known(usageNode.Get("input_tokens")) && known(usageNode.Get("output_tokens")))
 	detail.ResponseServiceTier = responseServiceTier
 	return detail, true
 }

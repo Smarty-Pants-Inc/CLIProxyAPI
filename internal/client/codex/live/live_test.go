@@ -485,7 +485,7 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	handler := NewHandler(manager, runtimeConfig)
 	handler.mediaRelay = mediaRelay
 	router := gin.New()
-	router.POST("/v1/live", handler.Handle)
+	router.POST("/v1/live", func(c *gin.Context) { c.Set("userApiKey", "owner"); handler.Handle(c) })
 
 	const boundary = "media-relay-boundary"
 	body := multipartBody(boundary, "v=0\r\no=desktop-offer\r\n", `{"model":"gpt-live-1-codex"}`)
@@ -535,6 +535,12 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	if mediaSession.closeHandler == nil {
 		t.Fatal("media session close handler was not installed")
+	}
+	if err := handler.UpdateConfig(livePolicyConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if !mediaSession.closed.Load() {
+		t.Fatal("policy activation left retained WebRTC relay open")
 	}
 	mediaSession.closeHandler("test_closed")
 	if !mediaSession.closed.Load() {

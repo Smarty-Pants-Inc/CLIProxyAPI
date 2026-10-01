@@ -77,6 +77,8 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
+	// Incomplete means token consumption is unknown, not zero.
+	Incomplete          bool
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64
@@ -293,8 +295,9 @@ type Plugin interface {
 }
 
 type queueItem struct {
-	ctx    context.Context
-	record Record
+	ctx            context.Context
+	record         Record
+	withoutPlugins bool
 }
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
@@ -405,6 +408,10 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.TraceID = trID
 		}
 	}
+	withoutPlugins := ctx != nil && ctx.Value(withoutPluginsKey{}) == true
+	if withoutPlugins {
+		record.APIKey = "[REDACTED]"
+	}
 	observeRecord(ctx, record)
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
@@ -413,7 +420,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 		m.mu.Unlock()
 		return
 	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
+	m.queue = append(m.queue, queueItem{ctx: ctx, record: record, withoutPlugins: withoutPlugins})
 	m.mu.Unlock()
 	m.cond.Signal()
 }
@@ -446,6 +453,11 @@ func (m *Manager) dispatch(item queueItem) {
 	for _, plugin := range plugins {
 		if plugin == nil {
 			continue
+		}
+		if item.withoutPlugins {
+			if _, builtin := plugin.(interface{ BuiltinUsageSink() }); !builtin {
+				continue
+			}
 		}
 		safeInvoke(plugin, item.ctx, item.record)
 	}

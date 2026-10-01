@@ -160,7 +160,9 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 	if homeSessionAliasTTL(previousCfg) != homeSessionAliasTTL(cfg) {
 		m.homeSessionAliases.clear()
 	}
+	m.keyPolicyMu.Lock()
 	m.runtimeConfig.Store(cfg)
+	m.keyPolicyMu.Unlock()
 	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
 	if clearedCooldowns && oldCooldownStore != nil {
 		m.mu.Lock()

@@ -46,6 +46,10 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	if s == nil || cfg == nil {
 		return false
 	}
+	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with invalid API key policies")
+		return false
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

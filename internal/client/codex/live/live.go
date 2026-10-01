@@ -4,6 +4,8 @@ package live
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +60,7 @@ type Handler struct {
 	mediaRelayConfig     config.CodexLiveMediaRelayConfig
 	mediaRelayConfigured bool
 	mediaLimiter         *mediaSessionLimiter
+	rawRelayOwners       map[*liveSessionResources]string
 }
 
 // NewHandler creates a Codex live session handler.
@@ -88,9 +91,18 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	previousConfig := h.mediaRelayConfig
 	previouslyConfigured := h.mediaRelayConfigured
 	h.cfg = cfg
+	var retire []*liveSessionResources
+	for resources, digest := range h.rawRelayOwners {
+		if hasRawKeyPolicy(cfg, digest) {
+			retire = append(retire, resources)
+		}
+	}
 	if previouslyConfigured && reflect.DeepEqual(previousConfig, relayConfig) {
 		currentErr := h.mediaRelayErr
 		h.mediaRelayMu.Unlock()
+		for _, resources := range retire {
+			resources.close()
+		}
 		return currentErr
 	}
 	if h.mediaLimiter == nil {
@@ -106,6 +118,9 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	h.mediaRelayConfig = relayConfig
 	h.mediaRelayConfigured = true
 	h.mediaRelayMu.Unlock()
+	for _, resources := range retire {
+		resources.close()
+	}
 
 	if relayErr == nil && (previouslyConfigured || relayConfig.Enabled) {
 		message := "codex live media relay configured"
@@ -115,6 +130,47 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 		log.WithFields(liveMediaConfigLogFields(relayConfig)).Info(message)
 	}
 	return relayErr
+}
+
+func hasRawKeyPolicy(cfg *config.Config, digest string) bool {
+	if cfg != nil {
+		for _, p := range cfg.APIKeyPolicies {
+			if p.KeySHA256 == digest {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Register before dialing, so reload cancels pending handshakes as well as relays.
+// add() immediately closes resources that arrive after their owner was cut off.
+func (h *Handler) trackRawRelay(c *gin.Context) (context.Context, *liveSessionResources, func(), bool) {
+	owner, _ := requestOwner(c)
+	b := sha256.Sum256([]byte(owner))
+	digest := hex.EncodeToString(b[:])
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	resources := &liveSessionResources{}
+	resources.add(func() error { cancel(); return nil })
+	h.mediaRelayMu.Lock()
+	allowed := !hasRawKeyPolicy(h.cfg, digest) && len(h.authManager.KeyPolicies(owner)) == 0
+	if allowed {
+		if h.rawRelayOwners == nil {
+			h.rawRelayOwners = make(map[*liveSessionResources]string)
+		}
+		h.rawRelayOwners[resources] = digest
+	}
+	h.mediaRelayMu.Unlock()
+	release := func() {
+		h.mediaRelayMu.Lock()
+		delete(h.rawRelayOwners, resources)
+		h.mediaRelayMu.Unlock()
+		resources.close()
+	}
+	if !allowed {
+		release()
+	}
+	return ctx, resources, release, allowed
 }
 
 func liveMediaConfigLogFields(relayConfig config.CodexLiveMediaRelayConfig) log.Fields {
@@ -171,6 +227,15 @@ func (h *Handler) Close() {
 	if h == nil {
 		return
 	}
+	h.mediaRelayMu.Lock()
+	var retire []*liveSessionResources
+	for resources := range h.rawRelayOwners {
+		retire = append(retire, resources)
+	}
+	h.mediaRelayMu.Unlock()
+	for _, resources := range retire {
+		resources.close()
+	}
 	if h.sessions != nil {
 		h.sessions.closeAll("server_stopped")
 	}
@@ -186,6 +251,17 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 
+	ctx, rawResources, releaseRaw, allowed := h.trackRawRelay(c)
+	if !allowed {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+		return
+	}
+	rawRetained := false
+	defer func() {
+		if !rawRetained {
+			releaseRaw()
+		}
+	}()
 	body, errRead := readBody(c.Request.Body)
 	if errRead != nil {
 		status := clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest)
@@ -214,7 +290,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	var mediaSession mediaRelaySession
 	mediaRetained := false
 
-	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = context.WithValue(ctx, "gin", c)
 	selectionOpts := coreexecutor.Options{
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
@@ -382,6 +458,10 @@ func (h *Handler) Handle(c *gin.Context) {
 		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model, responseBody)
 		log.WithField("status", resp.StatusCode).Warnf("codex live upstream request failed: %s", logging.SafeDiagnosticForLog(string(responseBody)))
 	}
+	if ctx.Err() != nil {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+		return
+	}
 	responseBodyToWrite := responseBody
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	callID := ""
@@ -452,10 +532,15 @@ func (h *Handler) Handle(c *gin.Context) {
 			}
 			storedSession = h.sessions.put(callID, session)
 			sessionStored = storedSession.callID != ""
+			rawRetained = sessionStored
+			if storedSession.resources != nil {
+				storedSession.resources.add(func() error { releaseRaw(); return nil })
+			}
 			if mediaSession != nil {
 				mediaSession.SetCloseHandler(func(reason string) {
 					h.sessions.complete(storedSession, reason)
 				})
+				rawResources.add(func() error { return mediaSession.CloseWithReason("raw_session_closed") })
 				mediaRetained = true
 			}
 		}

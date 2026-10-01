@@ -346,6 +346,13 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		writeRealtimeError(c, http.StatusForbidden, "Realtime call belongs to another API principal", "invalid_request_error", "realtime_call_scope_mismatch")
 		return
 	}
+	ctx, rawResources, releaseRaw, allowed := h.trackRawRelay(c)
+	if !allowed {
+		h.sessions.release(session)
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+		return
+	}
+	defer releaseRaw()
 	consumeSession := false
 	defer func() {
 		if consumeSession {
@@ -355,7 +362,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		h.sessions.release(session)
 	}()
 
-	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = context.WithValue(ctx, "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, c.Request.Header, nil, map[string]any{
 		coreexecutor.ExecutionSessionMetadataKey: session.callID,
@@ -476,6 +483,11 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	closeUpstream := websocketCloseFunc("upstream", upstream)
+	rawResources.add(closeUpstream)
+	if ctx.Err() != nil {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+		return
+	}
 	if selection != nil {
 		if errBind := selection.Bind(closeUpstream); errBind != nil {
 			consumeSession = true
@@ -496,6 +508,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		return
 	}
 	closeDownstream := websocketCloseFunc("downstream", downstream)
+	rawResources.add(closeDownstream)
 	if selection != nil {
 		if errBind := selection.Bind(closeDownstream); errBind != nil {
 			consumeSession = true

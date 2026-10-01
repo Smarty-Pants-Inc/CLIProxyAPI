@@ -132,9 +132,24 @@ func (m *Manager) BeginKeyPolicy(ctx context.Context, policies []config.APIKeyPo
 	}
 	release := func() { <-a.gate }
 	m.keyPolicyMu.Lock()
+	// Quota admission and config publication share this lock. A queued operation
+	// must retain the policy at this point, not only the one before its wait.
+	cfg, _ = m.runtimeConfig.Load().(*config.Config)
+	for _, p := range cfg.APIKeyPolicies {
+		if p.KeySHA256 == digest {
+			policies = append(policies, p)
+		}
+	}
+	policies = copyPolicies(policies)
 	m.resetPolicyDay(a)
 	var err error
+	if cfg.Home.Enabled || cfg.Plugins.Enabled {
+		err = policyError("api_key_policy_unavailable", 503)
+	}
 	for _, p := range policies {
+		if p.AllowedModels != nil && !containsExact(*p.AllowedModels, model) {
+			err = policyError("api_key_model_forbidden", 403)
+		}
 		if p.DailyTokenCap != nil && a.tokens >= *p.DailyTokenCap {
 			err = policyError("api_key_daily_token_cap", 429)
 		}
@@ -177,7 +192,7 @@ func WithKeyPolicy(ctx context.Context, op *KeyPolicyOperation) context.Context 
 	if op == nil {
 		return ctx
 	}
-	return usage.WithObserver(context.WithValue(translator.WithoutPluginHooks(ctx), keyPolicyContextKey{}, op), op.observe)
+	return usage.WithObserver(usage.WithoutPlugins(context.WithValue(translator.WithoutPluginHooks(ctx), keyPolicyContextKey{}, op)), op.observe)
 }
 func KeyPolicyFromContext(ctx context.Context) *KeyPolicyOperation {
 	if ctx == nil {
@@ -198,7 +213,7 @@ func saturatingAdd(a, b int64) int64 {
 func (op *KeyPolicyOperation) observe(r usage.Record) {
 	op.mu.Lock()
 	defer op.mu.Unlock()
-	if r.Detail.InputTokens < 0 || r.Detail.OutputTokens < 0 {
+	if r.Detail.Incomplete || r.Detail.InputTokens < 0 || r.Detail.OutputTokens < 0 {
 		return
 	}
 	total := max(saturatingAdd(r.Detail.InputTokens, r.Detail.OutputTokens), r.Detail.TotalTokens, r.Detail.TokenBreakdown.TotalTokens)
