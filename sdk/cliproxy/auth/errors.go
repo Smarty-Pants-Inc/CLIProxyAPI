@@ -99,7 +99,7 @@ func (e *Error) StatusCode() int {
 // IsRequestScoped reports whether the failure is tied to the current request
 // rather than the selected credential.
 func (e *Error) IsRequestScoped() bool {
-	return e != nil && (e.Code == ErrorCodeRequestScoped || e.Code == "api_key_model_forbidden" || e.Code == "api_key_daily_token_cap" || e.Code == "api_key_daily_request_cap")
+	return e != nil && (e.Code == ErrorCodeRequestScoped || isAPIKeyControlError(e))
 }
 
 // MarkRequestScoped marks the error as request-scoped in place and returns it.

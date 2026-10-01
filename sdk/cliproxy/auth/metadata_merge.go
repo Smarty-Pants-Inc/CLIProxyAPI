@@ -62,6 +62,9 @@ func MergePreparedAuth(base, current, updated *Auth) *Auth {
 // into the latest runtime auth current, preserving concurrent user modifications
 // and active cooldowns.
 func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
+	if base != nil && current != nil && authCredentialBindingChanged(base, current) {
+		return current.Clone()
+	}
 	merged := mergeAuthContent(base, current, updated)
 	if merged == nil || current == nil || updated == nil {
 		return merged
@@ -174,6 +177,51 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	return merged
 }
 
+// authCredentialBindingChanged compares the token/identity unit, not unrelated
+// user configuration or runtime health. It also protects direct merge callers.
+func authCredentialBindingChanged(base, current *Auth) bool {
+	if base == nil || current == nil {
+		return false
+	}
+	if CredentialsChanged(base, current) || authCredentialIdentityChanged(base, current) {
+		return true
+	}
+	for _, key := range []string{"api_key", "dca_token"} {
+		if !reflect.DeepEqual(base.Metadata[key], current.Metadata[key]) || base.Attributes[key] != current.Attributes[key] {
+			return true
+		}
+	}
+	return false
+}
+
+func authCredentialIdentityChanged(base, current *Auth) bool {
+	if base == nil || current == nil {
+		return false
+	}
+	if base.Provider != current.Provider || base.FileName != current.FileName {
+		return true
+	}
+	for _, key := range []string{"email", "account_id", "account_uuid", "organization_uuid"} {
+		if !reflect.DeepEqual(base.Metadata[key], current.Metadata[key]) || base.Attributes[key] != current.Attributes[key] {
+			return true
+		}
+	}
+	return false
+}
+
+func isAuthCredentialBindingKey(key string) bool {
+	key = CanonicalCredentialMetadataKey(key)
+	if IsAuthTokenPayloadKey(key) {
+		return true
+	}
+	switch key {
+	case "email", "account_id", "account_uuid", "organization_uuid", "api_key", "dca_token":
+		return true
+	default:
+		return false
+	}
+}
+
 func mergeAuthContent(base, current, updated *Auth) *Auth {
 	if current == nil {
 		if updated != nil {
@@ -187,12 +235,13 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 	if updated == nil {
 		return current.Clone()
 	}
-	if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
-		// Stale update from a previous registration cycle; keep current state.
+	if base != nil && (current.RegistrationEpoch != base.RegistrationEpoch || authCredentialIdentityChanged(base, current)) {
+		// Stale update from a previous credential lifetime; keep current state.
 		return current.Clone()
 	}
 
 	merged := current.Clone()
+	bindingChanged := base != nil && authCredentialBindingChanged(base, current)
 	if merged.Metadata == nil {
 		merged.Metadata = make(map[string]any)
 	}
@@ -205,6 +254,9 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 	// 1. Three-way merge for Metadata (excluding proxy_url which has dedicated canonical merge)
 	if updated.Metadata != nil {
 		for k, v := range updated.Metadata {
+			if bindingChanged && isAuthCredentialBindingKey(k) {
+				continue
+			}
 			if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
 				continue
 			}
@@ -215,8 +267,9 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 			changedByUser := hadInBase != hadInCurrent || (hadInBase && !reflect.DeepEqual(baseVal, currentVal))
 
 			if changedByExecutor {
-				// Apply executor change if user didn't modify it, or if it is a token payload field
-				if !changedByUser || IsAuthTokenPayloadKey(k) {
+				// Never overwrite a newer token installed during preparation. Refresh
+				// rejects a changed credential binding before entering this merge.
+				if !changedByUser {
 					merged.Metadata[k] = v
 				}
 			}
@@ -224,6 +277,9 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 		// Deletions by executor: only delete if user didn't modify the field concurrently
 		if baseMeta != nil {
 			for k, baseVal := range baseMeta {
+				if bindingChanged && isAuthCredentialBindingKey(k) {
+					continue
+				}
 				if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
 					continue
 				}
@@ -239,10 +295,10 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 	}
 
 	// 2. Storage and Runtime
-	if updated.Storage != nil {
+	if updated.Storage != nil && !bindingChanged {
 		merged.Storage = updated.Storage
 	}
-	if updated.Runtime != nil {
+	if updated.Runtime != nil && !bindingChanged {
 		merged.Runtime = updated.Runtime
 	}
 
@@ -339,6 +395,9 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 			baseAttrs = base.Attributes
 		}
 		for k, v := range updated.Attributes {
+			if bindingChanged && isAuthCredentialBindingKey(k) {
+				continue
+			}
 			baseVal, hadInBase := baseAttrs[k]
 			currentVal, hadInCurrent := current.Attributes[k]
 
@@ -351,6 +410,9 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 		}
 		if baseAttrs != nil {
 			for k, baseVal := range baseAttrs {
+				if bindingChanged && isAuthCredentialBindingKey(k) {
+					continue
+				}
 				if _, inUpdated := updated.Attributes[k]; !inUpdated {
 					if currentVal, ok := current.Attributes[k]; ok {
 						if baseVal == currentVal {
@@ -362,5 +424,38 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 		}
 	}
 
+	if !bindingChanged {
+		syncCredentialEmailMirror(base, updated, merged)
+	}
 	return merged
+}
+
+// syncCredentialEmailMirror rotates the file-loaded email mirror with the OAuth
+// identity. Only an unchanged mirror is synchronized; an explicit contradictory
+// executor identity is left intact so policy validation rejects it.
+func syncCredentialEmailMirror(base, updated, merged *Auth) {
+	if base == nil || updated == nil || merged == nil {
+		return
+	}
+	baseEmail, _ := base.Metadata["email"].(string)
+	baseAttribute := base.Attributes["email"]
+	if baseAttribute != "" && baseAttribute != baseEmail {
+		return
+	}
+	if updated.Metadata != nil && !reflect.DeepEqual(base.Metadata["email"], updated.Metadata["email"]) && updated.Attributes["email"] == baseAttribute {
+		if merged.Attributes == nil {
+			merged.Attributes = make(map[string]string)
+		}
+		if email, _ := merged.Metadata["email"].(string); email != "" {
+			merged.Attributes["email"] = email
+		} else {
+			delete(merged.Attributes, "email")
+		}
+	} else if updated.Attributes != nil && updated.Attributes["email"] != baseAttribute && reflect.DeepEqual(base.Metadata["email"], updated.Metadata["email"]) {
+		if email := merged.Attributes["email"]; email != "" {
+			merged.Metadata["email"] = email
+		} else {
+			delete(merged.Metadata, "email")
+		}
+	}
 }

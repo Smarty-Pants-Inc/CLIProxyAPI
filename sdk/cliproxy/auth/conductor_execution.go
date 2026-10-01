@@ -510,7 +510,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
-			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) || m.clientPolicyRoundExhausted(ctx, lastErr, errPick, tried) {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
 			}
 			return cliproxyexecutor.Response{}, errPick
@@ -729,7 +729,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
-			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) || m.clientPolicyRoundExhausted(ctx, lastErr, errPick, tried) {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
 			}
 			return cliproxyexecutor.Response{}, errPick
@@ -984,7 +984,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				observeHomeCooldownRetryLimit(homeCooldown, homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == "")
 				return nil, markHomeRetryRoundExhausted(preferredErr, homeCooldown.RetryAfter(), false)
 			}
-			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) || m.clientPolicyRoundExhausted(ctx, lastErr, errPick, tried) {
 				if homeMode {
 					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), isHomeNextRoundImmediatelyAvailable(errPick))
 				}
@@ -2043,21 +2043,17 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if req == nil {
 		return &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
-	if errPolicy := m.ValidateClientAuth(req.Context(), auth); errPolicy != nil {
+	boundCtx, errContext := m.httpRequestContext(ctx, req.Context())
+	if errContext != nil {
+		return errContext
+	}
+	if errPolicy := m.ValidateClientAuth(boundCtx, auth); errPolicy != nil {
 		return errPolicy
 	}
-	if errCap := m.ValidateMeteredClientRoute(req.Context()); errCap != nil {
+	if errCap := m.ValidateMeteredClientRoute(boundCtx); errCap != nil {
 		return errCap
 	}
-	if ctx != nil {
-		*req = *req.WithContext(ctx)
-	}
-	if errPolicy := m.ValidateClientAuth(req.Context(), auth); errPolicy != nil {
-		return errPolicy
-	}
-	if errCap := m.ValidateMeteredClientRoute(req.Context()); errCap != nil {
-		return errCap
-	}
+	*req = *req.WithContext(boundCtx)
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
 		return &Error{Code: "provider_not_found", Message: "auth provider is empty"}
@@ -2110,18 +2106,18 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if req == nil {
 		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
-	if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
+	boundCtx, errContext := m.httpRequestContext(ctx, req.Context())
+	if errContext != nil {
+		return nil, errContext
+	}
+	if errPolicy := m.ValidateClientAuth(boundCtx, auth); errPolicy != nil {
 		return nil, errPolicy
 	}
-	if errPolicy := m.ValidateClientAuth(req.Context(), auth); errPolicy != nil {
-		return nil, errPolicy
-	}
-	if errCap := m.ValidateMeteredClientRoute(ctx); errCap != nil {
+	if errCap := m.ValidateMeteredClientRoute(boundCtx); errCap != nil {
 		return nil, errCap
 	}
-	if errCap := m.ValidateMeteredClientRoute(req.Context()); errCap != nil {
-		return nil, errCap
-	}
+	ctx = boundCtx
+	*req = *req.WithContext(boundCtx)
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
 		return nil, &Error{Code: "provider_not_found", Message: "auth provider is empty"}

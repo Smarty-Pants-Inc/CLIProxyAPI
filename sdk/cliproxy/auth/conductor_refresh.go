@@ -560,7 +560,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
+			if base != nil && (current.RegistrationEpoch != base.RegistrationEpoch || authCredentialBindingChanged(base, current)) {
 				m.mu.Unlock()
 				return nil, err
 			}

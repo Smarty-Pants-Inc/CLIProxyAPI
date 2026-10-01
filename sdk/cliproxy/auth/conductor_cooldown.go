@@ -744,6 +744,11 @@ func cooldownReason(statusMessage string, quota QuotaState, lastErr *Error) stri
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	// Admission refusals have no upstream result and must not affect the shared
+	// credential, its counters, quota observations, cooldowns or result overrides.
+	if isAPIKeyControlError(result.Error) {
+		return
+	}
 	if result.AuthID == "" {
 		return
 	}
@@ -1481,6 +1486,8 @@ func resultErrorFromError(err error) *Error {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	switch {
+	case isAPIKeyControlError(err):
+		// Keep the client-local code so MarkResult and overrides remain neutral.
 	case isExplicitModelNotFoundError(err, ""):
 		if resultErr.Code == "" || resultErr.Code == requestScopedErrorCode {
 			resultErr.Code = "model_not_found"

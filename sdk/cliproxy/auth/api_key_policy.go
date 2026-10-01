@@ -68,6 +68,32 @@ func WithClientAPIKeyFromContext(ctx, source context.Context) context.Context {
 	return ctx
 }
 
+// httpRequestContext changes the cancellation parent without dropping admission
+// restrictions or request-owned accounting. Two authenticated principals cannot
+// share a credential-bearing request; same-principal policies are intersected.
+func (m *Manager) httpRequestContext(ctx, source context.Context) (context.Context, error) {
+	if ctx == nil {
+		ctx = source
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	digest, _ := ctx.Value(clientAPIKeyHashContextKey{}).(string)
+	sourceDigest := ""
+	if source != nil {
+		sourceDigest, _ = source.Value(clientAPIKeyHashContextKey{}).(string)
+	}
+	if digest != "" && sourceDigest != "" && digest != sourceDigest {
+		return nil, apiKeyPolicyUnavailableError()
+	}
+	policies := append([]internalconfig.APIKeyPolicy(nil), apiKeyPoliciesFromContext(m.withAPIKeyPolicies(ctx))...)
+	if source != nil {
+		policies = append(policies, apiKeyPoliciesFromContext(m.withAPIKeyPolicies(source))...)
+	}
+	ctx = WithClientAPIKeyFromContext(ctx, source)
+	return context.WithValue(ctx, apiKeyAdmissionPoliciesContextKey{}, policies), nil
+}
+
 func (m *Manager) withAPIKeyPolicies(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -113,11 +139,15 @@ func apiKeyPolicyAllows(policy internalconfig.APIKeyPolicy, auth *Auth) bool {
 		}
 	}
 	// Only credential file names and explicit email metadata are identities. Labels,
-	// provider names and arbitrary IDs must not broaden the allowlist.
-	identities := []string{auth.FileName, auth.Attributes["email"]}
-	if email, ok := auth.Metadata["email"].(string); ok {
-		identities = append(identities, email)
+	// provider names and arbitrary IDs must not broaden the allowlist. A stale
+	// file-loaded email mirror must not authorize a different refreshed account.
+	attributeEmail := strings.TrimSpace(auth.Attributes["email"])
+	metadataEmail, _ := auth.Metadata["email"].(string)
+	metadataEmail = strings.TrimSpace(metadataEmail)
+	if attributeEmail != "" && metadataEmail != "" && attributeEmail != metadataEmail {
+		return false
 	}
+	identities := []string{auth.FileName, attributeEmail, metadataEmail}
 	for _, pattern := range policy.AllowedAuths {
 		for _, identity := range identities {
 			if identity == "" {
@@ -225,6 +255,24 @@ func (m *Manager) validateAPIKeySelection(ctx context.Context, selected **Auth, 
 	if *err != nil {
 		*selected = nil
 	}
+}
+
+// clientPolicyRoundExhausted distinguishes exhausting the tried set after a
+// retryable execution failure from revocation/preparation admission refusals. Only
+// the former may retain normal retry rounds, still within the current allowlist.
+func (m *Manager) clientPolicyRoundExhausted(ctx context.Context, previous, pick error, tried map[string]struct{}) bool {
+	policyErr, ok := pick.(*Error)
+	if !ok || policyErr == nil || policyErr.Code != "api_key_policy_unavailable" || previous == nil || isAPIKeyControlError(previous) || !isRequestRetryRoundError(previous) {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id := range tried {
+		if current := m.auths[id]; current != nil && m.ValidateClientAuth(ctx, current) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func apiKeySelectionError(ctx context.Context, err error) error {

@@ -258,5 +258,5 @@ func (m *Manager) validateDailyCapsLocked(ctx context.Context, digest string) er
 
 func isAPIKeyControlError(err error) bool {
 	var policyErr *Error
-	return errors.As(err, &policyErr) && (policyErr.Code == "api_key_model_forbidden" || policyErr.Code == "api_key_daily_token_cap" || policyErr.Code == "api_key_daily_request_cap")
+	return errors.As(err, &policyErr) && policyErr != nil && (policyErr.Code == "api_key_model_forbidden" || policyErr.Code == "api_key_daily_token_cap" || policyErr.Code == "api_key_daily_request_cap" || policyErr.Code == "api_key_policy_unavailable")
 }

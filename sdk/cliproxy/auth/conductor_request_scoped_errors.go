@@ -244,7 +244,7 @@ func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 }
 
 func applyRequestScopedActionToResult(action string, okAction bool, result *Result) {
-	if !okAction || result == nil || result.Error == nil {
+	if !okAction || result == nil || result.Error == nil || isAPIKeyControlError(result.Error) {
 		return
 	}
 	if action == RequestScopedActionStop || action == RequestScopedActionContinue {

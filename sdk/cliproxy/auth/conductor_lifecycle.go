@@ -181,6 +181,10 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.mu.Unlock()
 		return nil, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
 	}
+	if mode == updateModeRefresh && base != nil && authCredentialBindingChanged(base, existing) {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("update auth %s: stale credential binding", auth.ID)
+	}
 	if mode == updateModeRefresh {
 		merged := MergeRefreshedAuth(base, existing, auth)
 		if merged != nil {
@@ -194,6 +198,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 			NormalizeCredentialMetadata(auth.Metadata)
 		}
 	}
+	newCredentialRecord := auth.RegistrationEpoch == 0
 	if auth.RegistrationEpoch != 0 && auth.RegistrationEpoch < m.authEpochs[auth.ID] {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("update auth %s: stale registration epoch %d < %d", auth.ID, auth.RegistrationEpoch, m.authEpochs[auth.ID])
@@ -201,6 +206,14 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if auth.RegistrationEpoch >= m.authEpochs[auth.ID] {
 		m.authEpochs[auth.ID] = auth.RegistrationEpoch
 	} else if auth.RegistrationEpoch == 0 {
+		auth.RegistrationEpoch = m.authEpochs[auth.ID]
+	}
+	// File/config replacement under the same ID starts a new credential lifetime.
+	// Ordinary edits (notes, proxy, weight, cooldowns) keep the lifetime so refresh
+	// can still merge them. Fresh file records and changed identities fence pending
+	// work; token-only runtime rotations still permit unrelated preparation data.
+	if mode == updateModeReplace && (authCredentialIdentityChanged(existing, auth) || (newCredentialRecord && authCredentialBindingChanged(existing, auth))) {
+		m.authEpochs[auth.ID]++
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
 	}
 	if !auth.indexAssigned && auth.Index == "" {
