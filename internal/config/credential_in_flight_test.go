@@ -45,16 +45,14 @@ func TestLoadConfigOptionalWhitespaceFallbackAppliesCredentialInFlightDefaults(t
 	assertOptionalConfigFallback(t, cfg)
 }
 
-func TestLoadConfigOptionalInvalidFallbackAppliesCredentialInFlightDefaults(t *testing.T) {
+func TestLoadConfigOptionalInvalidConfigFailsClosed(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if errWrite := os.WriteFile(configPath, []byte(":"), 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
-	cfg, errLoad := LoadConfigOptional(configPath, true)
-	if errLoad != nil {
-		t.Fatalf("LoadConfigOptional() error = %v", errLoad)
+	if cfg, errLoad := LoadConfigOptional(configPath, true); errLoad == nil || cfg != nil {
+		t.Fatalf("invalid present config entered standby: cfg=%v err=%v", cfg, errLoad)
 	}
-	assertOptionalConfigFallback(t, cfg)
 }
 
 func assertOptionalConfigFallback(t *testing.T, cfg *Config) {

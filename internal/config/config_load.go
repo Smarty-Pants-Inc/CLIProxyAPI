@@ -28,7 +28,8 @@ func LoadConfig(configFile string) (*Config, error) {
 
 // LoadConfigOptional reads YAML from configFile.
 // If optional is true and the file is missing, it returns an empty Config.
-// If optional is true and the file is empty or invalid, it returns an empty Config.
+// If optional is true and the file is empty, it returns an empty Config.
+// Present, nonempty configuration must be valid even in optional mode.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
@@ -51,21 +52,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return cfg, nil
 	}
 
-	// ponytail: even malformed YAML mentioning policies must not enter cloud
-	// standby's permissive empty-config fallback. Conservative detection is safer
-	// than trying to recover a security block from an invalid document.
-	policyConfig := bytes.Contains(data, []byte("api-key-policies"))
-	if policyConfig {
-		if errValidate := validateSingleConfigDocument(data); errValidate != nil {
-			return nil, errValidate
-		}
+	// ponytail: a present config fails closed. Raw key spelling cannot decide
+	// whether an invalid or trailing document contains security settings.
+	if errValidate := validateSingleConfigDocument(data); errValidate != nil {
+		return nil, errValidate
 	}
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
-		if optional && !policyConfig {
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
-		}
 		return nil, errValidate
 	}
 
@@ -91,12 +83,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
-		if optional && !policyConfig {
-			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
-		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {

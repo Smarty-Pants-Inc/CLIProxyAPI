@@ -45,6 +45,10 @@ func TestAPIKeyPoliciesConfig(t *testing.T) {
 func TestAPIKeyPoliciesRejectMalformedConfig(t *testing.T) {
 	for _, tc := range []struct{ name, payload string }{
 		{"trailing-policy-document", "api-keys: [synthetic]\n---\napi-key-policies: [{key-sha256: " + policyTestHash + "}]"},
+		{"escaped-trailing-policy", "api-keys: [synthetic]\n---\n\"\\u0061pi-key-policies\": [{key-sha256: " + policyTestHash + ", allowed-auths: []}]"},
+		{"continued-trailing-policy", "api-keys: [synthetic]\n---\n? \"api-key-\\\n  policies\"\n: [{key-sha256: " + policyTestHash + ", allowed-auths: []}]"},
+		{"escaped-policy-schema", "\"\\u0061pi-key-policies\": not-a-list"},
+		{"escaped-policy-invalid-yaml", "\"\\u0061pi-key-policies\": ["},
 		{"trailing-malformed-document", "api-key-policies: [{key-sha256: " + policyTestHash + "}]\n---\ninvalid: ["},
 		{"bad-model-glob", "api-key-policies: [{key-sha256: " + policyTestHash + ", allowed-models: ['[']}]"},
 		{"blank-model-glob", "api-key-policies: [{key-sha256: " + policyTestHash + ", allowed-models: ['']}]"},
@@ -74,7 +78,7 @@ func TestAPIKeyPoliciesRejectMalformedConfig(t *testing.T) {
 			}
 			for _, optional := range []bool{false, true} {
 				if _, err := LoadConfigOptional(file, optional); err == nil {
-					t.Fatalf("optional=%v: malformed policy silently discarded", optional)
+					t.Errorf("optional=%v: malformed policy silently discarded", optional)
 				}
 			}
 		})
