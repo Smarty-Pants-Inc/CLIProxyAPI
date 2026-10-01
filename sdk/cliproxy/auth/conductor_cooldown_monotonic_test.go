@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 // Later failure writes must never shorten a still-live cooldown; they may only
@@ -303,7 +303,8 @@ func TestManager_MarkResult_CredentialScopeDoesNotInheritModelQuotaDeadline(t *t
 			}
 
 			before := time.Now()
-			modelOnlyRetry := 8 * 24 * time.Hour
+			// Smarty fork: holds are bounded by quotaReprobeInterval, so both fit inside it.
+			modelOnlyRetry := 50 * time.Minute
 			m.MarkResult(ctx, Result{
 				AuthID: auth.ID, Provider: auth.Provider, Model: "claude-fable-5-1",
 				RetryAfter: &modelOnlyRetry,
@@ -311,14 +312,14 @@ func TestManager_MarkResult_CredentialScopeDoesNotInheritModelQuotaDeadline(t *t
 			})
 
 			modelOnlyAuth, _ := m.GetByID(auth.ID)
-			if modelOnlyAuth.Quota.Reason != "quota" || !modelOnlyAuth.Quota.NextRecoverAt.After(before.Add(7*24*time.Hour)) {
+			if modelOnlyAuth.Quota.Reason != "quota" || !modelOnlyAuth.Quota.NextRecoverAt.After(before.Add(modelOnlyRetry-time.Minute)) {
 				t.Fatalf("precondition failed: model quota deadline was not aggregated: quota=%+v", modelOnlyAuth.Quota)
 			}
 			if blocked, _, _ := isAuthBlockedForModel(modelOnlyAuth, "claude-opus-5-5", time.Now()); blocked {
 				t.Fatal("model-only cooldown should not block an unrelated model")
 			}
 
-			credentialRetry := 3 * time.Hour
+			credentialRetry := 20 * time.Minute
 			m.MarkResult(ctx, Result{
 				AuthID: auth.ID, Provider: auth.Provider, Model: testCase.credentialModel,
 				RetryAfter: &credentialRetry, CredentialScope: true,
@@ -326,8 +327,8 @@ func TestManager_MarkResult_CredentialScopeDoesNotInheritModelQuotaDeadline(t *t
 			})
 
 			updated, _ := m.GetByID(auth.ID)
-			minCredentialDeadline := before.Add(credentialRetry - time.Hour)
-			maxCredentialDeadline := before.Add(credentialRetry + time.Hour)
+			minCredentialDeadline := before.Add(credentialRetry - 5*time.Minute)
+			maxCredentialDeadline := before.Add(credentialRetry + 5*time.Minute)
 			if updated.Quota.Reason != "credential_quota" ||
 				updated.Quota.NextRecoverAt.Before(minCredentialDeadline) ||
 				updated.Quota.NextRecoverAt.After(maxCredentialDeadline) {
@@ -340,12 +341,12 @@ func TestManager_MarkResult_CredentialScopeDoesNotInheritModelQuotaDeadline(t *t
 				t.Fatalf("opus remained blocked beyond credential cooldown: next=%v (in %v)", opusNext, opusNext.Sub(before))
 			}
 			fableBlocked, _, fableNext := isAuthBlockedForModel(updated, "claude-fable-5-1", before.Add(credentialRetry+time.Minute))
-			if !fableBlocked || !fableNext.After(before.Add(7*24*time.Hour)) {
+			if !fableBlocked || !fableNext.After(before.Add(modelOnlyRetry-time.Minute)) {
 				t.Fatalf("model-only cooldown was not retained for Fable: blocked=%v next=%v", fableBlocked, fableNext)
 			}
 
 			credentialDeadline := updated.Quota.NextRecoverAt
-			shorterCredentialRetry := 30 * time.Minute
+			shorterCredentialRetry := 10 * time.Minute
 			m.MarkResult(ctx, Result{
 				AuthID: auth.ID, Provider: auth.Provider, Model: "claude-sonnet-4",
 				RetryAfter: &shorterCredentialRetry, CredentialScope: true,

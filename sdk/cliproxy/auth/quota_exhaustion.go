@@ -149,7 +149,12 @@ func quotaUsageOf(auth *Auth, now time.Time) quotaUsage {
 }
 
 // quotaExhausted reports whether selection should skip auth right now.
+// A snapshot older than quotaReprobeInterval no longer causes a skip, so an
+// account that was topped up before its window reset is tried again.
 func quotaExhausted(auth *Auth, now time.Time) bool {
+	if auth != nil && !auth.Quota.ObservedAt.IsZero() && now.Sub(auth.Quota.ObservedAt) > quotaReprobeInterval {
+		return false
+	}
 	return quotaUsageOf(auth, now).exhausted
 }
 

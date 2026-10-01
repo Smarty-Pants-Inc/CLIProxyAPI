@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -30,6 +31,7 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
 	NextToolCallIndex    int
+	ToolNames            translatorcommon.ClaudeToolNames
 }
 
 type claudeUsageTokens struct {
@@ -95,6 +97,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			CreatedAt:    0,
 			ResponseID:   "",
 			FinishReason: "",
+			ToolNames:    translatorcommon.NewClaudeToolNames(originalRequestRawJSON),
 		}
 	}
 
@@ -153,7 +156,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			if blockType == "tool_use" {
 				// Start of tool call - initialize accumulator to track arguments
 				toolCallID := contentBlock.Get("id").String()
-				toolName := contentBlock.Get("name").String()
+				toolName := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolNames.FromClaude(contentBlock.Get("name").String())
 				index := int(root.Get("index").Int())
 
 				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
@@ -338,6 +341,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	toolNames := translatorcommon.NewClaudeToolNames(originalRequestRawJSON)
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
@@ -386,7 +390,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 					index := int(root.Get("index").Int())
 					toolCallsAccumulator[index] = &ToolCallAccumulator{
 						ID:   contentBlock.Get("id").String(),
-						Name: contentBlock.Get("name").String(),
+						Name: toolNames.FromClaude(contentBlock.Get("name").String()),
 					}
 				}
 			}

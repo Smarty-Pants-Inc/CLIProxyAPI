@@ -15,12 +15,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -369,6 +369,28 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	quota := record.Quota
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
+	}
+	if quota.Exceeded || (record.LastError != nil && record.LastError.HTTPStatus == 429) {
+		// A quota hold saved before the re-probe bound (e.g. a 94 h weekly
+		// reset) is re-probed within one interval of when it was set.
+		since := updatedAt
+		if since.After(now) {
+			since = now
+		}
+		// Propagated quota or a later non-quota error can coexist with an
+		// independent hold at either scope (for example, a 12-hour 404).
+		// Bound only the quota component of such a record.
+		independentNonQuotaHold := record.LastError != nil && record.LastError.HTTPStatus != 429
+		if !independentNonQuotaHold {
+			record.NextRetryAfter = boundQuotaHold(record.NextRetryAfter, since)
+		}
+		quota.NextRecoverAt = boundQuotaHold(quota.NextRecoverAt, since)
+		if !record.NextRetryAfter.After(now) {
+			return false
+		}
+		if !quota.NextRecoverAt.After(now) {
+			applyCooldownFields(&quota, QuotaState{})
+		}
 	}
 
 	if model == "" {
@@ -826,6 +848,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
+						} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+							state.NextRetryAfter = now.Add(*result.RetryAfter)
 						} else {
 							next := now.Add(12 * time.Hour)
 							state.NextRetryAfter = next
@@ -861,6 +885,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 404:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
+							} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+								state.NextRetryAfter = now.Add(*result.RetryAfter)
 							} else {
 								next := now.Add(12 * time.Hour)
 								state.NextRetryAfter = next
@@ -877,11 +903,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 							if !disableCooling {
 								if result.RetryAfter != nil {
-									cooldown := *result.RetryAfter
-									if cooldown < minQuotaCooldownFloor {
-										cooldown = minQuotaCooldownFloor
-									}
-									next = now.Add(cooldown).Round(0)
+									next = now.Add(quotaRetryAfterCooldown(*result.RetryAfter)).Round(0)
 								} else {
 									quotaForFailure := state.Quota
 									if result.CredentialScope {
@@ -895,8 +917,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
 								credentialNext = next
-								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
-									next = state.Quota.NextRecoverAt
+								if held := boundQuotaHold(state.Quota.NextRecoverAt, now); state.Quota.Exceeded && held.After(next) {
+									next = held
 								}
 							}
 							state.NextRetryAfter = next
@@ -912,8 +934,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										otherState.Unavailable = true
 										otherState.Status = StatusError
 										otherQuotaNext := credentialNext
-										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
-											otherQuotaNext = otherState.Quota.NextRecoverAt
+										if held := boundQuotaHold(otherState.Quota.NextRecoverAt, now); otherState.Quota.Exceeded && held.After(otherQuotaNext) {
+											otherQuotaNext = held
 										}
 										otherRetryAfter := otherQuotaNext
 										// Propagation only extends a sibling's still-live
@@ -932,9 +954,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 								auth.Unavailable = true
 								authNext := credentialNext
-								if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" &&
-									auth.Quota.NextRecoverAt.After(authNext) {
-									authNext = auth.Quota.NextRecoverAt
+								if held := boundQuotaHold(auth.Quota.NextRecoverAt, now); auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" &&
+									held.After(authNext) {
+									authNext = held
 								}
 								auth.Quota.Exceeded = true
 								auth.Quota.Reason = "credential_quota"
@@ -1689,6 +1711,25 @@ func HasUnauthorizedAuthFailure(auth *Auth) bool {
 	return hasUnauthorizedAuthFailure(auth)
 }
 
+func hasDisabledInvalidGrantFailure(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	isDisabled := auth.Disabled || auth.Status == StatusDisabled
+	if !isDisabled {
+		return false
+	}
+	if auth.LastError != nil && (isInvalidGrantResultError(auth.LastError) || isInvalidGrantErrorMessage(auth.LastError.Message) || isInvalidGrantErrorMessage(auth.LastError.Code)) {
+		return true
+	}
+	return false
+}
+
+// HasDisabledInvalidGrantFailure reports whether the auth is disabled and has encountered an invalid_grant error.
+func HasDisabledInvalidGrantFailure(auth *Auth) bool {
+	return hasDisabledInvalidGrantFailure(auth)
+}
+
 func refreshErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
@@ -1789,22 +1830,28 @@ func isInvalidGrantError(err error) bool {
 	if err == nil {
 		return false
 	}
-	status := statusCodeFromError(err)
-	if status != http.StatusBadRequest && status != http.StatusUnauthorized {
+	if !isInvalidGrantErrorMessage(err.Error()) {
 		return false
 	}
-	return isInvalidGrantErrorMessage(err.Error())
+	status := statusCodeFromError(err)
+	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
+		return true
+	}
+	return false
 }
 
 func isInvalidGrantResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
-	status := statusCodeFromResult(err)
-	if status != http.StatusBadRequest && status != http.StatusUnauthorized {
+	if !isInvalidGrantErrorMessage(err.Code) && !isInvalidGrantErrorMessage(err.Message) {
 		return false
 	}
-	return isInvalidGrantErrorMessage(err.Code) || isInvalidGrantErrorMessage(err.Message)
+	status := statusCodeFromResult(err)
+	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
+		return true
+	}
+	return false
 }
 
 func isModelSupportResultError(err *Error) bool {
@@ -2232,6 +2279,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "not_found"
 			if disableCooling {
 				auth.NextRetryAfter = time.Time{}
+			} else if retryAfter != nil && *retryAfter > 0 {
+				auth.NextRetryAfter = now.Add(*retryAfter)
 			} else {
 				auth.NextRetryAfter = now.Add(12 * time.Hour)
 			}
@@ -2242,16 +2291,12 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			var next time.Time
 			if !disableCooling {
 				if retryAfter != nil {
-					cooldown := *retryAfter
-					if cooldown < minQuotaCooldownFloor {
-						cooldown = minQuotaCooldownFloor
-					}
-					next = now.Add(cooldown).Round(0)
+					next = now.Add(quotaRetryAfterCooldown(*retryAfter)).Round(0)
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				}
-				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
-					next = auth.Quota.NextRecoverAt
+				if held := boundQuotaHold(auth.Quota.NextRecoverAt, now); auth.Quota.Exceeded && held.After(next) {
+					next = held
 				}
 			}
 			auth.Quota.NextRecoverAt = next
@@ -2284,9 +2329,35 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 // window is still open reuse that window instead of escalating, so a burst of
 // concurrent in-flight failures advances the backoff ladder at most once per
 // window.
+// quotaRetryAfterCooldown bounds an upstream 429 retry-after hint to
+// [minQuotaCooldownFloor, quotaReprobeInterval]. Upstream reports the weekly
+// reset (up to ~7 days), but a top-up or plan change can restore the account
+// long before that, so the hold only lasts until the next re-probe: the next
+// request after it expires tries the account again, and a 429 holds it for at
+// most another interval (smarty-dev cooldown re-probe).
+func quotaRetryAfterCooldown(retryAfter time.Duration) time.Duration {
+	if retryAfter < minQuotaCooldownFloor {
+		return minQuotaCooldownFloor
+	}
+	if retryAfter > quotaReprobeInterval {
+		return quotaReprobeInterval
+	}
+	return retryAfter
+}
+
+// boundQuotaHold caps a quota hold deadline at since+quotaReprobeInterval. It
+// covers holds restored from disk or kept from an earlier result, which may
+// predate the bound on new retry-after hints. Non-quota holds are not passed here.
+func boundQuotaHold(deadline, since time.Time) time.Time {
+	if limit := since.Add(quotaReprobeInterval).Round(0); deadline.After(limit) {
+		return limit
+	}
+	return deadline
+}
+
 func quotaCooldownAfterFailure(quota QuotaState, now time.Time) (time.Time, int) {
 	if quota.NextRecoverAt.After(now) {
-		return quota.NextRecoverAt, quota.BackoffLevel
+		return boundQuotaHold(quota.NextRecoverAt, now), quota.BackoffLevel
 	}
 	cooldown, nextLevel := nextQuotaCooldown(quota.BackoffLevel, false)
 	var next time.Time

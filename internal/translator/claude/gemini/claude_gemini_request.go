@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -37,6 +37,7 @@ import (
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
+	toolNames := translatorcommon.NewClaudeToolNames(rawJSON)
 
 	userID := translatorcommon.DeriveClaudeUserID(rawJSON)
 
@@ -260,7 +261,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
 
 						if name := fc.Get("name"); name.Exists() {
-							toolUse, _ = sjson.SetBytes(toolUse, "name", name.String())
+							toolUse, _ = sjson.SetBytes(toolUse, "name", toolNames.ToClaude(name.String()))
 						}
 						if args := fc.Get("args"); args.Exists() && args.IsObject() {
 							toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(args.Raw))
@@ -340,10 +341,10 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if funcDecls := tool.Get("functionDeclarations"); funcDecls.Exists() && funcDecls.IsArray() {
 				funcDecls.ForEach(func(_, funcDecl gjson.Result) bool {
-					anthropicTool := []byte(`{"name":"","description":"","input_schema":{}}`)
+					anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
 
 					if name := funcDecl.Get("name"); name.Exists() {
-						anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name.String())
+						anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", toolNames.ToClaude(name.String()))
 					}
 					if desc := funcDecl.Get("description"); desc.Exists() {
 						anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", desc.String())
@@ -354,6 +355,8 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					} else if params = funcDecl.Get("parametersJsonSchema"); params.Exists() {
 						cleaned := normalizeClaudeToolSchema(params)
 						anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", cleaned)
+					} else {
+						anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(`{"type":"object","properties":{}}`))
 					}
 
 					anthropicTool = lowercaseClaudeToolSchemaTypes(anthropicTool)
@@ -371,15 +374,15 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Tool config mapping from Gemini format to Claude Code format
 	if toolConfig := root.Get("tool_config"); toolConfig.Exists() {
-		out = setClaudeToolChoiceFromGeminiToolConfig(out, toolConfig.Get("function_calling_config"))
+		out = setClaudeToolChoiceFromGeminiToolConfig(out, toolConfig.Get("function_calling_config"), toolNames)
 	} else if toolConfig := root.Get("toolConfig"); toolConfig.Exists() {
-		out = setClaudeToolChoiceFromGeminiToolConfig(out, toolConfig.Get("functionCallingConfig"))
+		out = setClaudeToolChoiceFromGeminiToolConfig(out, toolConfig.Get("functionCallingConfig"), toolNames)
 	}
 
 	// Stream setting configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "gemini", modelName)
 }
 
 func normalizeClaudeToolSchema(parameters gjson.Result) []byte {
@@ -409,7 +412,7 @@ func lowercaseClaudeToolSchemaTypes(tool []byte) []byte {
 	return tool
 }
 
-func setClaudeToolChoiceFromGeminiToolConfig(out []byte, funcCalling gjson.Result) []byte {
+func setClaudeToolChoiceFromGeminiToolConfig(out []byte, funcCalling gjson.Result, toolNames translatorcommon.ClaudeToolNames) []byte {
 	if !funcCalling.Exists() {
 		return out
 	}
@@ -430,7 +433,7 @@ func setClaudeToolChoiceFromGeminiToolConfig(out []byte, funcCalling gjson.Resul
 		allowedNameItems := allowedNames.Array()
 		if allowedNames.IsArray() && len(allowedNameItems) == 1 {
 			choice := []byte(`{"type":"tool","name":""}`)
-			choice, _ = sjson.SetBytes(choice, "name", allowedNameItems[0].String())
+			choice, _ = sjson.SetBytes(choice, "name", toolNames.ToClaude(allowedNameItems[0].String()))
 			out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
 		} else {
 			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))

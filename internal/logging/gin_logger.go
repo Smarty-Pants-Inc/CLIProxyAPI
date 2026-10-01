@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -48,10 +48,15 @@ func GinLogrusLogger() gin.HandlerFunc {
 		var requestID string
 		var idWriter *responseIDWriter
 		if isAIAPIPath(path) {
-			requestID = GenerateRequestID()
-			SetGinRequestID(c, requestID)
-			ctx := WithRequestID(c.Request.Context(), requestID)
-			c.Request = c.Request.WithContext(ctx)
+			generatedID, errGenerate := GenerateRequestID()
+			if errGenerate != nil {
+				log.WithError(errGenerate).Error("failed to generate request ID")
+			} else {
+				requestID = generatedID
+				SetGinRequestID(c, requestID)
+				ctx := WithRequestID(c.Request.Context(), requestID)
+				c.Request = c.Request.WithContext(ctx)
+			}
 			if c.Request.Method == http.MethodPost {
 				idWriter = &responseIDWriter{ResponseWriter: c.Writer}
 				c.Writer = idWriter

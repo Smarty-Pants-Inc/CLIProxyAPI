@@ -8,10 +8,10 @@ package chat_completions
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -45,6 +45,7 @@ func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byt
 
 func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
+	toolNames := common.NewClaudeToolNames(rawJSON)
 
 	userID := common.DeriveClaudeUserID(rawJSON)
 
@@ -229,7 +230,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 							function := toolCall.Get("function")
 							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 							toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.SetBytes(toolUse, "name", function.Get("name").String())
+							toolUse, _ = sjson.SetBytes(toolUse, "name", toolNames.ToClaude(function.Get("name").String()))
 
 							// Parse arguments for the tool call
 							if args := function.Get("arguments"); args.Exists() {
@@ -352,13 +353,14 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
 				fnName := function.Get("name").String()
+				sanitizedFnName := toolNames.ToClaude(fnName)
 				if isAllowedTools {
 					if _, ok := allowedToolNames[fnName]; !ok {
 						return true
 					}
 				}
 				anthropicTool := []byte(`{"name":"","description":""}`)
-				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", fnName)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", sanitizedFnName)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
@@ -366,6 +368,8 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(parameters.Raw)))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(parameters.Raw)))
+				} else {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema(nil))
 				}
 				anthropicTool = common.AttachCacheControl(anthropicTool, tool)
 				if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
@@ -432,7 +436,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				}
 				if functionName != "" {
 					toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", toolNames.ToClaude(functionName))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				} else {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
@@ -452,7 +456,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		}
 	}
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName)
 }
 
 func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {
