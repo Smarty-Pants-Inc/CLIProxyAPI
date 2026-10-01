@@ -141,17 +141,17 @@ func hostModelStreamForwardClaude(ctx context.Context, hostCallbackID, execModel
 		return 0, errDecode
 	}
 	if resp.StatusCode >= 400 {
-		_ = closeHostModelStream(resp.StreamID)
+		_ = closeHostModelStream(hostCallbackID, resp.StreamID)
 		return resp.StatusCode, fmt.Errorf("host model status %d", resp.StatusCode)
 	}
 	if strings.TrimSpace(resp.StreamID) == "" {
 		return 0, fmt.Errorf("host model stream: empty stream_id")
 	}
-	defer func() { _ = closeHostModelStream(resp.StreamID) }()
+	defer func() { _ = closeHostModelStream(hostCallbackID, resp.StreamID) }()
 
 	firstPayload := true
 	for {
-		chunkRaw, errRead := callHost(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: resp.StreamID})
+		chunkRaw, errRead := callHost(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: resp.StreamID, HostCallbackID: hostCallbackID})
 		if errRead != nil {
 			return hostHTTPStatusFromError(errRead), errRead
 		}

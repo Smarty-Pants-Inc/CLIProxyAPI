@@ -46,7 +46,10 @@ func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
 	}))
 	defer server.Close()
 
-	req := pluginapi.HTTPRequest{
+	host := New()
+	callbackID, closeCallback := host.openCallbackContext(context.Background())
+	defer closeCallback()
+	req := rpcHostHTTPRequest{HostCallbackID: callbackID,
 		Method: http.MethodPost,
 		URL:    server.URL,
 		Body:   []byte(`{"request":true}`),
@@ -56,7 +59,7 @@ func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
 
-	rawResp, errCall := New().callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, rawReq)
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, rawReq)
 	if errCall != nil {
 		t.Fatalf("callFromPlugin() error = %v", errCall)
 	}
@@ -141,7 +144,10 @@ func TestHostHTTPDoStreamCallbackReturnsBeforeUpstreamCompletes(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	rawReq, errMarshal := json.Marshal(pluginapi.HTTPRequest{
+	host := New()
+	callbackID, closeCallback := host.openCallbackContext(context.Background())
+	defer closeCallback()
+	rawReq, errMarshal := json.Marshal(rpcHostHTTPRequest{HostCallbackID: callbackID,
 		Method: http.MethodGet,
 		URL:    server.URL,
 	})
@@ -154,7 +160,6 @@ func TestHostHTTPDoStreamCallbackReturnsBeforeUpstreamCompletes(t *testing.T) {
 		err error
 	}
 	done := make(chan callResult, 1)
-	host := New()
 	go func() {
 		rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDoStream, rawReq)
 		done <- callResult{raw: rawResp, err: errCall}
@@ -347,9 +352,12 @@ func TestHostHTTPCallbacksCanBeCanceledBeforeResponse(t *testing.T) {
 			defer server.Close()
 
 			host := New()
-			operationID := openHostHTTPOperation(t, host, context.Background(), "")
+			callbackID, closeCallback := host.openCallbackContext(context.Background())
+			defer closeCallback()
+			operationID := openHostHTTPOperation(t, host, context.Background(), callbackID)
 			rawRequest, errMarshal := json.Marshal(map[string]any{
-				"operation_id": operationID,
+				"operation_id":     operationID,
+				"host_callback_id": callbackID,
 				"request": map[string]any{
 					"method": http.MethodGet,
 					"url":    server.URL,
@@ -436,9 +444,12 @@ func TestHostHTTPDoWithoutOperationIDIsCanceledWithPluginInstance(t *testing.T) 
 	host := New()
 	instance := &hostCallbackInstance{}
 	callerContext := withHostCallbackIdentity(context.Background(), "plugin", instance)
+	callbackID, closeCallback := host.openCallbackContextForPluginInstance(callerContext, "plugin", instance)
+	defer closeCallback()
 	rawRequest, errMarshal := json.Marshal(map[string]string{
-		"method": http.MethodGet,
-		"url":    server.URL,
+		"host_callback_id": callbackID,
+		"method":           http.MethodGet,
+		"url":              server.URL,
 	})
 	if errMarshal != nil {
 		t.Fatalf("marshal request: %v", errMarshal)
@@ -491,9 +502,12 @@ func TestHostHTTPDoCanBeCanceledWhileReadingBody(t *testing.T) {
 	defer close(release)
 
 	host := New()
-	operationID := openHostHTTPOperation(t, host, context.Background(), "")
+	callbackID, closeCallback := host.openCallbackContext(context.Background())
+	defer closeCallback()
+	operationID := openHostHTTPOperation(t, host, context.Background(), callbackID)
 	rawRequest, errMarshal := json.Marshal(map[string]any{
-		"operation_id": operationID,
+		"operation_id":     operationID,
+		"host_callback_id": callbackID,
 		"request": map[string]any{
 			"method": http.MethodGet,
 			"url":    server.URL,
@@ -603,9 +617,12 @@ func TestHostHTTPStreamOperationCanBeCanceledAfterHeaders(t *testing.T) {
 			host.httpStreams.close("", nil, streamID)
 		}
 	}()
-	operationID := openHostHTTPOperation(t, host, context.Background(), "")
+	callbackID, closeCallback := host.openCallbackContext(context.Background())
+	defer closeCallback()
+	operationID := openHostHTTPOperation(t, host, context.Background(), callbackID)
 	rawRequest, errMarshal := json.Marshal(map[string]any{
-		"operation_id": operationID,
+		"operation_id":     operationID,
+		"host_callback_id": callbackID,
 		"request": map[string]any{
 			"method": http.MethodGet,
 			"url":    server.URL,
@@ -1013,7 +1030,8 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
 		},
 	})
-	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "origin-plugin")
+	caller := withHostCallbackPluginID(context.Background(), "origin-plugin")
+	callbackID, closeCallback := host.openCallbackContextForPlugin(caller, "origin-plugin")
 	defer closeCallback()
 
 	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
@@ -1028,7 +1046,7 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
-	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq); errCall != nil {
+	if _, errCall := host.callFromPlugin(caller, pluginabi.MethodHostModelExecute, rawReq); errCall != nil {
 		t.Fatalf("callFromPlugin() error = %v", errCall)
 	}
 	if got.SkipInterceptorPluginID != "origin-plugin" {
@@ -1094,7 +1112,7 @@ func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {
 	}
 }
 
-func TestHostModelStreamReadAfterCallbackCloseReturnsDone(t *testing.T) {
+func TestHostModelStreamReadAfterCallbackCloseRejectsExpiredOwner(t *testing.T) {
 	host := New()
 	chunks := make(chan handlers.ModelExecutionChunk)
 	host.SetModelExecutor(&fakeHostModelExecutor{
@@ -1133,34 +1151,9 @@ func TestHostModelStreamReadAfterCallbackCloseReturnsDone(t *testing.T) {
 	}
 
 	closeCallback()
-	readReq, errMarshal := json.Marshal(pluginapi.HostModelStreamReadRequest{StreamID: resp.StreamID})
-	if errMarshal != nil {
-		t.Fatalf("marshal read request: %v", errMarshal)
-	}
-	readDone := make(chan pluginapi.HostModelStreamReadResponse, 1)
-	readErr := make(chan error, 1)
-	go func() {
-		rawRead, errRead := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamRead, readReq)
-		if errRead != nil {
-			readErr <- errRead
-			return
-		}
-		doneResp, errDecodeRead := decodeRPCEnvelope[pluginapi.HostModelStreamReadResponse](rawRead)
-		if errDecodeRead != nil {
-			readErr <- errDecodeRead
-			return
-		}
-		readDone <- doneResp
-	}()
-	select {
-	case errRead := <-readErr:
-		t.Fatalf("read after callback close error = %v", errRead)
-	case doneResp := <-readDone:
-		if !doneResp.Done || len(doneResp.Payload) != 0 || doneResp.Error != "" {
-			t.Fatalf("read after callback close = %#v, want done without payload/error", doneResp)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("read after callback close blocked")
+	readReq := securityRequest(t, pluginapi.HostModelStreamReadRequest{StreamID: resp.StreamID, HostCallbackID: callbackID})
+	if _, errRead := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamRead, readReq); errRead == nil {
+		t.Fatal("expired owner was allowed to read model stream")
 	}
 }
 
@@ -1293,13 +1286,9 @@ func TestHostModelStreamReadAndCloseValidateStreamID(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal close request: %v", errMarshal)
 	}
-	rawClose, errClose := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamClose, rawCloseReq)
-	if errClose != nil {
-		t.Fatalf("close callback error = %v", errClose)
-	}
-	_, errDecode := decodeRPCEnvelope[rpcEmptyResponse](rawClose)
-	if errDecode != nil {
-		t.Fatalf("decode close response: %v", errDecode)
+	_, errClose := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamClose, rawCloseReq)
+	if errClose == nil || !strings.Contains(errClose.Error(), "model stream id is required") {
+		t.Fatalf("close callback error = %v, want required stream id error", errClose)
 	}
 }
 
@@ -1321,8 +1310,8 @@ func TestHostModelStreamReadReturnsPayloadAndTerminalError(t *testing.T) {
 		},
 	})
 
-	streamID := openHostModelStreamForTest(t, host)
-	readReq, errMarshal := json.Marshal(pluginapi.HostModelStreamReadRequest{StreamID: streamID})
+	streamID, callbackID := openHostModelStreamForTest(t, host)
+	readReq, errMarshal := json.Marshal(pluginapi.HostModelStreamReadRequest{StreamID: streamID, HostCallbackID: callbackID})
 	if errMarshal != nil {
 		t.Fatalf("marshal read request: %v", errMarshal)
 	}
@@ -1364,14 +1353,14 @@ func TestHostModelStreamExplicitCloseCancelsStream(t *testing.T) {
 		},
 	})
 
-	streamID := openHostModelStreamForTest(t, host)
+	streamID, callbackID := openHostModelStreamForTest(t, host)
 	var streamCtx context.Context
 	select {
 	case streamCtx = <-ctxSeen:
 	case <-time.After(time.Second):
 		t.Fatal("model executor was not called")
 	}
-	closeReq, errMarshal := json.Marshal(pluginapi.HostModelStreamCloseRequest{StreamID: streamID})
+	closeReq, errMarshal := json.Marshal(pluginapi.HostModelStreamCloseRequest{StreamID: streamID, HostCallbackID: callbackID})
 	if errMarshal != nil {
 		t.Fatalf("marshal close request: %v", errMarshal)
 	}
@@ -1383,20 +1372,22 @@ func TestHostModelStreamExplicitCloseCancelsStream(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stream context was not canceled after explicit close")
 	}
-	if _, errClose := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamClose, closeReq); errClose != nil {
-		t.Fatalf("second close callback error = %v", errClose)
+	if _, errClose := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamClose, closeReq); errClose == nil {
+		t.Fatal("closed stream accepted")
 	}
 }
 
-func openHostModelStreamForTest(t *testing.T, host *Host) string {
+func openHostModelStreamForTest(t *testing.T, host *Host) (string, string) {
 	t.Helper()
-	rawReq, errMarshal := json.Marshal(pluginapi.HostModelExecutionRequest{
+	callbackID, closeCallback := host.openCallbackContext(context.Background())
+	t.Cleanup(closeCallback)
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: callbackID, HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
 		EntryProtocol: "openai",
 		ExitProtocol:  "openai",
 		Model:         "model-1",
 		Stream:        true,
 		Body:          []byte(`{"stream":true}`),
-	})
+	}})
 	if errMarshal != nil {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
@@ -1411,7 +1402,7 @@ func openHostModelStreamForTest(t *testing.T, host *Host) string {
 	if resp.StreamID == "" {
 		t.Fatalf("stream id is empty: %#v", resp)
 	}
-	return resp.StreamID
+	return resp.StreamID, callbackID
 }
 
 func hostModelStreamCountForTest(t *testing.T, host *Host) int {

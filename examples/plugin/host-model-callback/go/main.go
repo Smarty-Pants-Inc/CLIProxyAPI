@@ -491,19 +491,23 @@ func executeStream(opts runOptions) (data streamPageData) {
 		data.Error = "host.model.execute_stream returned an empty stream_id"
 		return data
 	}
+	streamDone := false
 	if opts.ImplicitClose {
 		// When implicit_close=true, the host closes this stream when the management.handle RPC callback scope returns.
 		data.CloseMode = "implicit close at management.handle return"
 	} else {
 		data.CloseMode = "explicit close through host.model.stream_close"
 		defer func() {
-			if errClose := closeHostModelStream(resp.StreamID); errClose != nil {
+			if streamDone {
+				return
+			}
+			if errClose := closeHostModelStream(opts.HostCallbackID, resp.StreamID); errClose != nil {
 				data.CloseError = errClose.Error()
 			}
 		}()
 	}
 	for {
-		chunk, errRead := readHostModelStream(resp.StreamID)
+		chunk, errRead := readHostModelStream(opts.HostCallbackID, resp.StreamID)
 		if errRead != nil {
 			data.Error = errRead.Error()
 			return data
@@ -511,6 +515,7 @@ func executeStream(opts runOptions) (data streamPageData) {
 		if len(chunk.Payload) > 0 {
 			data.Chunks = append(data.Chunks, string(chunk.Payload))
 		}
+		streamDone = chunk.Done || chunk.Error != ""
 		if chunk.Error != "" {
 			data.Error = chunk.Error
 			return data
@@ -521,8 +526,8 @@ func executeStream(opts runOptions) (data streamPageData) {
 	}
 }
 
-func readHostModelStream(streamID string) (pluginapi.HostModelStreamReadResponse, error) {
-	result, errCall := callHost(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: streamID})
+func readHostModelStream(hostCallbackID, streamID string) (pluginapi.HostModelStreamReadResponse, error) {
+	result, errCall := callHost(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: streamID, HostCallbackID: hostCallbackID})
 	if errCall != nil {
 		return pluginapi.HostModelStreamReadResponse{}, errCall
 	}
@@ -533,8 +538,8 @@ func readHostModelStream(streamID string) (pluginapi.HostModelStreamReadResponse
 	return resp, nil
 }
 
-func closeHostModelStream(streamID string) error {
-	_, errCall := callHost(pluginabi.MethodHostModelStreamClose, pluginapi.HostModelStreamCloseRequest{StreamID: streamID})
+func closeHostModelStream(hostCallbackID, streamID string) error {
+	_, errCall := callHost(pluginabi.MethodHostModelStreamClose, pluginapi.HostModelStreamCloseRequest{StreamID: streamID, HostCallbackID: hostCallbackID})
 	return errCall
 }
 

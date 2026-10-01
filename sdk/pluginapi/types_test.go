@@ -269,19 +269,19 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		t.Fatalf("HostModelStreamResponse round trip = %#v", decodedStreamResponse)
 	}
 
-	readRequest := HostModelStreamReadRequest{StreamID: "stream-1"}
+	readRequest := HostModelStreamReadRequest{StreamID: "stream-1", HostCallbackID: "invocation-capability"}
 	rawReadRequest, errMarshalReadRequest := json.Marshal(readRequest)
 	if errMarshalReadRequest != nil {
 		t.Fatalf("marshal HostModelStreamReadRequest: %v", errMarshalReadRequest)
 	}
-	if !strings.Contains(string(rawReadRequest), `"stream_id"`) {
+	if !strings.Contains(string(rawReadRequest), `"host_callback_id":"invocation-capability"`) || !strings.Contains(string(rawReadRequest), `"stream_id"`) {
 		t.Fatalf("HostModelStreamReadRequest JSON missing stream_id: %s", rawReadRequest)
 	}
 	var decodedReadRequest HostModelStreamReadRequest
 	if errUnmarshalReadRequest := json.Unmarshal(rawReadRequest, &decodedReadRequest); errUnmarshalReadRequest != nil {
 		t.Fatalf("unmarshal HostModelStreamReadRequest: %v", errUnmarshalReadRequest)
 	}
-	if decodedReadRequest.StreamID != readRequest.StreamID {
+	if decodedReadRequest.StreamID != readRequest.StreamID || decodedReadRequest.HostCallbackID != readRequest.HostCallbackID {
 		t.Fatalf("HostModelStreamReadRequest round trip = %#v", decodedReadRequest)
 	}
 
@@ -310,19 +310,19 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		t.Fatalf("HostModelStreamReadResponse round trip = %#v", decodedReadResponse)
 	}
 
-	closeRequest := HostModelStreamCloseRequest{StreamID: "stream-1"}
+	closeRequest := HostModelStreamCloseRequest{StreamID: "stream-1", HostCallbackID: "invocation-capability"}
 	rawCloseRequest, errMarshalCloseRequest := json.Marshal(closeRequest)
 	if errMarshalCloseRequest != nil {
 		t.Fatalf("marshal HostModelStreamCloseRequest: %v", errMarshalCloseRequest)
 	}
-	if !strings.Contains(string(rawCloseRequest), `"stream_id"`) {
+	if !strings.Contains(string(rawCloseRequest), `"host_callback_id":"invocation-capability"`) || !strings.Contains(string(rawCloseRequest), `"stream_id"`) {
 		t.Fatalf("HostModelStreamCloseRequest JSON missing stream_id: %s", rawCloseRequest)
 	}
 	var decodedCloseRequest HostModelStreamCloseRequest
 	if errUnmarshalCloseRequest := json.Unmarshal(rawCloseRequest, &decodedCloseRequest); errUnmarshalCloseRequest != nil {
 		t.Fatalf("unmarshal HostModelStreamCloseRequest: %v", errUnmarshalCloseRequest)
 	}
-	if decodedCloseRequest.StreamID != closeRequest.StreamID {
+	if decodedCloseRequest.StreamID != closeRequest.StreamID || decodedCloseRequest.HostCallbackID != closeRequest.HostCallbackID {
 		t.Fatalf("HostModelStreamCloseRequest round trip = %#v", decodedCloseRequest)
 	}
 }

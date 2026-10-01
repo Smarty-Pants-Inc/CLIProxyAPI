@@ -655,7 +655,12 @@ type HostModelStreamResponse struct {
 }
 
 // HostModelStreamReadRequest asks the host to read the next model stream chunk.
+// Missing, expired, or foreign invocation capabilities are rejected. Pending
+// reads stop when the owning callback scope or plugin instance closes.
 type HostModelStreamReadRequest struct {
+	// HostCallbackID is the active invocation capability that created this stream.
+	// It must accompany every read; a stream ID alone grants no access.
+	HostCallbackID string `json:"host_callback_id"`
 	// StreamID identifies the host-owned stream.
 	StreamID string `json:"stream_id"`
 }
@@ -671,7 +676,12 @@ type HostModelStreamReadResponse struct {
 }
 
 // HostModelStreamCloseRequest asks the host to close a model stream.
+// The creator callback must still be active; unknown or already closed streams
+// are rejected. After the callback returns, the host owns stream cleanup.
 type HostModelStreamCloseRequest struct {
+	// HostCallbackID is the active invocation capability that created this stream.
+	// It must accompany every close, including cleanup.
+	HostCallbackID string `json:"host_callback_id"`
 	// StreamID identifies the host-owned stream.
 	StreamID string `json:"stream_id"`
 }

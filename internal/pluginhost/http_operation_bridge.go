@@ -265,6 +265,9 @@ func (h *Host) closeHostHTTPCallbackInstance(pluginID string, instance *hostCall
 	if h == nil {
 		return
 	}
+	if h.callbackContexts != nil {
+		h.callbackContexts.closeInstance(pluginID, instance)
+	}
 	if h.httpOperations != nil {
 		h.httpOperations.closeInstance(pluginID, instance)
 	}

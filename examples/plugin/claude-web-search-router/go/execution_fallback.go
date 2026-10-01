@@ -296,17 +296,17 @@ func hostModelStreamClaude(ctx context.Context, hostCallbackID, execModel string
 		return nil, 0, errDecode
 	}
 	if resp.StatusCode >= 400 {
-		_ = closeHostModelStream(resp.StreamID)
+		_ = closeHostModelStream(hostCallbackID, resp.StreamID)
 		return nil, resp.StatusCode, fmt.Errorf("host model status %d", resp.StatusCode)
 	}
 	if strings.TrimSpace(resp.StreamID) == "" {
 		return nil, 0, fmt.Errorf("host model stream: empty stream_id")
 	}
-	defer func() { _ = closeHostModelStream(resp.StreamID) }()
+	defer func() { _ = closeHostModelStream(hostCallbackID, resp.StreamID) }()
 
 	var buf bytes.Buffer
 	for {
-		chunkRaw, errRead := callHost(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: resp.StreamID})
+		chunkRaw, errRead := callHost(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: resp.StreamID, HostCallbackID: hostCallbackID})
 		if errRead != nil {
 			return nil, hostHTTPStatusFromError(errRead), errRead
 		}
@@ -328,7 +328,7 @@ func hostModelStreamClaude(ctx context.Context, hostCallbackID, execModel string
 	return buf.Bytes(), http.StatusOK, nil
 }
 
-func closeHostModelStream(streamID string) error {
-	_, errCall := callHost(pluginabi.MethodHostModelStreamClose, pluginapi.HostModelStreamCloseRequest{StreamID: streamID})
+func closeHostModelStream(hostCallbackID, streamID string) error {
+	_, errCall := callHost(pluginabi.MethodHostModelStreamClose, pluginapi.HostModelStreamCloseRequest{StreamID: streamID, HostCallbackID: hostCallbackID})
 	return errCall
 }

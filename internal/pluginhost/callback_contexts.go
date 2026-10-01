@@ -2,14 +2,14 @@ package pluginhost
 
 import (
 	"context"
-	"strconv"
+	"crypto/rand"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 )
 
 type callbackContextRegistry struct {
-	next        atomic.Uint64
 	nextCleanup atomic.Uint64
 	mu          sync.RWMutex
 	contexts    map[string]callbackContextEntry
@@ -17,6 +17,7 @@ type callbackContextRegistry struct {
 
 type callbackContextEntry struct {
 	ctx      context.Context
+	cancel   context.CancelFunc
 	pluginID string
 	instance *hostCallbackInstance
 	cleanup  []callbackContextCleanup
@@ -39,27 +40,57 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string, ins
 		ctx = context.Background()
 	}
 	pluginID = strings.TrimSpace(pluginID)
-	ctx = withHostCallbackIdentity(ctx, pluginID, instance)
-	id := strconv.FormatUint(r.next.Add(1), 10)
+	ctx, cancel := context.WithCancel(withHostCallbackIdentity(ctx, pluginID, instance))
+	// This is an invocation-scoped bearer capability, not a native-code sandbox.
+	// An instance given two handles can use either; sibling handles must not be guessable.
+	id := rand.Text()
 	r.mu.Lock()
-	r.contexts[id] = callbackContextEntry{ctx: ctx, pluginID: pluginID, instance: instance}
+	if ctx.Err() != nil || (instance != nil && instance.closed.Load()) {
+		r.mu.Unlock()
+		cancel()
+		return "", func() {}
+	}
+	r.contexts[id] = callbackContextEntry{ctx: ctx, cancel: cancel, pluginID: pluginID, instance: instance}
 	r.mu.Unlock()
-
 	var once sync.Once
-	return id, func() {
-		once.Do(func() {
-			var cleanup []callbackContextCleanup
-			r.mu.Lock()
-			entry := r.contexts[id]
+	return id, func() { once.Do(func() { r.close(id) }) }
+}
+
+func closeCallbackEntry(entry callbackContextEntry) {
+	if entry.cancel != nil {
+		entry.cancel()
+	}
+	for _, item := range entry.cleanup {
+		if item.fn != nil {
+			item.fn()
+		}
+	}
+}
+
+func (r *callbackContextRegistry) close(id string) {
+	r.mu.Lock()
+	entry := r.contexts[id]
+	delete(r.contexts, id)
+	r.mu.Unlock()
+	closeCallbackEntry(entry)
+}
+
+func (r *callbackContextRegistry) closeInstance(pluginID string, instance *hostCallbackInstance) {
+	if r == nil {
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	r.mu.Lock()
+	var entries []callbackContextEntry
+	for id, entry := range r.contexts {
+		if entry.pluginID == pluginID && (instance == nil || entry.instance == instance) {
 			delete(r.contexts, id)
-			r.mu.Unlock()
-			cleanup = entry.cleanup
-			for _, item := range cleanup {
-				if item.fn != nil {
-					item.fn()
-				}
-			}
-		})
+			entries = append(entries, entry)
+		}
+	}
+	r.mu.Unlock()
+	for _, entry := range entries {
+		closeCallbackEntry(entry)
 	}
 }
 
@@ -74,7 +105,7 @@ func (r *callbackContextRegistry) lookup(id string) (context.Context, string, *h
 	r.mu.RLock()
 	entry, exists := r.contexts[id]
 	r.mu.RUnlock()
-	if !exists || entry.ctx == nil {
+	if !exists || entry.ctx == nil || entry.ctx.Err() != nil || (entry.instance != nil && entry.instance.closed.Load()) {
 		return nil, "", nil, false
 	}
 	return entry.ctx, strings.TrimSpace(entry.pluginID), entry.instance, true
@@ -84,7 +115,6 @@ func (r *callbackContextRegistry) pluginID(id string) string {
 	_, pluginID, _, _ := r.lookup(id)
 	return pluginID
 }
-
 func (r *callbackContextRegistry) addCleanup(id string, cleanup func()) bool {
 	_, ok := r.addCleanupHandle(id, cleanup)
 	return ok
@@ -101,6 +131,7 @@ func (r *callbackContextRegistry) addCleanupHandle(id string, cleanup func()) (f
 	cleanupID := r.nextCleanup.Add(1)
 	r.mu.Lock()
 	entry, exists := r.contexts[id]
+	exists = exists && entry.ctx.Err() == nil && (entry.instance == nil || !entry.instance.closed.Load())
 	if exists {
 		entry.cleanup = append(entry.cleanup, callbackContextCleanup{id: cleanupID, fn: cleanup})
 		r.contexts[id] = entry
@@ -110,7 +141,6 @@ func (r *callbackContextRegistry) addCleanupHandle(id string, cleanup func()) (f
 		cleanup()
 		return func() {}, false
 	}
-
 	var once sync.Once
 	remove := func() {
 		once.Do(func() {
@@ -150,11 +180,9 @@ func (r *callbackContextRegistry) resolve(id string, fallback context.Context) c
 func (h *Host) openCallbackContext(ctx context.Context) (string, func()) {
 	return h.openCallbackContextForPlugin(ctx, "")
 }
-
 func (h *Host) openCallbackContextForPlugin(ctx context.Context, pluginID string) (string, func()) {
 	return h.openCallbackContextForPluginInstance(ctx, pluginID, nil)
 }
-
 func (h *Host) openCallbackContextForPluginInstance(ctx context.Context, pluginID string, instance *hostCallbackInstance) (string, func()) {
 	if h == nil || h.callbackContexts == nil {
 		return "", func() {}
@@ -167,7 +195,6 @@ func (h *Host) openCallbackContextForPluginInstance(ctx context.Context, pluginI
 	}
 	return h.callbackContexts.open(ctx, pluginID, instance)
 }
-
 func (h *Host) addCallbackCleanup(id string, cleanup func()) bool {
 	if h == nil || h.callbackContexts == nil {
 		if id != "" && cleanup != nil {
@@ -177,7 +204,6 @@ func (h *Host) addCallbackCleanup(id string, cleanup func()) bool {
 	}
 	return h.callbackContexts.addCleanup(id, cleanup)
 }
-
 func (h *Host) addCallbackCleanupHandle(id string, cleanup func()) (func(), bool) {
 	if h == nil || h.callbackContexts == nil {
 		if id != "" && cleanup != nil {
@@ -187,12 +213,23 @@ func (h *Host) addCallbackCleanupHandle(id string, cleanup func()) (func(), bool
 	}
 	return h.callbackContexts.addCleanupHandle(id, cleanup)
 }
-
 func (h *Host) lookupCallbackContext(id string) (context.Context, string, *hostCallbackInstance, bool) {
 	if h == nil || h.callbackContexts == nil {
 		return nil, "", nil, false
 	}
 	return h.callbackContexts.lookup(id)
+}
+
+// requireActiveCallbackContext authenticates the native caller AND its invocation capability.
+func (h *Host) requireActiveCallbackContext(ctx context.Context, id string) (context.Context, error) {
+	registered, pluginID, instance, ok := h.lookupCallbackContext(id)
+	if !ok || pluginID != hostCallbackPluginIDFromContext(ctx) || instance != hostCallbackInstanceFromContext(ctx) {
+		return nil, fmt.Errorf("host callback requires its active owning request context")
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return registered, nil
 }
 
 func (h *Host) resolveCallbackContext(id string, fallback context.Context) context.Context {
@@ -204,7 +241,6 @@ func (h *Host) resolveCallbackContext(id string, fallback context.Context) conte
 	}
 	return h.callbackContexts.resolve(id, fallback)
 }
-
 func (h *Host) callbackContextPluginID(id string) string {
 	if h == nil || h.callbackContexts == nil {
 		return ""

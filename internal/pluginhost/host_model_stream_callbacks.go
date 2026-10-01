@@ -23,36 +23,75 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")
 	}
-	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
-	callbackCtx := h.resolveCallbackContext(req.HostCallbackID, ctx)
+	callbackCtx := ctx
+	// Identity-free internal calls retain their existing executor validation path.
+	// Native calls and all explicitly scoped calls must prove active ownership.
+	if req.HostCallbackID != "" || hostCallbackPluginIDFromContext(ctx) != "" || hostCallbackInstanceFromContext(ctx) != nil {
+		var errOwner error
+		callbackCtx, errOwner = h.requireActiveCallbackContext(ctx, req.HostCallbackID)
+		if errOwner != nil {
+			return nil, errOwner
+		}
+	}
 	if callbackCtx == nil {
 		callbackCtx = context.Background()
 	}
-	// Detach request cancellation while preserving callback values; callback cleanup owns the model stream lifetime.
-	streamCtx, cancel := newStreamContext(context.WithoutCancel(callbackCtx))
+	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
+	streamCtx, cancel := newStreamContext(callbackCtx)
+	// Attach before ExecuteModelStream, which can block during upstream startup.
+	stopScopeCleanup := func() {}
+	if req.HostCallbackID != "" {
+		var attached bool
+		stopScopeCleanup, attached = h.addCallbackCleanupHandle(req.HostCallbackID, cancel)
+		if !attached {
+			cancel()
+			return nil, fmt.Errorf("host callback context closed while starting model stream")
+		}
+	}
+	keepStream := false
+	defer func() {
+		if !keepStream {
+			stopScopeCleanup()
+			cancel()
+		}
+	}()
+	if err := streamCtx.Err(); err != nil {
+		return nil, err
+	}
 	stream, errMsg := executor.ExecuteModelStream(streamCtx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
 	if errMsg != nil {
-		cancel()
 		return nil, modelExecutionError(errMsg)
+	}
+	if err := streamCtx.Err(); err != nil {
+		return nil, err
 	}
 	streamID := ""
 	if h.modelStreams != nil {
 		streamID = h.modelStreams.open(req.HostCallbackID, stream.Chunks, cancel)
 	}
 	if streamID == "" {
-		cancel()
 		return nil, fmt.Errorf("host model stream bridge is unavailable")
 	}
 	if req.HostCallbackID != "" {
-		h.addCallbackCleanup(req.HostCallbackID, func() {
+		stopStreamCleanup, attached := h.addCallbackCleanupHandle(req.HostCallbackID, func() {
 			h.modelStreams.close(streamID)
 		})
+		stopScopeCleanup()
+		stopScopeCleanup = stopStreamCleanup
+		if !attached {
+			return nil, context.Canceled
+		}
 	}
-	return marshalRPCResult(pluginapi.HostModelStreamResponse{
-		StatusCode: stream.StatusCode,
-		Headers:    cloneHeader(stream.Headers),
-		StreamID:   streamID,
-	})
+	if !h.modelStreams.attachLifetime(streamID, streamCtx, stopScopeCleanup) {
+		return nil, context.Canceled
+	}
+	raw, err := marshalRPCResult(pluginapi.HostModelStreamResponse{StatusCode: stream.StatusCode, Headers: cloneHeader(stream.Headers), StreamID: streamID})
+	if err != nil {
+		h.modelStreams.close(streamID)
+		return nil, err
+	}
+	keepStream = true
+	return raw, nil
 }
 
 func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]byte, error) {
@@ -63,14 +102,28 @@ func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]b
 	if h == nil || h.modelStreams == nil {
 		return nil, fmt.Errorf("host model stream bridge is unavailable")
 	}
-	chunk, done, errRead := h.modelStreams.read(ctx, req.StreamID)
+	if req.StreamID == "" {
+		return nil, fmt.Errorf("model stream id is required")
+	}
+	owner, err := h.requireActiveCallbackContext(ctx, req.HostCallbackID)
+	if err != nil {
+		return nil, err
+	}
+	// Preserve BOTH the owning invocation lifetime and cancellation of this read.
+	readCtx, cancel := context.WithCancel(owner)
+	defer cancel()
+	if ctx != nil {
+		stop := context.AfterFunc(ctx, cancel)
+		defer stop()
+	}
+	chunk, done, errRead := h.modelStreams.read(readCtx, req.StreamID, req.HostCallbackID)
 	if errRead != nil {
 		return nil, errRead
 	}
-	resp := pluginapi.HostModelStreamReadResponse{
-		Payload: append([]byte(nil), chunk.Payload...),
-		Done:    done,
+	if _, errOwner := h.requireActiveCallbackContext(ctx, req.HostCallbackID); errOwner != nil {
+		return nil, errOwner
 	}
+	resp := pluginapi.HostModelStreamReadResponse{Payload: append([]byte(nil), chunk.Payload...), Done: done}
 	if chunk.Err != nil {
 		resp.Error = chunk.Err.Error()
 		resp.Done = true
@@ -78,13 +131,22 @@ func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]b
 	return marshalRPCResult(resp)
 }
 
-func (h *Host) callHostModelStreamClose(request []byte) ([]byte, error) {
+func (h *Host) callHostModelStreamClose(ctx context.Context, request []byte) ([]byte, error) {
 	var req pluginapi.HostModelStreamCloseRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode host model stream close request: %w", errUnmarshal)
 	}
-	if h != nil && h.modelStreams != nil {
-		h.modelStreams.close(req.StreamID)
+	if h == nil || h.modelStreams == nil {
+		return nil, fmt.Errorf("host model stream bridge is unavailable")
+	}
+	if req.StreamID == "" {
+		return nil, fmt.Errorf("model stream id is required")
+	}
+	if _, err := h.requireActiveCallbackContext(ctx, req.HostCallbackID); err != nil {
+		return nil, err
+	}
+	if err := h.modelStreams.closeOwned(req.StreamID, req.HostCallbackID); err != nil {
+		return nil, err
 	}
 	return marshalRPCResult(rpcEmptyResponse{})
 }

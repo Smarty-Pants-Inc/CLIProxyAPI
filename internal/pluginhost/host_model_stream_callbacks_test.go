@@ -13,7 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-func TestHostModelExecuteStreamDetachesFromCallbackParentCancel(t *testing.T) {
+func TestHostModelExecuteStreamPreservesCallbackParentCancel(t *testing.T) {
 	host := New()
 	ctxSeen := make(chan context.Context, 1)
 	host.SetModelExecutor(&fakeHostModelExecutor{
@@ -63,8 +63,8 @@ func TestHostModelExecuteStreamDetachesFromCallbackParentCancel(t *testing.T) {
 	cancelParent()
 	select {
 	case <-streamCtx.Done():
-		t.Fatal("stream context was canceled by callback parent context")
-	default:
+	case <-time.After(time.Second):
+		t.Fatal("stream context was not canceled by callback parent context")
 	}
 
 	closeCallback()

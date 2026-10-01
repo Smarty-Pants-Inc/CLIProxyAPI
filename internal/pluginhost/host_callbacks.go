@@ -147,9 +147,6 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 	switch method {
 	case pluginabi.MethodHostAuthList, pluginabi.MethodHostAuthGet, pluginabi.MethodHostAuthGetRuntime, pluginabi.MethodHostAuthSave, pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream:
 		manager := h.currentAuthManager()
-		if !manager.HasConfiguredAPIKeyPolicies() && !manager.HasClientAPIKeyPolicy(ctx) {
-			break
-		}
 		var envelope struct {
 			HostCallbackID string `json:"host_callback_id,omitempty"`
 		}
@@ -159,12 +156,12 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 			}
 		}
 		if envelope.HostCallbackID != "" {
-			registered, pluginID, instance, ok := h.lookupCallbackContext(envelope.HostCallbackID)
-			if !ok || pluginID != hostCallbackPluginIDFromContext(ctx) || instance != hostCallbackInstanceFromContext(ctx) {
-				return nil, fmt.Errorf("credential/model callback requires its active owning request context")
+			registered, errOwner := h.requireActiveCallbackContext(ctx, envelope.HostCallbackID)
+			if errOwner != nil {
+				return nil, errOwner
 			}
 			ctx = registered
-		} else if hostCallbackPluginIDFromContext(ctx) != "" {
+		} else if (hostCallbackPluginIDFromContext(ctx) != "" || hostCallbackInstanceFromContext(ctx) != nil) && (manager.HasConfiguredAPIKeyPolicies() || manager.HasClientAPIKeyPolicy(ctx)) {
 			return nil, fmt.Errorf("credential/model callback requires host_callback_id when client API key policies have been configured")
 		}
 	}
@@ -176,7 +173,7 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 	case pluginabi.MethodHostModelStreamRead:
 		return h.callHostModelStreamRead(ctx, request)
 	case pluginabi.MethodHostModelStreamClose:
-		return h.callHostModelStreamClose(request)
+		return h.callHostModelStreamClose(ctx, request)
 	case pluginabi.MethodHostHTTPDo:
 		return h.callHostHTTPDo(ctx, request)
 	case pluginabi.MethodHostHTTPDoStream:
@@ -222,6 +219,9 @@ func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, erro
 	if errDecode != nil {
 		return nil, errDecode
 	}
+	if errAdmission := h.validateRawHTTPAdmission(ctx, callbackID); errAdmission != nil {
+		return nil, errAdmission
+	}
 	operation, errAcquire := h.acquireHostHTTPOperation(ctx, callbackID, operationID)
 	if errAcquire != nil {
 		return nil, errAcquire
@@ -234,6 +234,20 @@ func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, erro
 	return marshalRPCResult(resp)
 }
 
+// Raw HTTP has no selected credential/model or host metering binding. Restricted
+// admissions must use host.model.execute[_stream], which revalidates those boundaries.
+func (h *Host) validateRawHTTPAdmission(ctx context.Context, callbackID string) error {
+	owner, err := h.requireActiveCallbackContext(ctx, callbackID)
+	if err != nil {
+		return err
+	}
+	manager := h.currentAuthManager()
+	if manager.HasClientAPIKeyPolicy(owner) || manager.HasClientAPIKeyPolicy(ctx) {
+		return fmt.Errorf("raw host HTTP is unavailable for restricted client admission; use host model execution")
+	}
+	return nil
+}
+
 func newStreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithCancel(ctx)
 }
@@ -242,6 +256,9 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 	httpReq, callbackID, operationID, errDecode := decodeHostHTTPRequestWithOperationID(request)
 	if errDecode != nil {
 		return nil, errDecode
+	}
+	if errAdmission := h.validateRawHTTPAdmission(ctx, callbackID); errAdmission != nil {
+		return nil, errAdmission
 	}
 	operation, errAcquire := h.acquireHostHTTPOperation(ctx, callbackID, operationID)
 	if errAcquire != nil {
