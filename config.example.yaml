@@ -59,11 +59,17 @@ api-keys:
 # for restricted clients. Policies require ws-auth: true for authenticated routing.
 # Existing requests and derived realtime tokens retain their admission restrictions;
 # a reload may narrow, but cannot unrestrict them. Home overlays retain local policies.
-# Restricted WebRTC requires the configured media relay (direct SDP is rejected).
+# Direct Realtime/WebRTC/media and raw credential SDK HTTP routes fail closed
+# with 503 for policied clients; use normal execution or Responses WebSockets.
 # Native credential/model callbacks must carry their owning host_callback_id.
 # allowed-models is optional and matches the client-visible model ID (before
-# routing aliases), case-sensitively with globs; omitted/null is unrestricted,
+# routing), case-sensitively with globs; omitted/null is unrestricted,
 # an explicit [] denies all. Non-matches return 403 before credential selection.
+# Every policied key keeps exactly its original model; aliases, model pools,
+# Home overrides and final payload model substitutions are not permitted.
+# single-attempt: true disables credential rotation, refresh/reconnect retries,
+# request-retry rounds and cooldown waits. Upstream failures retain status/body
+# and Retry-After. Upstream 400 is terminal for every policied key.
 # daily-token-cap is optional, nonnegative input+output tokens per UTC day;
 # 0 denies immediately. At/above the recorded cap, requests return 429 until
 # 00:00 UTC. Counts use existing usage records, independent of usage-statistics.
@@ -92,6 +98,7 @@ api-keys:
 #     allowed-auths: ["TRAINING-OFF-VERIFIED-CODEX-AUTH-FILE-FILLED-AT-INSTALL.json"]
 #     allowed-providers: [codex] # gpt-6.1-sol uses Codex/ChatGPT OAuth accounts
 #     allowed-models: [gpt-6.1-sol]
+#     single-attempt: true
 #     daily-token-cap: 1000000000 # TriStar: 1B tokens/day, provisional
 #     # daily-request-cap: <install-approved nonnegative integer>
 #     # Set TriStar's request cap at install; 100/day was packet-job-only.

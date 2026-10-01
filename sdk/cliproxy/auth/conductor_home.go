@@ -1400,6 +1400,9 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 }
 
 func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool, error) {
+	if m.SingleAttemptClient(ctx) {
+		return cliproxyexecutor.Response{}, false, nil
+	}
 	if m != nil && m.HomeEnabled() {
 		return cliproxyexecutor.Response{}, false, &Error{Code: "home_fallback_unsupported", Message: "Home does not support Antigravity credits fallback", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -1440,6 +1443,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			if errPolicy := m.ValidateClientAuth(creditsCtx, c.auth); errPolicy != nil {
 				return cliproxyexecutor.Response{}, false, errPolicy
 			}
+			if errPolicy := m.ValidateClientExecution(creditsCtx, execReq.Model); errPolicy != nil {
+				return cliproxyexecutor.Response{}, false, errPolicy
+			}
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
 			if errExec != nil {
@@ -1451,6 +1457,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 					result.CredentialScope = true
 				}
 				m.MarkResult(creditsCtx, result)
+				if m.ClientExecutionMustStop(creditsCtx, errExec) {
+					return cliproxyexecutor.Response{}, false, errExec
+				}
 				if result.CredentialScope {
 					break
 				}
@@ -1466,6 +1475,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 }
 
 func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool, error) {
+	if m.SingleAttemptClient(ctx) {
+		return nil, false, nil
+	}
 	if m != nil && m.HomeEnabled() {
 		return nil, false, &Error{Code: "home_fallback_unsupported", Message: "Home does not support Antigravity credits fallback", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -1500,6 +1512,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
+			if m.ClientExecutionMustStop(creditsCtx, errStream) {
+				return nil, false, errStream
+			}
 			continue
 		}
 		return result, true, nil

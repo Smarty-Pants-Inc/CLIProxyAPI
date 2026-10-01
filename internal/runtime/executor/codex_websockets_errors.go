@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -24,6 +25,23 @@ func (e statusErrWithHeaders) Headers() http.Header {
 		return nil
 	}
 	return e.headers.Clone()
+}
+
+func parseClientCodexWebsocketError(ctx context.Context, payload []byte, modelLevelCooling bool) (error, bool) {
+	if cliproxyexecutor.HasClientExecutionPolicy(ctx) && gjson.GetBytes(payload, "type").String() == "error" {
+		status := int(gjson.GetBytes(payload, "status").Int())
+		if status == 0 {
+			status = int(gjson.GetBytes(payload, "status_code").Int())
+		}
+		if status > 0 {
+			body := payload
+			if node := gjson.GetBytes(payload, "body"); node.Exists() {
+				body = []byte(node.Raw)
+			}
+			return cliproxyexecutor.PreserveClientUpstreamError(ctx, status, body, parseCodexWebsocketErrorHeaders(payload)), true
+		}
+	}
+	return parseCodexWebsocketErrorWithCooling(payload, modelLevelCooling)
 }
 
 func parseCodexWebsocketError(payload []byte) (error, bool) {

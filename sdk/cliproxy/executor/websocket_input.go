@@ -61,7 +61,10 @@ func AdmitWebsocketRequest(ctx context.Context, model string) (context.Context, 
 	if ctx != nil {
 		if admit, ok := ctx.Value(websocketRequestAdmissionKey{}).(func(string) (context.Context, error)); ok && admit != nil {
 			admitted, err := admit(model)
-			// Preserve the transport callbacks as well as the new per-turn receipt.
+			// Preserve transport callbacks, but use the fresh turn's model/attempt budget.
+			if admitted != nil {
+				ctx = WithClientExecutionPolicyFromContext(ctx, admitted)
+			}
 			return context.WithValue(ctx, websocketAdmittedContextKey{}, admitted), err
 		}
 	}

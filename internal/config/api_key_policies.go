@@ -37,6 +37,8 @@ type APIKeyPolicy struct {
 	DailyTokenCap *int64 `yaml:"daily-token-cap,omitempty" json:"daily-token-cap,omitempty"`
 	// Nil means no request cap; zero denies request admission immediately.
 	DailyRequestCap *int64 `yaml:"daily-request-cap,omitempty" json:"daily-request-cap,omitempty"`
+	// SingleAttempt disables retries, credential rotation and cooldown waits.
+	SingleAttempt bool `yaml:"single-attempt,omitempty" json:"single-attempt,omitempty"`
 }
 
 // ValidateAPIKeyPolicies rejects ambiguous or malformed policies instead of dropping

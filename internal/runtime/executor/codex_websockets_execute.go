@@ -154,6 +154,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if respHS != nil {
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
 		}
+		if respHS != nil && cliproxyexecutor.HasClientExecutionPolicy(ctx) {
+			return resp, cliproxyexecutor.PreserveClientUpstreamError(ctx, respHS.StatusCode, bodyErr, respHS.Header)
+		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
 			if opts.ExecutionLifecycle == nil && !cliproxyexecutor.DownstreamWebsocket(ctx) {
 				return e.CodexExecutor.Execute(ctx, auth, req, opts)
@@ -199,19 +202,19 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody, websocketPolicyCheck(ctx, authID)); errSend != nil {
+	if errSend := writeCodexWebsocketMessage(ctx, sess, conn, wsReqBody, websocketPolicyCheck(ctx, authID)); errSend != nil {
 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
 		if sess != nil && !isEphemeralSession {
 			if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "send_error", errSend)
-				if !shouldRetryCodexWebsocketSend(errSend) {
+				if cliproxyexecutor.ClientSingleAttempt(ctx) || !shouldRetryCodexWebsocketSend(errSend) {
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 					return resp, errSend
 				}
 				return resp, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 			}
 			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
-			if !shouldRetryCodexWebsocketSend(errSend) {
+			if cliproxyexecutor.ClientSingleAttempt(ctx) || !shouldRetryCodexWebsocketSend(errSend) {
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 				return resp, errSend
 			}
@@ -247,7 +250,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 				reporter.StartResponseTTFT()
 				cliproxyexecutor.MarkUpstreamAttempt(ctx)
-				if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry, websocketPolicyCheck(ctx, authID)); errSendRetry == nil {
+				if errSendRetry := writeCodexWebsocketMessage(ctx, sess, conn, wsReqBodyRetry, websocketPolicyCheck(ctx, authID)); errSendRetry == nil {
 					wsReqBody = wsReqBodyRetry
 				} else {
 					errSendRetry = mapCodexWebsocketWriteError(sess, connRetry, errSendRetry)
@@ -256,6 +259,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errSendRetry
 				}
 			} else {
+				if respHSRetry != nil && cliproxyexecutor.HasClientExecutionPolicy(ctx) {
+					body := websocketHandshakeBody(respHSRetry)
+					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+					return resp, cliproxyexecutor.PreserveClientUpstreamError(ctx, respHSRetry.StatusCode, body, respHSRetry.Header)
+				}
 				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
 				return resp, errDialRetry
@@ -328,7 +336,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			unverifiedObserverBytes += len(payload)
 		}
 
-		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+		if wsErr, ok := parseClientCodexWebsocketError(ctx, payload, e.modelLevelCooling()); ok {
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 			}

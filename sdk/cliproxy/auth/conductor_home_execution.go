@@ -27,6 +27,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if errExecute == nil {
 			return response, nil
 		}
+		if m.ClientExecutionMustStop(ctx, errExecute) {
+			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExecute)
+		}
 		if hasUpstreamExecutionAttempt(errExecute) {
 			preferredUpstreamErr = errExecute
 		}
@@ -136,7 +139,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.preparedClientExecutionModelsWithAlias(execCtx, auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
@@ -146,6 +149,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		if len(models) == 0 {
 			releaseAttempt()
+			if m.SingleAttemptClient(execCtx) {
+				selection.End("no_execution_models")
+				return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no execution models available"}
+			}
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
@@ -161,6 +168,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			m.reportHomeResult(execCtx, Result{AuthID: auth.ID, Provider: selection.Provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}, auth)
 			releaseAttempt()
+			if m.ClientExecutionMustStop(execCtx, errPrepare) {
+				selection.End("prepare_failed")
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
@@ -236,6 +247,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				if errPolicy := m.ValidateClientAuth(execCtx, preparedAuth); errPolicy != nil {
 					return cliproxyexecutor.Response{}, errPolicy
 				}
+				if errPolicy := m.ValidateClientExecution(execCtx, execReq.Model); errPolicy != nil {
+					return cliproxyexecutor.Response{}, errPolicy
+				}
 				if countTokens {
 					return selection.Executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
 				}
@@ -271,6 +285,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			result.RetryAfter = retryAfterFromError(errExecute)
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true
+			}
+			if m.ClientExecutionMustStop(execCtx, errExecute) {
+				m.reportHomeResult(execCtx, result, preparedAuth)
+				releaseAttempt()
+				selection.End("execution_failed")
+				return cliproxyexecutor.Response{}, errExecute
 			}
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
 			applyRequestScopedActionToResult(action, okAction, &result)

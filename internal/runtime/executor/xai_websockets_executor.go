@@ -587,7 +587,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	if errSend := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBody, websocketPolicyCheck(ctx, authID)); errSend != nil {
+	if errSend := writeWebsocketPayloadMessage(ctx, "xai", sess, conn, wsReqBody, websocketPolicyCheck(ctx, authID)); errSend != nil {
 		errSend = mapXAIWebsocketWriteError(sess, conn, errSend)
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil && !isEphemeralSession {
@@ -595,13 +595,13 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "send_error", errSend)
 				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
-				if !shouldRetryXAIWebsocketSend(errSend) {
+				if cliproxyexecutor.ClientSingleAttempt(ctx) || !shouldRetryXAIWebsocketSend(errSend) {
 					return nil, errSend
 				}
 				return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 			}
 			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
-			if !shouldRetryXAIWebsocketSend(errSend) {
+			if cliproxyexecutor.ClientSingleAttempt(ctx) || !shouldRetryXAIWebsocketSend(errSend) {
 				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return nil, errSend
@@ -644,7 +644,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 			reporter.StartResponseTTFT()
 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
-			if errSendRetry := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBodyRetry, websocketPolicyCheck(ctx, authID)); errSendRetry != nil {
+			if errSendRetry := writeWebsocketPayloadMessage(ctx, "xai", sess, conn, wsReqBodyRetry, websocketPolicyCheck(ctx, authID)); errSendRetry != nil {
 				errSendRetry = mapXAIWebsocketWriteError(sess, connRetry, errSendRetry)
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)

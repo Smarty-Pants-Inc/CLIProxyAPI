@@ -224,7 +224,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 				URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
 			})
-			if errWrite := writeCodexWebsocketMessage(sess, conn, payload, websocketPolicyCheck(turnCtx, auth.ID)); errWrite != nil {
+			if errWrite := writeCodexWebsocketMessage(turnCtx, sess, conn, payload, websocketPolicyCheck(turnCtx, auth.ID)); errWrite != nil {
 				fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 				return false
 			}
@@ -308,7 +308,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 						URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
 					})
-					if errWrite := writeCodexWebsocketMessage(sess, conn, payload, websocketPolicyCheck(turnCtx, auth.ID)); errWrite != nil {
+					if errWrite := writeCodexWebsocketMessage(turnCtx, sess, conn, payload, websocketPolicyCheck(turnCtx, auth.ID)); errWrite != nil {
 						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 						return
 					}
@@ -522,7 +522,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			if !firstResponse && (eventType == "error" || eventType == "response.failed") {
 				var credentialErr error
-				if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+				if wsErr, ok := parseClientCodexWebsocketError(ctx, payload, e.modelLevelCooling()); ok {
 					credentialErr = wsErr
 				} else if streamErr, _, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
 					credentialErr = streamErr
@@ -584,7 +584,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			// metadata that belongs to this event. Only the first rejection can
 			// enter conductor bootstrap retry; later failures stay on this socket.
 			var terminalErr, replayErr error
-			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+			if wsErr, ok := parseClientCodexWebsocketError(ctx, payload, e.modelLevelCooling()); ok {
 				terminalErr = wsErr
 				replayErr = clearCodexReasoningReplayOnWebsocketError(ctx, eventPrepared.replayScope, payload)
 			} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
