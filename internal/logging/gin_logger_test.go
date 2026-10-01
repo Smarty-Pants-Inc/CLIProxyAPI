@@ -171,13 +171,19 @@ func TestGinLogrusLoggerMasksManagementAPIKeyDeletionQuery(t *testing.T) {
 	const normalQuery = "note=keep%20visible&value_hint=ordinary-value"
 	const path = "/v0/management/api-keys"
 	for _, tc := range []struct {
-		name, param, query, wantQuery string
+		name, param, key, query, wantQuery string
 	}{
-		{"value", "value", "value=" + fakeKey, "value=fake...6789"},
-		{"escaped_value", "value", "value=" + escapedKey, "value=fake...6789"},
-		{"escaped_name_and_value", "value", "v%61lue=" + escapedKey, "v%61lue=fake...6789"},
-		{"existing_key", "key", "key=" + fakeKey, "key=fake...6789"},
-		{"nonsecret_only", "", normalQuery, normalQuery},
+		{"value", "value", fakeKey, "value=" + fakeKey, "value=fake...6789"},
+		{"escaped_value", "value", fakeKey, "value=" + escapedKey, "value=fake...6789"},
+		{"escaped_name_and_value", "value", fakeKey, "v%61lue=" + escapedKey, "v%61lue=fake...6789"},
+		{"one_byte_plain", "value", "x", "value=x", "value=..."},
+		{"one_byte_escaped", "value", "x", "value=%78", "value=..."},
+		{"one_byte_escaped_name", "value", "x", "v%61lue=%78", "v%61lue=..."},
+		{"two_bytes_plain", "value", "xy", "value=xy", "value=..."},
+		{"two_bytes_escaped", "value", "xy", "value=%78%79", "value=..."},
+		{"two_bytes_escaped_name", "value", "xy", "v%61lue=%78%79", "v%61lue=..."},
+		{"existing_key", "key", fakeKey, "key=" + fakeKey, "key=fake...6789"},
+		{"nonsecret_only", "", "", normalQuery, normalQuery},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			query, wantQuery := tc.query, tc.wantQuery
@@ -188,7 +194,7 @@ func TestGinLogrusLoggerMasksManagementAPIKeyDeletionQuery(t *testing.T) {
 			engine := gin.New()
 			engine.Use(GinLogrusLogger())
 			engine.DELETE(path, func(c *gin.Context) {
-				if tc.param != "" && c.Query(tc.param) != fakeKey {
+				if tc.param != "" && c.Query(tc.param) != tc.key {
 					t.Errorf("handler did not receive the decoded fake key")
 				}
 				if c.Query("note") != "keep visible" {
