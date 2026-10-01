@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
@@ -97,6 +98,11 @@ type hostCallbackInstanceKey struct{}
 
 type hostCallbackInstance struct {
 	closed atomic.Bool
+	// The native ABI has no authenticated per-call ingress identity. Never give
+	// one instance two live request authorities, including detached streams.
+	admissionMu sync.Mutex
+	callbackID  string
+	calling     bool
 }
 
 func withHostCallbackPluginID(ctx context.Context, pluginID string) context.Context {

@@ -287,7 +287,8 @@ func TestRound2F14CallbackCapabilitiesAndConcurrentAdmissions(t *testing.T) {
 	restricted := securityRestrictedContext()
 	restrictedID, closeRestricted := host.openCallbackContextForPluginInstance(restricted, "same-plugin", instance)
 	defer closeRestricted()
-	unrestrictedID, closeUnrestricted := host.openCallbackContextForPluginInstance(context.Background(), "same-plugin", instance)
+	unrestrictedInstance := &hostCallbackInstance{}
+	unrestrictedID, closeUnrestricted := host.openCallbackContextForPluginInstance(context.Background(), "same-plugin", unrestrictedInstance)
 	defer closeUnrestricted()
 	for _, id := range []string{restrictedID, unrestrictedID} {
 		if _, err := strconv.ParseUint(id, 10, 64); err == nil || len(id) < 26 {
@@ -297,8 +298,8 @@ func TestRound2F14CallbackCapabilitiesAndConcurrentAdmissions(t *testing.T) {
 	if restrictedID == unrestrictedID {
 		t.Fatal("capability reused")
 	}
-	// A native instance possessing BOTH capabilities is not isolated from itself.
-	// Each capability must restore its own admission, even with concurrent calls.
+	// Separate native instances may execute concurrently with independent floors.
+	// Round3 tests prove one instance never receives two live authorities.
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	host.SetModelExecutor(&fakeHostModelExecutor{executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
@@ -312,13 +313,17 @@ func TestRound2F14CallbackCapabilitiesAndConcurrentAdmissions(t *testing.T) {
 	result := make(chan error, 2)
 	for model, id := range map[string]string{"restricted": restrictedID, "unrestricted": unrestrictedID} {
 		req := securityRequest(t, rpcHostModelExecutionRequest{HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Model: model}, HostCallbackID: id})
-		go func() { _, err := host.callFromPlugin(native, pluginabi.MethodHostModelExecute, req); result <- err }()
+		caller := native
+		if id == unrestrictedID {
+			caller = withHostCallbackIdentity(context.Background(), "same-plugin", unrestrictedInstance)
+		}
+		go func() { _, err := host.callFromPlugin(caller, pluginabi.MethodHostModelExecute, req); result <- err }()
 	}
 	for range 2 {
 		select {
 		case <-entered:
 		case <-time.After(time.Second):
-			t.Error("same-instance executions did not overlap")
+			t.Error("separate-instance executions did not overlap")
 		}
 	}
 	close(release)

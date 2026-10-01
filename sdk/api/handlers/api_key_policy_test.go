@@ -17,16 +17,20 @@ func TestAPIKeyPolicyRejectsAuthlessPluginExecutors(t *testing.T) {
 	const key = "synthetic-plugin-policy-client"
 	digest := sha256.Sum256([]byte(key))
 	zero := int64(0)
-	for _, capOnly := range []bool{false, true} {
+	for _, restriction := range []string{"credential", "token-cap", "request-cap"} {
 		policy := internalconfig.APIKeyPolicy{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{"verified.json"}}
-		if capOnly {
+		if restriction != "credential" {
 			policy.AllowedAuths = []string{"*"}
-			policy.DailyTokenCap = &zero
+			if restriction == "token-cap" {
+				policy.DailyTokenCap = &zero
+			} else {
+				policy.DailyRequestCap = &zero
+			}
 		}
 		policies := []internalconfig.APIKeyPolicy{policy}
 		for _, nilManager := range []bool{false, true} {
 			for _, mode := range []string{"execute", "count", "stream"} {
-				t.Run(fmt.Sprintf("nil-manager=%v/cap-only=%v/%s", nilManager, capOnly, mode), func(t *testing.T) {
+				t.Run(fmt.Sprintf("nil-manager=%v/restriction=%s/%s", nilManager, restriction, mode), func(t *testing.T) {
 					var manager *coreauth.Manager
 					if !nilManager {
 						manager = coreauth.NewManager(nil, nil, nil)

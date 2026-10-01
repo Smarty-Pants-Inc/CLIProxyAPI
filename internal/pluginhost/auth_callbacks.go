@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -278,11 +279,41 @@ func (h *Host) authPhysicalJSONByIndex(authIndex string) (*coreauth.Auth, []byte
 	if len(bytesTrimSpace(data)) == 0 {
 		return nil, nil, fmt.Errorf("auth file is empty for auth_index %s", authIndex)
 	}
-	var metadata map[string]any
-	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
-		return nil, nil, fmt.Errorf("invalid auth file for auth_index %s: %w", authIndex, errUnmarshal)
+	physical, errParse := h.buildAuthFromFileData(path, data)
+	if errParse != nil {
+		return nil, nil, fmt.Errorf("invalid auth file for auth_index %s: %w", authIndex, errParse)
 	}
-	return auth, data, nil
+	// Authorize the exact bytes returned, never a newer physical file blessed by
+	// an older runtime account. Token rotation also waits for watcher publication.
+	if !physicalCredentialMatchesRuntime(auth, physical) {
+		return nil, nil, fmt.Errorf("physical credential no longer matches runtime auth %s", authIndex)
+	}
+	current, errCurrent := h.authByIndex(authIndex)
+	if errCurrent != nil || current.Generation != auth.Generation || current.RegistrationEpoch != auth.RegistrationEpoch {
+		return nil, nil, fmt.Errorf("runtime credential changed while reading auth %s", authIndex)
+	}
+	physical.ID, physical.Index = auth.ID, auth.Index
+	physical.Generation, physical.RegistrationEpoch = auth.Generation, auth.RegistrationEpoch
+	return physical, data, nil
+}
+
+func physicalCredentialMatchesRuntime(runtime, physical *coreauth.Auth) bool {
+	if runtime.Provider != physical.Provider || runtime.FileName != physical.FileName || coreauth.CredentialsChanged(runtime, physical) {
+		return false
+	}
+	for _, key := range []string{"email", "account_id", "account_uuid", "organization_uuid", "api_key", "dca_token"} {
+		value := runtime.Metadata[key]
+		if attribute := runtime.Attributes[key]; attribute != "" {
+			if value != nil && !reflect.DeepEqual(value, attribute) {
+				return false
+			}
+			value = attribute
+		}
+		if !reflect.DeepEqual(value, physical.Metadata[key]) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateHostAuthSaveRequest(req pluginapi.HostAuthSaveRequest) (string, []byte, error) {

@@ -41,11 +41,11 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string, ins
 	}
 	pluginID = strings.TrimSpace(pluginID)
 	ctx, cancel := context.WithCancel(withHostCallbackIdentity(ctx, pluginID, instance))
-	// This is an invocation-scoped bearer capability, not a native-code sandbox.
-	// An instance given two handles can use either; sibling handles must not be guessable.
+	// Random handles protect capability secrecy; the instance lease prevents
+	// the native ABI from receiving two simultaneous request authorities.
 	id := rand.Text()
 	r.mu.Lock()
-	if ctx.Err() != nil || (instance != nil && instance.closed.Load()) {
+	if ctx.Err() != nil || !instance.reserveCallback(id) {
 		r.mu.Unlock()
 		cancel()
 		return "", func() {}
@@ -73,6 +73,7 @@ func (r *callbackContextRegistry) close(id string) {
 	delete(r.contexts, id)
 	r.mu.Unlock()
 	closeCallbackEntry(entry)
+	entry.instance.releaseCallback(id)
 }
 
 func (r *callbackContextRegistry) closeInstance(pluginID string, instance *hostCallbackInstance) {
@@ -85,6 +86,7 @@ func (r *callbackContextRegistry) closeInstance(pluginID string, instance *hostC
 	for id, entry := range r.contexts {
 		if entry.pluginID == pluginID && (instance == nil || entry.instance == instance) {
 			delete(r.contexts, id)
+			entry.instance.releaseCallback(id)
 			entries = append(entries, entry)
 		}
 	}

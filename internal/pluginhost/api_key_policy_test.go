@@ -21,10 +21,10 @@ func TestAPIKeyPolicyPluginCredentialCallbacks(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(&config.Config{SDKConfig: config.SDKConfig{APIKeyPolicies: []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{"verified.json"}}}}})
 	file := filepath.Join(t.TempDir(), "denied.json")
-	if err := os.WriteFile(file, []byte(`{"type":"claude","email":"denied@example.com","access_token":"synthetic-only"}`), 0600); err != nil {
+	if err := os.WriteFile(file, []byte(`{"type":"claude","email":"denied@example.com","access_token":"synthetic-only","api_key":"synthetic-denied-provider-key"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	selected, err := manager.Register(context.Background(), &coreauth.Auth{ID: "callback-denied", Provider: "claude", FileName: "denied.json", Attributes: map[string]string{"path": file, "source": file, "api_key": "synthetic-denied-provider-key"}, Metadata: map[string]any{"email": "denied@example.com"}})
+	selected, err := manager.Register(context.Background(), &coreauth.Auth{ID: "callback-denied", Provider: "claude", FileName: "denied.json", Attributes: map[string]string{"path": file, "source": file, "api_key": "synthetic-denied-provider-key"}, Metadata: map[string]any{"email": "denied@example.com", "access_token": "synthetic-only", "api_key": "synthetic-denied-provider-key"}})
 	if err != nil {
 		t.Fatal(err)
 	}

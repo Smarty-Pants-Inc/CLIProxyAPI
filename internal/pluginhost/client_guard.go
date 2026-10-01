@@ -51,9 +51,15 @@ func (c *guardedPluginClient) Call(ctx context.Context, method string, request [
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	finishAdmission, errAdmission := c.instance.beginCall(request)
+	if errAdmission != nil {
+		c.release()
+		return nil, errAdmission
+	}
 	result := make(chan guardedPluginCallResult, 1)
 	go func() {
 		defer c.release()
+		defer finishAdmission()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				result <- guardedPluginCallResult{recovered: recovered}

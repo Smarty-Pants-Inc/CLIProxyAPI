@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -184,6 +185,15 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 
 func callPlugin[T any](ctx context.Context, client pluginClient, method string, request any) (T, error) {
 	var zero T
+	// A failed native scope reservation must stop BEFORE private request bytes
+	// enter the plugin. The RPC wrappers all carry this field, unlike lifecycle
+	// and other unscoped methods; the native-call guard covers those separately.
+	value := reflect.ValueOf(request)
+	if pluginCallbackInstance(client) != nil && value.Kind() == reflect.Struct {
+		if field := value.FieldByName("HostCallbackID"); field.IsValid() && field.String() == "" {
+			return zero, fmt.Errorf("native plugin invocation admission unavailable; use a separate instance")
+		}
+	}
 	rawRequest, errMarshal := json.Marshal(sanitizePluginRequest(request))
 	if errMarshal != nil {
 		return zero, fmt.Errorf("marshal plugin request %s: %w", method, errMarshal)
