@@ -233,10 +233,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
 			}
 			execute := func() (cliproxyexecutor.Response, error) {
+				if errPolicy := m.ValidateClientAuth(execCtx, preparedAuth); errPolicy != nil {
+					return cliproxyexecutor.Response{}, errPolicy
+				}
 				if countTokens {
 					return selection.Executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
 				}
-				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				return selection.Executor.Execute(m.contextWithClientAuthCheck(execCtx, preparedAuth), preparedAuth, execReq, execOpts)
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()

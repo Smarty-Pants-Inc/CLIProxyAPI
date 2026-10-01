@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 // Provider validates credentials for incoming requests.
@@ -18,6 +20,9 @@ type Result struct {
 	Provider  string
 	Principal string
 	Metadata  map[string]string
+	// APIKeyPolicies is the immutable admission restriction supplied by the
+	// provider that authenticated this principal, paired with its key snapshot.
+	APIKeyPolicies []sdkconfig.APIKeyPolicy
 }
 
 var (

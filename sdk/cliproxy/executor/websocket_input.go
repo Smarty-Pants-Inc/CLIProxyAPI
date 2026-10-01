@@ -24,6 +24,21 @@ func WebsocketInputFromContext(ctx context.Context) <-chan WebsocketInput {
 // WithWebsocketAuthCheck supplies the live account-state check for a bound
 // connection. It may reject further frames but never select another account.
 type websocketAuthCheckKey struct{}
+type websocketCredentialBindingKey struct{}
+
+// WithWebsocketCredentialBinding requires retained sockets to match their dial
+// credential. Unrestricted clients retain the existing session reuse behavior.
+func WithWebsocketCredentialBinding(ctx context.Context) context.Context {
+	return context.WithValue(ctx, websocketCredentialBindingKey{}, true)
+}
+
+func WebsocketCredentialBindingRequired(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	required, _ := ctx.Value(websocketCredentialBindingKey{}).(bool)
+	return required
+}
 
 func WithWebsocketAuthCheck(ctx context.Context, check func(string) bool) context.Context {
 	return context.WithValue(ctx, websocketAuthCheckKey{}, check)

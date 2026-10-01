@@ -48,7 +48,7 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	return conn, closer, resp, err
 }
 
-func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, checks ...func() error) error {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		provider = "codex"
@@ -63,10 +63,15 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
 	var errSend error
 	if sess != nil {
-		errSend = sess.writeMessage(conn, websocket.TextMessage, payload)
+		errSend = sess.writeMessage(conn, websocket.TextMessage, payload, checks...)
 	} else if conn == nil {
 		errSend = fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
 	} else {
+		for _, check := range checks {
+			if err := check(); err != nil {
+				return err
+			}
+		}
 		errSend = conn.WriteMessage(websocket.TextMessage, payload)
 	}
 	if errSend != nil {
@@ -77,8 +82,8 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	return errSend
 }
 
-func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
-	return writeWebsocketPayloadMessage("codex", sess, conn, payload)
+func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, checks ...func() error) error {
+	return writeWebsocketPayloadMessage("codex", sess, conn, payload, checks...)
 }
 
 func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {

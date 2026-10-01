@@ -39,6 +39,15 @@ jobs:
           for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
+      - name: Test client-key credential allowlists
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v ./internal/access/config_access ./internal/config ./sdk/cliproxy/auth ./internal/api ./sdk/api/handlers ./sdk/api/handlers/openai ./internal/client/codex/live ./internal/pluginhost ./sdk/cliproxy ./internal/runtime/executor -run TestAPIKeyPolic -count=1 | tee "$RUNNER_TEMP/key-credential-policies.log"
+          for test in TestAPIKeyPolicyAuthenticationSnapshotSurvivesReload TestAPIKeyPoliciesRejectMalformedConfig TestAPIKeyPolicySelection TestAPIKeyPolicyExhaustionNeverFallsBack TestAPIKeyPolicyRetriesStayInSet TestAPIKeyPolicyHTTPAuthenticationAndReload TestAPIKeyPolicyResponsesSteeringRevocationDoesNotForward TestAPIKeyPolicyRealtimeRelayRevocationDoesNotForward TestAPIKeyPolicyFragmentedRelayRechecksEveryChunk TestAPIKeyPolicyPluginCredentialCallbacks TestAPIKeyPolicyAdmissionFloorAndBoundSocket TestAPIKeyPolicyHomePreservesAuthenticationAndOverlayFloor TestAPIKeyPolicyWebsocketRevokedDuringHandshake TestAPIKeyPolicyWebsocketChunkRevocationDoesNotFlush TestAPIKeyPolicyRetainedSocketRequiresDialCredential; do
+            grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/key-credential-policies.log"
+          done
       - name: Build
         run: |
           go build -o test-output ./cmd/server

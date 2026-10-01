@@ -544,7 +544,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	var respHS *http.Response
 	var errDial error
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
-		conn, closer = existingWebsocketSessionConn(sess, authID, wsURL, executionProxyURL(ctx, e.cfg, auth))
+		conn, closer = existingWebsocketSessionConn(sess, authID, wsURL, executionProxyURL(ctx, e.cfg, auth), websocketPolicyFingerprints(ctx, auth, wsHeaders)...)
 		if conn == nil {
 			unlockStreamSession()
 			return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
@@ -587,7 +587,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	if errSend := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBody); errSend != nil {
+	if errSend := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBody, websocketPolicyCheck(ctx, authID)); errSend != nil {
 		errSend = mapXAIWebsocketWriteError(sess, conn, errSend)
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil && !isEphemeralSession {
@@ -644,7 +644,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 			reporter.StartResponseTTFT()
 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
-			if errSendRetry := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBodyRetry); errSendRetry != nil {
+			if errSendRetry := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBodyRetry, websocketPolicyCheck(ctx, authID)); errSendRetry != nil {
 				errSendRetry = mapXAIWebsocketWriteError(sess, connRetry, errSendRetry)
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
@@ -1149,7 +1149,8 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 	}
 
 	proxyURL := executionProxyURL(ctx, e.cfg, auth)
-	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyURL); staleConn != nil {
+	fingerprint := websocketCredentialFingerprint(auth, headers)
+	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyURL, websocketPolicyFingerprints(ctx, auth, headers)...); staleConn != nil {
 		staleLastEvent := sess.getLastEventType(staleConn)
 		logXAIWebsocketDisconnectedWithLastEvent(sess, sess.sessionID, staleAuthID, staleWSURL, "target_changed", staleLastEvent, nil)
 		if staleCloser != nil {
@@ -1200,6 +1201,7 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 	sess.wsURL = wsURL
 	sess.authID = authID
 	sess.proxyURL = proxyURL
+	sess.credentialFingerprint = fingerprint
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 

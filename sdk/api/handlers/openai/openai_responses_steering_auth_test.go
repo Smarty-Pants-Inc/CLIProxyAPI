@@ -2,6 +2,8 @@ package openai
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +21,15 @@ import (
 )
 
 func TestResponsesSteeringDisabledAccountCannotSendAnotherFrame(t *testing.T) {
+	testResponsesSteeringRevokedAuth(t, false)
+}
+
+func TestAPIKeyPolicyResponsesSteeringRevocationDoesNotForward(t *testing.T) {
+	testResponsesSteeringRevokedAuth(t, true)
+}
+
+func testResponsesSteeringRevokedAuth(t *testing.T, policyRevocation bool) {
+	t.Helper()
 	var frames atomic.Int32
 	done := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,8 +46,8 @@ func TestResponsesSteeringDisabledAccountCannotSendAnotherFrame(t *testing.T) {
 			return
 		}
 		frames.Add(1)
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1"}}`))
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1","model":"steering-disable-model"}}`))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","model":"steering-disable-model","output":[]}}`))
 		if _, _, err := c.ReadMessage(); err == nil {
 			frames.Add(1)
 		}
@@ -45,11 +56,15 @@ func TestResponsesSteeringDisabledAccountCannotSendAnotherFrame(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Codex.ResponseSteering = true
 	cfg.CodexResponseSteering = true
+	if policyRevocation {
+		digest := sha256.Sum256([]byte("synthetic-policy-client"))
+		cfg.APIKeyPolicies = []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{"verified@example.com"}}}
+	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(cfg)
 	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
 	id := "steering-disable-test"
-	auth, err := manager.Register(context.Background(), &coreauth.Auth{ID: id, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}})
+	auth, err := manager.Register(context.Background(), &coreauth.Auth{ID: id, Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"email": "verified@example.com"}, Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +72,10 @@ func TestResponsesSteeringDisabledAccountCannotSendAnotherFrame(t *testing.T) {
 	defer registry.GetGlobalRegistry().UnregisterClient(id)
 	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
 	router := gin.New()
-	router.GET("/v1/responses", h.ResponsesWebsocket)
+	router.GET("/v1/responses", func(c *gin.Context) {
+		c.Request = c.Request.WithContext(coreauth.WithClientAPIKey(c.Request.Context(), "synthetic-policy-client"))
+		c.Next()
+	}, h.ResponsesWebsocket)
 	downstream := httptest.NewServer(router)
 	defer downstream.Close()
 	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
@@ -74,11 +92,17 @@ func TestResponsesSteeringDisabledAccountCannotSendAnotherFrame(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	disabled := auth.Clone()
-	disabled.Disabled = true
-	disabled.Status = coreauth.StatusDisabled
-	if _, err := manager.Update(context.Background(), disabled); err != nil {
-		t.Fatal(err)
+	if policyRevocation {
+		revoked := cfg.CloneForRuntime()
+		revoked.APIKeyPolicies[0].AllowedAuths = nil
+		manager.SetConfig(revoked)
+	} else {
+		disabled := auth.Clone()
+		disabled.Disabled = true
+		disabled.Status = coreauth.StatusDisabled
+		if _, err := manager.Update(context.Background(), disabled); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.steer","previous_response_id":"r1","input":"must not be sent"}`)); err != nil {
 		t.Fatal(err)

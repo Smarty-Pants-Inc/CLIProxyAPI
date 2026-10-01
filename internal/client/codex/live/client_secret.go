@@ -1,6 +1,7 @@
 package live
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const (
@@ -39,6 +41,7 @@ type ClientSecretAuthorization struct {
 	IssuerPrincipal string
 	IssuerProvider  string
 	Session         json.RawMessage
+	PolicyContext   context.Context `json:"-"`
 }
 
 type clientSecretEntry struct {
@@ -73,7 +76,7 @@ func newClientSecretStore() *clientSecretStore {
 	}
 }
 
-func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string) (string, ClientSecretAuthorization, time.Time, error) {
+func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string, policyContexts ...context.Context) (string, ClientSecretAuthorization, time.Time, error) {
 	if s == nil {
 		return "", ClientSecretAuthorization{}, time.Time{}, errors.New("Realtime client secret store unavailable")
 	}
@@ -90,6 +93,9 @@ func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Durati
 		IssuerPrincipal: strings.TrimSpace(issuerPrincipal),
 		IssuerProvider:  strings.TrimSpace(issuerProvider),
 		Session:         append(json.RawMessage(nil), session...),
+	}
+	if len(policyContexts) > 0 {
+		authorization.PolicyContext = coreauth.WithClientAPIKeyFromContext(context.Background(), policyContexts[0])
 	}
 	now := s.currentTime()
 	expiresAt := now.Add(lifetime)
@@ -269,7 +275,7 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 	issuerProvider, _ := c.Get("accessProvider")
 	issuerPrincipalValue, _ := issuerPrincipal.(string)
 	issuerProviderValue, _ := issuerProvider.(string)
-	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue)
+	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue, c.Request.Context())
 	if errCreate != nil {
 		if errors.Is(errCreate, errClientSecretCapacity) {
 			c.Header("Retry-After", "1")

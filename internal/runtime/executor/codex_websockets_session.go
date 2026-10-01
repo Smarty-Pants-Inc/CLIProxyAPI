@@ -3,6 +3,9 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -59,6 +62,7 @@ type codexWebsocketSession struct {
 	wsURL                     string
 	authID                    string
 	proxyURL                  string
+	credentialFingerprint     string
 	multiAgentV2OptimizedConn *websocket.Conn
 	lifecycleBindMu           sync.Mutex
 	lifecycle                 cliproxyexecutor.ExecutionLifecycle
@@ -166,7 +170,7 @@ var (
 	testWebsocketWriteChunkHook   func(chunkIndex int, totalChunks int)
 )
 
-func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
+func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte, checks ...func() error) error {
 	if s == nil {
 		return fmt.Errorf("codex websockets executor: session is nil")
 	}
@@ -177,6 +181,11 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 	defer s.writeMu.Unlock()
 	if testWebsocketWritePayloadHook != nil {
 		testWebsocketWritePayloadHook(conn)
+	}
+	for _, check := range checks {
+		if err := check(); err != nil {
+			return err
+		}
 	}
 	if len(payload) <= codexWebsocketWriteChunkSize {
 		return conn.WriteMessage(msgType, payload)
@@ -195,9 +204,21 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 		if testWebsocketWriteChunkHook != nil {
 			testWebsocketWriteChunkHook(chunkIdx, totalChunks)
 		}
+		for _, check := range checks {
+			if err := check(); err != nil {
+				_ = conn.Close()
+				return err
+			}
+		}
 		if _, errWrite := w.Write(payload[i:end]); errWrite != nil {
 			_ = w.Close()
 			return errWrite
+		}
+	}
+	for _, check := range checks {
+		if err := check(); err != nil {
+			_ = conn.Close()
+			return err
 		}
 	}
 	return w.Close()
@@ -387,14 +408,14 @@ func websocketSessionTargetChanged(sess *codexWebsocketSession, authID string, w
 	return !websocketSessionTargetMatches(sess, authID, wsURL, proxyURL)
 }
 
-func existingWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string) (*websocket.Conn, *websocketConnectionCloser) {
+func existingWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string, fingerprints ...string) (*websocket.Conn, *websocketConnectionCloser) {
 	if sess == nil {
 		return nil, nil
 	}
 	sess.connMu.Lock()
 	conn := sess.conn
 	closer := sess.connCloser
-	matches := conn != nil && closer != nil && websocketSessionTargetMatches(sess, authID, wsURL, proxyURL)
+	matches := conn != nil && closer != nil && websocketSessionTargetMatches(sess, authID, wsURL, proxyURL, fingerprints...)
 	sess.connMu.Unlock()
 	if !matches || sess.upstreamDisconnectError(conn) != nil {
 		return nil, nil
@@ -402,13 +423,16 @@ func existingWebsocketSessionConn(sess *codexWebsocketSession, authID string, ws
 	return conn, closer
 }
 
-func websocketSessionTargetMatches(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string) bool {
+func websocketSessionTargetMatches(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string, fingerprints ...string) bool {
+	if len(fingerprints) > 0 && sess.credentialFingerprint != fingerprints[0] {
+		return false
+	}
 	return strings.TrimSpace(sess.authID) == strings.TrimSpace(authID) &&
 		strings.TrimSpace(sess.wsURL) == strings.TrimSpace(wsURL) &&
 		strings.TrimSpace(sess.proxyURL) == strings.TrimSpace(proxyURL)
 }
 
-func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
+func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string, fingerprints ...string) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
 	if sess == nil {
 		return nil, nil, "", "", nil
 	}
@@ -416,7 +440,7 @@ func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID st
 	sess.connMu.Lock()
 	defer sess.connMu.Unlock()
 	conn := sess.conn
-	if conn == nil || websocketSessionTargetMatches(sess, authID, wsURL, proxyURL) {
+	if conn == nil || websocketSessionTargetMatches(sess, authID, wsURL, proxyURL, fingerprints...) {
 		return nil, nil, "", "", nil
 	}
 
@@ -591,6 +615,33 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 	return sess.upstreamDisconnectCh
 }
 
+// Reuse requires the actual dial identity and Authorization, not just an ID.
+func websocketCredentialFingerprint(auth *cliproxyauth.Auth, headers http.Header) string {
+	var identity any
+	if auth != nil {
+		identity = []any{auth.Provider, auth.FileName, auth.Attributes["email"], auth.Metadata["email"]}
+	}
+	payload, _ := json.Marshal([]any{identity, headers.Get("Authorization")})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func websocketPolicyFingerprints(ctx context.Context, auth *cliproxyauth.Auth, headers http.Header) []string {
+	if !cliproxyexecutor.WebsocketCredentialBindingRequired(ctx) {
+		return nil
+	}
+	return []string{websocketCredentialFingerprint(auth, headers)}
+}
+
+func websocketPolicyCheck(ctx context.Context, authID string) func() error {
+	return func() error {
+		if !cliproxyexecutor.WebsocketAuthEnabled(ctx, authID) {
+			return statusErr{code: http.StatusServiceUnavailable, msg: "client API key allowlist no longer permits this websocket credential"}
+		}
+		return nil
+	}
+}
+
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 	if sess == nil {
 		conn, closer, resp, err := e.dialCodexWebsocket(ctx, auth, wsURL, headers)
@@ -601,7 +652,8 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	}
 
 	proxyURL := executionProxyURL(ctx, e.cfg, auth)
-	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyURL); staleConn != nil {
+	fingerprint := websocketCredentialFingerprint(auth, headers)
+	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyURL, websocketPolicyFingerprints(ctx, auth, headers)...); staleConn != nil {
 		staleLastEvent := sess.getLastEventType(staleConn)
 		logCodexWebsocketDisconnectedWithLastEvent(sess, sess.sessionID, staleAuthID, staleWSURL, "target_changed", staleLastEvent, nil)
 		if staleCloser != nil {
@@ -653,6 +705,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.wsURL = wsURL
 	sess.authID = authID
 	sess.proxyURL = proxyURL
+	sess.credentialFingerprint = fingerprint
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 

@@ -185,6 +185,10 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	closeHandshakeBody(handshakeResponse, "direct websocket handshake")
 	closeUpstream := websocketCloseFunc("upstream", upstream)
 	defer func() { _ = closeUpstream() }()
+	if errPolicy := h.authManager.ValidateClientAuth(ctx, selected); errPolicy != nil {
+		writeRealtimeError(c, http.StatusServiceUnavailable, errPolicy.Error(), "server_error", "api_key_policy_unavailable")
+		return
+	}
 	if len(tokenSession) > 0 {
 		updateSession, errSession := realtimeSessionUpdate(tokenSession)
 		if errSession != nil {
@@ -199,6 +203,10 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		if errMarshal != nil {
 			_ = closeUpstream()
 			writeRealtimeError(c, http.StatusInternalServerError, "Failed to apply Realtime client secret session", "server_error", "realtime_session_failed")
+			return
+		}
+		if errPolicy := h.authManager.ValidateClientAuth(ctx, selected); errPolicy != nil {
+			writeRealtimeError(c, http.StatusServiceUnavailable, errPolicy.Error(), "server_error", "api_key_policy_unavailable")
 			return
 		}
 		if errWrite := upstream.WriteMessage(websocket.TextMessage, update); errWrite != nil {
@@ -232,7 +240,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsockets(downstream, upstream, func() error { return h.authManager.ValidateClientAuth(ctx, selected) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, h.currentConfig(), "relay", errRelay)
 		log.WithError(errRelay).Debug("codex realtime direct websocket relay closed")
 	}

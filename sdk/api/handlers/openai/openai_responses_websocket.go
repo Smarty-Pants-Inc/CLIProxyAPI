@@ -753,7 +753,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
 			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
 				current, ok := sessionAuthByID(authID)
-				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled
+				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled && h.AuthManager.ValidateClientAuth(cliCtx, current) == nil
 			})
 		}
 		if nativeWebsocketPassthrough && requestRequiresCurrentUpstreamWebsocket {

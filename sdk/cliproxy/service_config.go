@@ -296,11 +296,13 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	cfg.APIKeys = nil
+	if len(cfg.APIKeyPolicies) == 0 {
+		cfg.APIKeys = nil
+	}
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false
-	cfg.WebsocketAuth = false
+	cfg.WebsocketAuth = len(cfg.APIKeyPolicies) > 0
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
 	cfg.Plugins.StoreAuth = nil

@@ -118,6 +118,9 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	}
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
+		if len(cfg.APIKeyPolicies) > 0 || (oldCfg != nil && len(oldCfg.APIKeyPolicies) > 0) {
+			s.handlers.AuthManager.SetConfig(cfg)
+		}
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
 
@@ -173,7 +176,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 			log.WithError(errUpdate).Error("failed to update Codex Live media relay configuration")
 		}
 	}
-	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth || len(cfg.APIKeyPolicies) > 0)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}

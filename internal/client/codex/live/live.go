@@ -215,6 +215,10 @@ func (h *Handler) Handle(c *gin.Context) {
 	mediaRetained := false
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	if mediaRelay == nil && h.authManager.HasClientAPIKeyPolicy(ctx) {
+		writeLiveError(c, http.StatusServiceUnavailable, "client API key allowlist requires an enforcing WebRTC media relay")
+		return
+	}
 	selectionOpts := coreexecutor.Options{
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
@@ -274,9 +278,10 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 		var upstreamOffer string
 		mediaSession, upstreamOffer, errSDP = mediaRelay.NewSession(ctx, clientOffer, mediaSessionRoute{
-			proxyURL:   proxyURLForAuth(runtimeConfig, selected),
-			credential: mediaCredentialName(selected, selectedIndex),
-			authIndex:  selectedIndex,
+			proxyURL:     proxyURLForAuth(runtimeConfig, selected),
+			credential:   mediaCredentialName(selected, selectedIndex),
+			authIndex:    selectedIndex,
+			validateAuth: func() error { return h.authManager.ValidateClientAuth(ctx, selected) },
 		})
 		if errSDP != nil {
 			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errSDP, http.StatusBadGateway), errSDP.Error())

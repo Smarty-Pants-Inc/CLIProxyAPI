@@ -451,11 +451,14 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 
 // RefreshHomeSelectionAfterUnauthorized only reuses a newer snapshot already
 // installed by Home. It never refreshes or mutates Home-owned credentials.
-func (m *Manager) RefreshHomeSelectionAfterUnauthorized(_ context.Context, selection *HomeDispatchSelection, failedAuth *Auth) (*Auth, bool, error) {
+func (m *Manager) RefreshHomeSelectionAfterUnauthorized(ctx context.Context, selection *HomeDispatchSelection, failedAuth *Auth) (*Auth, bool, error) {
 	if m == nil || selection == nil {
 		return nil, false, nil
 	}
 	current := selection.CloneAuth()
+	if errPolicy := m.ValidateClientAuth(ctx, current); errPolicy != nil {
+		return current, false, errPolicy
+	}
 	if failedAuth == nil {
 		failedAuth = current
 	}
@@ -485,7 +488,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
-	if errRefresh != nil || refreshed == nil {
+	if errRefresh != nil || refreshed == nil || m.ValidateClientAuth(ctx, refreshed) != nil {
 		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
 		return auth, false
 	}
@@ -532,6 +535,9 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
 		return nil, errors.New("auth or executor not found")
+	}
+	if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
+		return nil, errPolicy
 	}
 
 	// Another request may already have refreshed this credential.

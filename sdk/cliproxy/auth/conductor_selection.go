@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -79,6 +80,7 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	apiKeyPolicies   []internalconfig.APIKeyPolicy
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -98,7 +100,7 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata), apiKeyPolicies: apiKeyPoliciesFromContext(ctx)}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -115,6 +117,11 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
 		return false
+	}
+	for _, policy := range e.apiKeyPolicies {
+		if !apiKeyPolicyAllows(policy, auth) {
+			return false
+		}
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
 }
@@ -1368,6 +1375,7 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 }
 
 func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration, homeRetryLimit int, defaultRequestRetry int, attempted map[string]struct{}) (time.Duration, bool) {
+	ctx = m.withAPIKeyPolicies(ctx)
 	if err == nil {
 		return 0, false
 	}
@@ -1752,7 +1760,9 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 	return m.selectionModelKeyForAuth(auth, routeModel) != canonicalModelKey(routeModel)
 }
 
-func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, err error) {
+	ctx = m.withAPIKeyPolicies(ctx)
+	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
@@ -2010,7 +2020,9 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 	}
 }
 
-func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, err error) {
+	ctx = m.withAPIKeyPolicies(ctx)
+	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
@@ -2071,7 +2083,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	return authCopy, executor, nil
 }
 
-func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, _ string, err error) {
+	ctx = m.withAPIKeyPolicies(ctx)
+	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
@@ -2184,7 +2198,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	return authCopy, executor, providerKey, nil
 }
 
-func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, _ string, err error) {
+	ctx = m.withAPIKeyPolicies(ctx)
+	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)

@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -148,25 +149,38 @@ func corsMiddleware() gin.HandlerFunc {
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
-func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, false)
+func AuthMiddleware(manager *sdkaccess.Manager, authManagers ...*coreauth.Manager) gin.HandlerFunc {
+	return accessAuthMiddleware(manager, false, authManagers...)
 }
 
-func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, true)
+func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager, authManagers ...*coreauth.Manager) gin.HandlerFunc {
+	return accessAuthMiddleware(manager, true, authManagers...)
 }
 
-func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.HandlerFunc {
+func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, authManagers ...*coreauth.Manager) gin.HandlerFunc {
+	var authManager *coreauth.Manager
+	if len(authManagers) > 0 {
+		authManager = authManagers[0]
+	}
 	return func(c *gin.Context) {
 		if manager == nil {
+			if authManager != nil && authManager.HasAPIKeyPolicies() {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "client API key allowlist requires authenticated identity"})
+				return
+			}
 			c.Next()
 			return
 		}
 
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
+			if result == nil && authManager != nil && authManager.HasAPIKeyPolicies() {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "client API key allowlist requires authenticated identity"})
+				return
+			}
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
+				c.Request = c.Request.WithContext(coreauth.WithClientAPIKeyPolicies(c.Request.Context(), result.Principal, result.APIKeyPolicies))
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
@@ -199,8 +213,8 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 	}
 }
 
-func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler) gin.HandlerFunc {
-	fallback := realtimeStandardAuthMiddleware(manager)
+func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler, authManagers ...*coreauth.Manager) gin.HandlerFunc {
+	fallback := realtimeStandardAuthMiddleware(manager, authManagers...)
 	return func(c *gin.Context) {
 		authorization, matched, errAuthenticate := handler.AuthenticateClientSecret(c.Request)
 		if !matched {
@@ -224,7 +238,24 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		if provider == "" {
 			provider = "realtime-client-secret"
 		}
+		policyCtx := coreauth.WithClientAPIKeyFromContext(coreauth.WithClientAPIKey(c.Request.Context(), principal), authorization.PolicyContext)
+		if len(authManagers) > 0 && authManagers[0] != nil && authManagers[0].HasClientAPIKeyPolicy(policyCtx) {
+			// Derived tokens cannot outlive the issuer's authentication admission.
+			if manager == nil {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Realtime client secret issuer is no longer authorized"})
+				return
+			}
+			issuerRequest := c.Request.Clone(policyCtx)
+			issuerRequest.Header = http.Header{"Authorization": {"Bearer " + principal}}
+			issuerRequest.URL.RawQuery = ""
+			issuer, errIssuer := manager.Authenticate(policyCtx, issuerRequest)
+			if errIssuer != nil || issuer == nil || issuer.Principal != principal {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Realtime client secret issuer is no longer authorized"})
+				return
+			}
+		}
 		c.Set("userApiKey", principal)
+		c.Request = c.Request.WithContext(policyCtx)
 		c.Set("accessProvider", provider)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)

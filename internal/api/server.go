@@ -189,7 +189,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
-	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth || len(cfg.APIKeyPolicies) > 0)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
 	if optionState.pluginHost != nil {
@@ -200,6 +200,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
+		if len(cfg.APIKeyPolicies) > 0 {
+			authManager.SetConfig(cfg)
+		}
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
 	managementasset.SetCurrentConfig(cfg)

@@ -49,6 +49,25 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional per-client credential allowlist. Hash the exact client key bytes with
+# SHA-256 (no newline); never put the key itself in this block.
+# Matches are case-sensitive auth file basenames or email metadata, using shell
+# globs (*, ?, [abc]). allowed-providers is an optional, exact provider-name filter.
+# Empty allowed-auths denies all. Missing/disabled/cooling/exhausted matches return
+# 503/429; retries, pinned credentials and websockets never escape the allowlist.
+# Keys without a policy keep existing routing. Unnamed plugin executors are denied
+# for restricted clients. Policies require ws-auth: true for authenticated routing.
+# Existing requests and derived realtime tokens retain their admission restrictions;
+# a reload may narrow, but cannot unrestrict them. Home overlays retain local policies.
+# Restricted WebRTC requires the configured media relay (direct SDP is rejected).
+# Native credential/model callbacks must carry their owning host_callback_id.
+# api-key-policies:
+#   - key-sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#     allowed-auths:
+#       - "claude-*-dev4@smartypants.ai.json"
+#       - "verified-account@smartypants.ai"
+#     allowed-providers: [claude, codex]
+
 # Enable debug logging
 debug: false
 

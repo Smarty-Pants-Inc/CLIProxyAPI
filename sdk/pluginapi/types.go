@@ -751,6 +751,8 @@ type HostAuthFileEntry struct {
 
 // HostAuthGetRequest asks the host for credential JSON by auth index.
 type HostAuthGetRequest struct {
+	// HostCallbackID binds native credential access to the active owning request.
+	HostCallbackID string `json:"host_callback_id,omitempty"`
 	// AuthIndex identifies the credential index.
 	AuthIndex string `json:"auth_index"`
 }
@@ -775,6 +777,8 @@ type HostAuthGetRuntimeResponse struct {
 
 // HostAuthSaveRequest asks the host to persist credential JSON to a physical auth file.
 type HostAuthSaveRequest struct {
+	// HostCallbackID binds native credential access to the active owning request.
+	HostCallbackID string `json:"host_callback_id,omitempty"`
 	// Name is the target auth file name. It must end with .json.
 	Name string `json:"name"`
 	// JSON contains the credential JSON payload to save.

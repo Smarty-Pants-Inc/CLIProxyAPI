@@ -509,7 +509,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsockets(downstream, upstream, func() error { return h.authManager.ValidateClientAuth(ctx, selected) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -632,9 +632,9 @@ func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 	}
 }
 
-func relayWebsockets(downstream, upstream *websocket.Conn) error {
+func relayWebsockets(downstream, upstream *websocket.Conn, validateAuth ...func() error) error {
 	results := make(chan error, 2)
-	go func() { results <- copyWebsocket(upstream, downstream) }()
+	go func() { results <- copyWebsocket(upstream, downstream, validateAuth...) }()
 	go func() { results <- copyWebsocket(downstream, upstream) }()
 
 	firstErr := <-results
@@ -648,25 +648,51 @@ func relayWebsockets(downstream, upstream *websocket.Conn) error {
 	return firstErr
 }
 
-func copyWebsocket(destination, source *websocket.Conn) error {
+func copyWebsocket(destination, source *websocket.Conn, validateAuth ...func() error) error {
 	for {
 		messageType, reader, errReader := source.NextReader()
 		if errReader != nil {
 			return errReader
 		}
+		for _, validate := range validateAuth {
+			if errPolicy := validate(); errPolicy != nil {
+				return errPolicy
+			}
+		}
 		writer, errWriter := destination.NextWriter(messageType)
 		if errWriter != nil {
 			return errWriter
 		}
-		_, errCopy := io.Copy(writer, reader)
-		errClose := writer.Close()
+		_, errCopy := io.Copy(policyCheckedWebsocketWriter{Writer: writer, checks: validateAuth}, reader)
 		if errCopy != nil {
+			// Do not close/flush a partially buffered message after revocation.
 			return errCopy
 		}
-		if errClose != nil {
+		for _, validate := range validateAuth {
+			if errPolicy := validate(); errPolicy != nil {
+				return errPolicy
+			}
+		}
+		if errClose := writer.Close(); errClose != nil {
 			return errClose
 		}
 	}
+}
+
+// Check each copied chunk, not just the first frame: a fragmented message may
+// remain open while the policy changes. io.Copy must not use Writer.ReadFrom.
+type policyCheckedWebsocketWriter struct {
+	io.Writer
+	checks []func() error
+}
+
+func (w policyCheckedWebsocketWriter) Write(payload []byte) (int, error) {
+	for _, validate := range w.checks {
+		if err := validate(); err != nil {
+			return 0, err
+		}
+	}
+	return w.Writer.Write(payload)
 }
 
 func websocketCloseDetails(err error) (int, string) {

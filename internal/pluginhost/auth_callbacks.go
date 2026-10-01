@@ -51,14 +51,13 @@ func (h *Host) currentAuthManager() *coreauth.Manager {
 }
 
 func (h *Host) callHostAuthList(ctx context.Context, request []byte) ([]byte, error) {
-	_ = ctx
 	if len(bytesTrimSpace(request)) > 0 {
 		var req map[string]any
 		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 			return nil, fmt.Errorf("decode host auth list request: %w", errUnmarshal)
 		}
 	}
-	entries, errList := h.listAuthFiles()
+	entries, errList := h.listAuthFiles(ctx)
 	if errList != nil {
 		return nil, errList
 	}
@@ -66,7 +65,6 @@ func (h *Host) callHostAuthList(ctx context.Context, request []byte) ([]byte, er
 }
 
 func (h *Host) callHostAuthGet(ctx context.Context, request []byte) ([]byte, error) {
-	_ = ctx
 	var req rpcHostAuthGetRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode host auth get request: %w", errUnmarshal)
@@ -78,6 +76,11 @@ func (h *Host) callHostAuthGet(ctx context.Context, request []byte) ([]byte, err
 	auth, rawJSON, errGet := h.authPhysicalJSONByIndex(authIndex)
 	if errGet != nil {
 		return nil, errGet
+	}
+	if manager := h.currentAuthManager(); manager != nil {
+		if errPolicy := manager.ValidateClientAuth(ctx, auth); errPolicy != nil {
+			return nil, errPolicy
+		}
 	}
 	name := strings.TrimSpace(auth.FileName)
 	if name == "" {
@@ -93,7 +96,6 @@ func (h *Host) callHostAuthGet(ctx context.Context, request []byte) ([]byte, err
 }
 
 func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]byte, error) {
-	_ = ctx
 	var req rpcHostAuthGetRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode host auth get runtime request: %w", errUnmarshal)
@@ -106,6 +108,11 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 	if errGet != nil {
 		return nil, errGet
 	}
+	if manager := h.currentAuthManager(); manager != nil {
+		if errPolicy := manager.ValidateClientAuth(ctx, auth); errPolicy != nil {
+			return nil, errPolicy
+		}
+	}
 	entry := h.buildHostAuthFileEntry(auth)
 	if entry == nil {
 		return nil, fmt.Errorf("auth runtime info not found for auth_index %s", authIndex)
@@ -114,6 +121,9 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 }
 
 func (h *Host) callHostAuthSave(ctx context.Context, request []byte) ([]byte, error) {
+	if manager := h.currentAuthManager(); manager != nil && manager.HasClientAPIKeyPolicy(ctx) {
+		return nil, fmt.Errorf("client API key allowlist does not permit credential writes")
+	}
 	var req pluginapi.HostAuthSaveRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode host auth save request: %w", errUnmarshal)
@@ -132,13 +142,23 @@ func (h *Host) callHostAuthSave(ctx context.Context, request []byte) ([]byte, er
 	})
 }
 
-func (h *Host) listAuthFiles() ([]pluginapi.HostAuthFileEntry, error) {
+func (h *Host) listAuthFiles(contexts ...context.Context) ([]pluginapi.HostAuthFileEntry, error) {
+	ctx := context.Background()
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	manager := h.currentAuthManager()
 	if manager != nil {
 		auths := manager.List()
 		entries := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
 		for _, auth := range auths {
+			if manager.ValidateClientAuth(ctx, auth) != nil {
+				continue
+			}
 			if entry := h.buildHostAuthFileEntry(auth); entry != nil {
+				if manager.HasClientAPIKeyPolicy(ctx) {
+					entry.Account = ""
+				}
 				entries = append(entries, *entry)
 			}
 		}
@@ -146,6 +166,9 @@ func (h *Host) listAuthFiles() ([]pluginapi.HostAuthFileEntry, error) {
 			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 		})
 		return entries, nil
+	}
+	if manager.HasClientAPIKeyPolicy(ctx) {
+		return nil, fmt.Errorf("restricted credential listing requires the core auth manager")
 	}
 	return h.listAuthFilesFromDisk()
 }

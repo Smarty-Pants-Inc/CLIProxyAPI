@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +23,29 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
+
+func mergeHomeAPIKeyPolicies(local, remote []config.APIKeyPolicy) []config.APIKeyPolicy {
+	result := append([]config.APIKeyPolicy(nil), local...)
+	for _, policy := range remote {
+		if !slices.ContainsFunc(result, func(existing config.APIKeyPolicy) bool { return reflect.DeepEqual(existing, policy) }) {
+			result = append(result, policy)
+		}
+	}
+	return result
+}
+
+func mergeHomeClientSecurity(base, merged *config.Config) {
+	merged.APIKeyPolicies = mergeHomeAPIKeyPolicies(base.APIKeyPolicies, merged.APIKeyPolicies)
+	if len(merged.APIKeyPolicies) > 0 {
+		keys := append([]string(nil), base.APIKeys...)
+		for _, key := range merged.APIKeys {
+			if !slices.Contains(keys, key) {
+				keys = append(keys, key)
+			}
+		}
+		merged.APIKeys = keys
+	}
+}
 
 type homeSubscriberSupervisor struct {
 	cancel context.CancelFunc
@@ -163,6 +188,8 @@ func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 	}
 
 	merged := *remoteCfg
+	// Local client restrictions are a floor; Home overlays may only narrow them.
+	mergeHomeClientSecurity(baseCfg, &merged)
 	merged.Host = baseCfg.Host
 	merged.Port = baseCfg.Port
 	merged.TLS = baseCfg.TLS

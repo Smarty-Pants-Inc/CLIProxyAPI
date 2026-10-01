@@ -284,6 +284,10 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	if lastErr == nil {
 		return false
 	}
+	var policyErr *Error
+	if errors.As(errPick, &policyErr) && policyErr.Code == "api_key_policy_unavailable" {
+		return false
+	}
 	if !homeMode {
 		return true
 	}
@@ -946,7 +950,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	return auth, executor, provider, nil
 }
 
-func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (*HomeDispatchSelection, error) {
+func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (_ *HomeDispatchSelection, err error) {
+	ctx = m.withAPIKeyPolicies(ctx)
+	defer func() { err = apiKeySelectionError(ctx, err) }()
 	if m == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -970,6 +976,12 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, errRetained
 	}
 	if retainedOK {
+		if errPolicy := m.ValidateClientAuth(ctx, retained.CloneAuth()); errPolicy != nil {
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, retained, "api_key_policy_denied"); errEnd != nil {
+				return nil, errEnd
+			}
+			return nil, errPolicy
+		}
 		return retained, nil
 	}
 	if sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata); sessionID != "" {
@@ -1139,6 +1151,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		baseScope.Model = observedModel
 	}
 
+	if errPolicy := m.ValidateClientAuth(ctx, &auth); errPolicy != nil {
+		endScope()
+		return nil, errPolicy
+	}
 	setHomeUserAPIKeyOnGinContext(ctx, dispatch.UserAPIKey)
 	if upstreamModel := strings.TrimSpace(dispatch.Model); upstreamModel != "" {
 		if auth.Attributes == nil {
@@ -1276,10 +1292,11 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		return nil, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	eligibility := authSelectionEligibilityForRequest(m.withAPIKeyPolicies(ctx), opts)
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || !eligibility.allows(auth) {
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
@@ -1417,6 +1434,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
+			if errPolicy := m.ValidateClientAuth(creditsCtx, c.auth); errPolicy != nil {
+				return cliproxyexecutor.Response{}, false, errPolicy
+			}
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
 			if errExec != nil {

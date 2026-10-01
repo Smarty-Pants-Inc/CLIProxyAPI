@@ -46,9 +46,10 @@ type mediaRelayFactory interface {
 }
 
 type mediaSessionRoute struct {
-	proxyURL   string
-	credential string
-	authIndex  string
+	proxyURL     string
+	credential   string
+	authIndex    string
+	validateAuth func() error
 }
 
 type pionMediaRelay struct {
@@ -98,15 +99,16 @@ type dataChannelMessage struct {
 }
 
 type dataChannelPipe struct {
-	name        string
-	done        <-chan struct{}
-	queue       chan dataChannelMessage
-	ready       chan struct{}
-	readyOnce   sync.Once
-	writable    chan struct{}
-	destination *webrtc.DataChannel
-	mu          sync.RWMutex
-	onError     func(error)
+	name         string
+	done         <-chan struct{}
+	queue        chan dataChannelMessage
+	ready        chan struct{}
+	readyOnce    sync.Once
+	writable     chan struct{}
+	destination  *webrtc.DataChannel
+	mu           sync.RWMutex
+	onError      func(error)
+	validateAuth func() error
 }
 
 type dataChannelBridge struct {
@@ -315,6 +317,16 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, rou
 	session.bridge = newDataChannelBridge(session.done, func(err error) {
 		session.fail("data_channel_failed", err)
 	})
+	session.bridge.downToUp.validateAuth = route.validateAuth
+	validateForward := func() error {
+		if route.validateAuth != nil {
+			if errPolicy := route.validateAuth(); errPolicy != nil {
+				session.fail("api_key_policy_denied", errPolicy)
+				return errPolicy
+			}
+		}
+		return nil
+	}
 	session.installStateHandlers()
 	log.WithFields(session.logFields("session")).Info("codex live WebRTC media session created")
 
@@ -354,7 +366,7 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, rou
 		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
 			return
 		}
-		go relayRTP("downstream-to-upstream", track, toOpenAI, session.done)
+		go relayRTP("downstream-to-upstream", track, toOpenAI, session.done, validateForward)
 	})
 	upstream.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
@@ -667,7 +679,7 @@ func (s *pionMediaSession) fail(reason string, err error) {
 	})
 }
 
-func relayRTP(name string, source *webrtc.TrackRemote, destination *webrtc.TrackLocalStaticRTP, done <-chan struct{}) {
+func relayRTP(name string, source *webrtc.TrackRemote, destination *webrtc.TrackLocalStaticRTP, done <-chan struct{}, validateAuth ...func() error) {
 	for {
 		packet, _, errRead := source.ReadRTP()
 		if errRead != nil {
@@ -675,6 +687,11 @@ func relayRTP(name string, source *webrtc.TrackRemote, destination *webrtc.Track
 				log.WithError(errRead).Debugf("codex live media: %s RTP read stopped", name)
 			}
 			return
+		}
+		for _, validate := range validateAuth {
+			if validate() != nil {
+				return
+			}
 		}
 		normalizeRTPPacket(packet)
 		if errWrite := destination.WriteRTP(packet); errWrite != nil {
@@ -852,6 +869,12 @@ func (p *dataChannelPipe) run() {
 			}
 			if !p.waitWritable(destination, len(message.data)) {
 				return
+			}
+			if p.validateAuth != nil {
+				if errPolicy := p.validateAuth(); errPolicy != nil {
+					p.reportError(errPolicy)
+					return
+				}
 			}
 			var errSend error
 			if message.isString {

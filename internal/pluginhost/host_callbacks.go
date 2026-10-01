@@ -145,6 +145,30 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return nil, fmt.Errorf("host plugin callback instance is closed")
 	}
 	switch method {
+	case pluginabi.MethodHostAuthList, pluginabi.MethodHostAuthGet, pluginabi.MethodHostAuthGetRuntime, pluginabi.MethodHostAuthSave, pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream:
+		manager := h.currentAuthManager()
+		if !manager.HasConfiguredAPIKeyPolicies() && !manager.HasClientAPIKeyPolicy(ctx) {
+			break
+		}
+		var envelope struct {
+			HostCallbackID string `json:"host_callback_id,omitempty"`
+		}
+		if len(bytesTrimSpace(request)) > 0 {
+			if err := json.Unmarshal(request, &envelope); err != nil {
+				return nil, err
+			}
+		}
+		if envelope.HostCallbackID != "" {
+			registered, pluginID, instance, ok := h.lookupCallbackContext(envelope.HostCallbackID)
+			if !ok || pluginID != hostCallbackPluginIDFromContext(ctx) || instance != hostCallbackInstanceFromContext(ctx) {
+				return nil, fmt.Errorf("credential/model callback requires its active owning request context")
+			}
+			ctx = registered
+		} else if hostCallbackPluginIDFromContext(ctx) != "" {
+			return nil, fmt.Errorf("credential/model callback requires host_callback_id when client API key policies have been configured")
+		}
+	}
+	switch method {
 	case pluginabi.MethodHostModelExecute:
 		return h.callHostModelExecute(ctx, request)
 	case pluginabi.MethodHostModelExecuteStream:

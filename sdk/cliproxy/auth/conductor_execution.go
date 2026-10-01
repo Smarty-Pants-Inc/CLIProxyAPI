@@ -575,7 +575,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			if errPolicy := m.ValidateClientAuth(execCtx, auth); errPolicy != nil {
+				return cliproxyexecutor.Response{}, errPolicy
+			}
+			resp, errExec := executor.Execute(m.contextWithClientAuthCheck(execCtx, auth), auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -592,7 +595,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					if errPolicy := m.ValidateClientAuth(execCtx, auth); errPolicy != nil {
+						return cliproxyexecutor.Response{}, errPolicy
+					}
+					resp, errExec = executor.Execute(m.contextWithClientAuthCheck(execCtx, auth), auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -788,6 +794,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
+			if errPolicy := m.ValidateClientAuth(execCtx, auth); errPolicy != nil {
+				return cliproxyexecutor.Response{}, errPolicy
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
@@ -805,6 +814,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
+					if errPolicy := m.ValidateClientAuth(execCtx, auth); errPolicy != nil {
+						return cliproxyexecutor.Response{}, errPolicy
+					}
 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
@@ -1465,7 +1477,11 @@ func (m *Manager) prepareHomeRequestAuth(ctx context.Context, executor ProviderE
 	return prepared, errPrepare
 }
 
-func (m *Manager) prepareHomeAuthSnapshot(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
+func (m *Manager) prepareHomeAuthSnapshot(ctx context.Context, executor ProviderExecutor, auth *Auth) (prepared *Auth, err error) {
+	if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
+		return auth, errPolicy
+	}
+	defer m.validatePreparedClientAuth(ctx, &prepared, &err)
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
 	}
@@ -1503,7 +1519,11 @@ func (m *Manager) prepareHomeAuthSnapshot(ctx context.Context, executor Provider
 	return prepare()
 }
 
-func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
+func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (prepared *Auth, err error) {
+	if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
+		return auth, errPolicy
+	}
+	defer m.validatePreparedClientAuth(ctx, &prepared, &err)
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
 	}
@@ -1517,7 +1537,11 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 
 // PrepareRequestAuth prepares a registered credential using the same serialization
 // and lifecycle checks as normal request execution. Management tools use this path too.
-func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (*Auth, error) {
+func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (prepared *Auth, err error) {
+	if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
+		return auth, errPolicy
+	}
+	defer m.validatePreparedClientAuth(ctx, &prepared, &err)
 	if m == nil || preparer == nil || auth == nil || !preparer.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
 	}
@@ -1550,6 +1574,9 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 		return nil, fmt.Errorf("prepare meta auth: credential no longer registered")
 	}
 
+	if errPolicy := m.ValidateClientAuth(ctx, target); errPolicy != nil {
+		return auth, errPolicy
+	}
 	if !preparer.ShouldPrepareRequestAuth(target) {
 		return target, nil
 	}
@@ -1978,6 +2005,9 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	if a == nil || exec == nil {
 		return nil
 	}
+	if errPolicy := m.ValidateClientAuth(req.Context(), a); errPolicy != nil {
+		return errPolicy
+	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
 		return p.PrepareRequest(req, a)
 	}
@@ -1995,8 +2025,14 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if req == nil {
 		return &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
+	if errPolicy := m.ValidateClientAuth(req.Context(), auth); errPolicy != nil {
+		return errPolicy
+	}
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
+	}
+	if errPolicy := m.ValidateClientAuth(req.Context(), auth); errPolicy != nil {
+		return errPolicy
 	}
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
@@ -2049,6 +2085,12 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	}
 	if req == nil {
 		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
+	}
+	if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
+		return nil, errPolicy
+	}
+	if errPolicy := m.ValidateClientAuth(req.Context(), auth); errPolicy != nil {
+		return nil, errPolicy
 	}
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
