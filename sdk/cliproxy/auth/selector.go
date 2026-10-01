@@ -26,7 +26,7 @@ import (
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 //
-// Rotation continues from the identity of the previous pick rather than from a numeric
+// Rotation continues from the identity of the previous initial pick rather than from a numeric
 // index. Candidate slices shrink whenever a retry excludes already tried credentials or a
 // credential enters cooldown, and indexing a monotonic counter into a shrinking slice
 // silently re-seats the rotation, which starves some credentials and hammers others.
@@ -492,6 +492,18 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 
 type prevalidatedAuthCandidatesKey struct{}
 
+// Retries and affinity failovers must not reseat the shared initial-pick cursor.
+// Otherwise repeated retries ending at the last ID make every fresh session wrap
+// to the first ID, even when the accounts have identical quota state.
+type selectionRetryKey struct{}
+
+func withSelectionRetry(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectionRetryKey{}, true)
+}
+
 func getSelectorAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	return getSelectorAvailableAuthsWithPriorityMode(ctx, auths, provider, model, now, false)
 }
@@ -619,6 +631,10 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	retry := false
+	if ctx != nil {
+		retry, _ = ctx.Value(selectionRetryKey{}).(bool)
+	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -630,9 +646,13 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		limit = 4096
 	}
 
-	s.ensureRotationKey(key, limit)
+	if !retry {
+		s.ensureRotationKey(key, limit)
+	}
 	picked := available[successorIndex(available, s.lastPicked[key])]
-	s.lastPicked[key] = picked.ID
+	if !retry {
+		s.lastPicked[key] = picked.ID
+	}
 	return picked, nil
 }
 
@@ -1064,8 +1084,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		// Keep affinity failover from advancing the cursor for initial picks.
+		auth, err := s.fallback.Pick(withSelectionRetry(ctx), provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
 		}
@@ -1184,6 +1204,9 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			}
 			return auth, true, nil
 		}
+		// A matched conversation whose credential is unavailable is a failover,
+		// not a fresh session. Preserve the initial-pick cursor here too.
+		ctx = withSelectionRetry(ctx)
 	}
 
 	fallbackAuths := highestPriorityAuths(available)
