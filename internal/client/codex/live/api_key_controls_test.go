@@ -27,8 +27,15 @@ func controlsLiveManager(t *testing.T, cap *int64) (*auth.Manager, *config.Confi
 }
 
 func TestAPIKeyPolicyRealtimeModelsAndUnmeteredCapFailClosed(t *testing.T) {
-	for _, cap := range []*int64{nil, func() *int64 { n := int64(100); return &n }()} {
-		manager, cfg := controlsLiveManager(t, cap)
+	for _, kind := range []string{"none", "token", "request"} {
+		cap := int64(100)
+		manager, cfg := controlsLiveManager(t, nil)
+		if kind == "token" {
+			cfg.APIKeyPolicies[0].DailyTokenCap = &cap
+		} else if kind == "request" {
+			cfg.APIKeyPolicies[0].DailyRequestCap = &cap
+		}
+		manager.SetConfig(cfg)
 		handler := NewHandler(manager, nil)
 		router := gin.New()
 		router.Use(func(c *gin.Context) {
@@ -59,7 +66,7 @@ func TestAPIKeyPolicyRealtimeModelsAndUnmeteredCapFailClosed(t *testing.T) {
 			if response.Code != want {
 				t.Fatalf("direct model=%s status=%d body=%s", model, response.Code, response.Body.String())
 			}
-			if cap != nil && model == "gpt-realtime" && !strings.Contains(response.Body.String(), "requires recorded usage") {
+			if kind != "none" && model == "gpt-realtime" && !strings.Contains(response.Body.String(), "daily caps require accounted requests") {
 				t.Fatal("unmetered path didn't reject capped key")
 			}
 		}

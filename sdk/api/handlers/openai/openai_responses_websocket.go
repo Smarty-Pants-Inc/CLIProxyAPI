@@ -510,13 +510,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
 		executionParent := context.WithValue(c.Request.Context(), "gin", c)
-		if err := h.AuthManager.ValidateClientRequest(executionParent, requestModelName); err != nil {
-			if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, handlers.ExecutionErrorMessage(err)); errWrite != nil {
+		executionParent, errAdmission := h.AuthManager.AdmitClientRequest(executionParent, requestModelName)
+		if errAdmission != nil {
+			if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, handlers.ExecutionErrorMessage(errAdmission)); errWrite != nil {
 				return
 			}
 			continue
 		}
-		executionParent = h.AuthManager.WithClientRequest(executionParent, requestModelName)
 		executionParent, routeOverridesModelResolution := h.PrepareStreamModelRoute(
 			executionParent,
 			h.HandlerType(),
@@ -758,9 +758,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		if duplexInput != nil {
 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
-			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
+			cliCtx = cliproxyexecutor.WithWebsocketContextAuthCheck(cliCtx, func(admitted context.Context, authID string) bool {
 				current, ok := sessionAuthByID(authID)
-				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled && h.AuthManager.ValidateClientAuth(cliCtx, current) == nil
+				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled && h.AuthManager.ValidateClientAuth(admitted, current) == nil
 			})
 		}
 		if nativeWebsocketPassthrough && requestRequiresCurrentUpstreamWebsocket {

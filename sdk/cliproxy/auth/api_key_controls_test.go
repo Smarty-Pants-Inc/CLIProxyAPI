@@ -41,6 +41,7 @@ func TestAPIKeyPolicyClientControlsNeverCoolSharedCredentials(t *testing.T) {
 	for _, rejected := range []*Error{
 		{Code: "api_key_model_forbidden", HTTPStatus: 403},
 		{Code: "api_key_daily_token_cap", HTTPStatus: 429},
+		{Code: "api_key_daily_request_cap", HTTPStatus: 429},
 	} {
 		if !rejected.IsRequestScoped() {
 			t.Fatal("client-local refusal is not request scoped")

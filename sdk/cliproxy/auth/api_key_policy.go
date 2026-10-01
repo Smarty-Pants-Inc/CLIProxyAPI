@@ -59,6 +59,9 @@ func WithClientAPIKeyFromContext(ctx, source context.Context) context.Context {
 			if model, ok := source.Value(clientRequestedModelContextKey{}).(string); ok {
 				ctx = context.WithValue(ctx, clientRequestedModelContextKey{}, model)
 			}
+			if admission, ok := source.Value(clientRequestAdmissionContextKey{}).(*clientRequestAdmission); ok {
+				ctx = context.WithValue(ctx, clientRequestAdmissionContextKey{}, admission)
+			}
 			return coreusage.WithRecordObserverFromContext(ctx, source)
 		}
 	}
@@ -143,7 +146,7 @@ func (m *Manager) ValidateClientAuth(ctx context.Context, auth *Auth) error {
 			if err := m.ValidateClientRequest(ctx, model); err != nil {
 				return err
 			}
-		} else if err := m.validateClientTokenCap(ctx); err != nil {
+		} else if err := m.validateClientDailyCaps(ctx); err != nil {
 			return err
 		}
 	}
@@ -186,11 +189,25 @@ func (m *Manager) contextWithClientAuthCheck(ctx context.Context, selected *Auth
 		}
 		return m.ValidateClientRequest(ctx, model)
 	})
+	result = cliproxyexecutor.WithWebsocketAdmittedRequestCheck(result, func(admitted context.Context, model string) error {
+		if model == "" {
+			model = ClientRequestedModelFromContext(admitted)
+		}
+		return m.ValidateClientRequest(admitted, model)
+	})
+	result = cliproxyexecutor.WithWebsocketRequestAdmission(result, func(model string) (context.Context, error) {
+		if model == "" {
+			model = ClientRequestedModelFromContext(ctx)
+		}
+		fresh := context.WithValue(ctx, clientRequestAdmissionContextKey{}, (*clientRequestAdmission)(nil))
+		return m.AdmitClientRequest(fresh, model)
+	})
 	if m.HasClientAPIKeyPolicy(ctx) {
 		result = cliproxyexecutor.WithWebsocketCredentialBinding(result)
 	}
-	return cliproxyexecutor.WithWebsocketAuthCheck(result, func(id string) bool {
-		return bound != nil && id == bound.ID && m.ValidateClientAuth(ctx, bound) == nil && cliproxyexecutor.WebsocketAuthEnabled(ctx, id)
+	return cliproxyexecutor.WithWebsocketContextAuthCheck(result, func(admitted context.Context, id string) bool {
+		current := WithClientAPIKeyFromContext(ctx, admitted)
+		return bound != nil && id == bound.ID && m.ValidateClientAuth(current, bound) == nil && cliproxyexecutor.WebsocketAuthEnabled(current, id)
 	})
 }
 

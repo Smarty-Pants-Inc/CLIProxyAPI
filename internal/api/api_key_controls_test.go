@@ -37,6 +37,15 @@ func (e *meteredPolicyHTTPExecutor) ExecuteStream(ctx context.Context, a *auth.A
 }
 
 func TestAPIKeyPolicyHTTPModelAndDailyCap(t *testing.T) {
+	testPolicyHTTPDailyCap(t, false)
+}
+
+func TestAPIKeyPolicyHTTPRequestCap(t *testing.T) {
+	testPolicyHTTPDailyCap(t, true)
+}
+
+func testPolicyHTTPDailyCap(t *testing.T, requests bool) {
+	t.Helper()
 	for _, stream := range []bool{false, true} {
 		t.Run(map[bool]string{false: "execute", true: "stream"}[stream], func(t *testing.T) {
 			const key = "synthetic-control-client"
@@ -48,6 +57,13 @@ func TestAPIKeyPolicyHTTPModelAndDailyCap(t *testing.T) {
 				{KeySHA256: hash(key), AllowedAuths: []string{"*"}, AllowedModels: &models, DailyTokenCap: &cap},
 				{KeySHA256: hash(second), AllowedAuths: []string{"*"}, AllowedModels: &models, DailyTokenCap: &cap},
 			}}}
+			if requests {
+				requestCap := int64(1)
+				for i := range cfg.APIKeyPolicies {
+					cfg.APIKeyPolicies[i].DailyTokenCap = nil
+					cfg.APIKeyPolicies[i].DailyRequestCap = &requestCap
+				}
+			}
 			// Statistics defaults off; enforcement cannot depend on the optional sinks.
 			server := newTestServerWithConfig(t, cfg)
 			executor := &meteredPolicyHTTPExecutor{mockServerStreamingCaptureExecutor: mockServerStreamingCaptureExecutor{cfg: cfg}}

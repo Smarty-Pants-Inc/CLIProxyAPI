@@ -10,7 +10,7 @@ import (
 const policyTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestAPIKeyPoliciesConfig(t *testing.T) {
-	payload := "api-key-policies:\n  - key-sha256: " + strings.ToUpper(policyTestHash) + "\n    allowed-auths: [\"claude-*.json\", \"verified@example.com\"]\n    allowed-providers: [Claude, codex]\n    allowed-models: ['claude-*', 'gpt-5*']\n    daily-token-cap: 1000\n"
+	payload := "api-key-policies:\n  - key-sha256: " + strings.ToUpper(policyTestHash) + "\n    allowed-auths: [\"claude-*.json\", \"verified@example.com\"]\n    allowed-providers: [Claude, codex]\n    allowed-models: ['claude-*', 'gpt-5*']\n    daily-token-cap: 1000\n    daily-request-cap: 100\n"
 	cfg, err := ParseConfigBytes([]byte(payload))
 	if err != nil {
 		t.Fatal(err)
@@ -22,7 +22,8 @@ func TestAPIKeyPoliciesConfig(t *testing.T) {
 	clone.APIKeyPolicies[0].AllowedAuths[0] = "changed.json"
 	(*clone.APIKeyPolicies[0].AllowedModels)[0] = "changed-model"
 	*clone.APIKeyPolicies[0].DailyTokenCap = 1
-	if (*cfg.APIKeyPolicies[0].AllowedModels)[0] != "claude-*" || *cfg.APIKeyPolicies[0].DailyTokenCap != 1000 {
+	*clone.APIKeyPolicies[0].DailyRequestCap = 1
+	if (*cfg.APIKeyPolicies[0].AllowedModels)[0] != "claude-*" || *cfg.APIKeyPolicies[0].DailyTokenCap != 1000 || *cfg.APIKeyPolicies[0].DailyRequestCap != 100 {
 		t.Fatal("runtime clone shares model/cap policy")
 	}
 	if cfg.APIKeyPolicies[0].AllowedAuths[0] != "claude-*.json" {
@@ -47,6 +48,9 @@ func TestAPIKeyPoliciesRejectMalformedConfig(t *testing.T) {
 		{"trailing-malformed-document", "api-key-policies: [{key-sha256: " + policyTestHash + "}]\n---\ninvalid: ["},
 		{"bad-model-glob", "api-key-policies: [{key-sha256: " + policyTestHash + ", allowed-models: ['[']}]"},
 		{"blank-model-glob", "api-key-policies: [{key-sha256: " + policyTestHash + ", allowed-models: ['']}]"},
+		{"bad-request-cap-negative", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-request-cap: -1}]"},
+		{"bad-request-cap-type", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-request-cap: infinite}]"},
+		{"bad-request-cap-overflow", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-request-cap: 9999999999999999999999}]"},
 		{"bad-cap-negative", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-token-cap: -1}]"},
 		{"bad-cap-type", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-token-cap: infinite}]"},
 		{"bad-cap-overflow", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-token-cap: 9999999999999999999999}]"},

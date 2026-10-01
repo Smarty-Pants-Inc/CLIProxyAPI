@@ -23,6 +23,7 @@ func TestAPIKeyPolicyWebsocketControlErrorDoesNotRetry(t *testing.T) {
 	for _, refused := range []*coreauth.Error{
 		{Code: "api_key_model_forbidden", HTTPStatus: 403},
 		{Code: "api_key_daily_token_cap", HTTPStatus: 429},
+		{Code: "api_key_daily_request_cap", HTTPStatus: 429},
 	} {
 		ctx := coreexecutor.WithWebsocketRequestCheck(context.Background(), func(string) error { return refused })
 		if err := websocketPolicyCheck(ctx, "synthetic-auth")(); err != refused {

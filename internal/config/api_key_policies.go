@@ -35,6 +35,8 @@ type APIKeyPolicy struct {
 	AllowedModels *[]string `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
 	// Nil means no cap; zero denies generation immediately.
 	DailyTokenCap *int64 `yaml:"daily-token-cap,omitempty" json:"daily-token-cap,omitempty"`
+	// Nil means no request cap; zero denies request admission immediately.
+	DailyRequestCap *int64 `yaml:"daily-request-cap,omitempty" json:"daily-request-cap,omitempty"`
 }
 
 // ValidateAPIKeyPolicies rejects ambiguous or malformed policies instead of dropping
@@ -77,6 +79,9 @@ func (cfg *Config) ValidateAPIKeyPolicies() error {
 		}
 		if policy.DailyTokenCap != nil && *policy.DailyTokenCap < 0 {
 			return fmt.Errorf("api-key-policies[%d]: daily-token-cap must be nonnegative", i)
+		}
+		if policy.DailyRequestCap != nil && *policy.DailyRequestCap < 0 {
+			return fmt.Errorf("api-key-policies[%d]: daily-request-cap must be nonnegative", i)
 		}
 		for j, provider := range policy.AllowedProviders {
 			provider = strings.ToLower(strings.TrimSpace(provider))

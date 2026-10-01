@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -261,6 +262,9 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
+	if isResponsesClientPolicyRefusal(errMsg) {
+		return true
+	}
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
@@ -306,7 +310,18 @@ func writeResponsesWebsocketTerminalError(
 	return payload, wrote, websocket.ErrCloseSent
 }
 
+func isResponsesClientPolicyRefusal(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil {
+		return false
+	}
+	var policyErr *coreauth.Error
+	return errors.As(errMsg.Error, &policyErr) && (policyErr.Code == "api_key_model_forbidden" || policyErr.Code == "api_key_daily_token_cap" || policyErr.Code == "api_key_daily_request_cap")
+}
+
 func shouldReplayResponsesWebsocketPinnedAuthFailure(errMsg *interfaces.ErrorMessage) bool {
+	if isResponsesClientPolicyRefusal(errMsg) {
+		return false
+	}
 	switch responsesWebsocketErrorStatus(errMsg) {
 	case http.StatusUnauthorized, http.StatusTooManyRequests:
 		return true
@@ -316,7 +331,7 @@ func shouldReplayResponsesWebsocketPinnedAuthFailure(errMsg *interfaces.ErrorMes
 }
 
 func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) bool {
-	if errMsg == nil {
+	if errMsg == nil || isResponsesClientPolicyRefusal(errMsg) {
 		return false
 	}
 	switch responsesWebsocketErrorStatus(errMsg) {

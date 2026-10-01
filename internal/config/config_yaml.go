@@ -318,7 +318,7 @@ func appendPath(path []string, key string) []string {
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
 func isAPIKeyPolicyControlPath(path []string) bool {
-	return len(path) >= 2 && path[0] == "api-key-policies" && (path[len(path)-1] == "allowed-models" || path[len(path)-1] == "daily-token-cap")
+	return len(path) >= 2 && path[0] == "api-key-policies" && (path[len(path)-1] == "allowed-models" || path[len(path)-1] == "daily-token-cap" || path[len(path)-1] == "daily-request-cap")
 }
 
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {

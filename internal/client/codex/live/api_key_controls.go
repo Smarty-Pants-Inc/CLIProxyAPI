@@ -12,7 +12,9 @@ type liveModelInspectionContextKey struct{}
 
 func (h *Handler) authorizeClientRequest(c *gin.Context, model string, metered bool) error {
 	ctx := c.Request.Context()
-	if err := h.authManager.ValidateClientRequest(ctx, model); err != nil {
+	var err error
+	ctx, err = h.authManager.AdmitClientRequest(ctx, model)
+	if err != nil {
 		return err
 	}
 	if metered {

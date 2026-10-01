@@ -136,8 +136,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 		}
 		processCreatePayload := func(payload []byte) bool {
-			if err := cliproxyexecutor.ValidateWebsocketRequest(streamCtx, strings.TrimSpace(gjson.GetBytes(payload, "model").String())); err != nil {
-				fail(err)
+			turnCtx, errAdmission := cliproxyexecutor.AdmitWebsocketRequest(streamCtx, strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
+			if errAdmission != nil {
+				fail(errAdmission)
 				return false
 			}
 			metadataMu.Lock()
@@ -195,7 +196,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			nextReq, nextOpts := req, opts
 			nextReq.Payload = payload
 			nextOpts.OriginalRequest = payload
-			prepared, errPrepare := e.prepareCodexWebsocketStream(streamCtx, auth, nextReq, nextOpts)
+			prepared, errPrepare := e.prepareCodexWebsocketStream(turnCtx, auth, nextReq, nextOpts)
 			if errPrepare != nil {
 				fail(errPrepare)
 				return false
@@ -216,14 +217,14 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			if prepared.optimizeMultiAgentV2 || prepared.multiAgentV2Conflict {
 				sess.setMultiAgentV2Optimized(conn, prepared.optimizeMultiAgentV2 && !prepared.multiAgentV2Conflict)
 			}
-			if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
-				fail(fmt.Errorf("websocket credential is no longer enabled"))
+			if errPolicy := websocketPolicyCheck(turnCtx, auth.ID)(); errPolicy != nil {
+				fail(errPolicy)
 				return false
 			}
 			helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 				URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
 			})
-			if errWrite := writeCodexWebsocketMessage(sess, conn, payload, websocketPolicyCheck(streamCtx, auth.ID)); errWrite != nil {
+			if errWrite := writeCodexWebsocketMessage(sess, conn, payload, websocketPolicyCheck(turnCtx, auth.ID)); errWrite != nil {
 				fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 				return false
 			}
@@ -266,12 +267,6 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					fail(message.Err)
 					return
 				}
-				if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
-					// A fresh client connection can select an enabled credential. Do not send
-					// this frame on a disabled account or replay it on a different socket.
-					fail(fmt.Errorf("websocket credential is no longer enabled"))
-					return
-				}
 				payload := message.Payload
 				if !json.Valid(payload) {
 					if !reject("invalid websocket request JSON") {
@@ -281,8 +276,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.steer":
-					if err := cliproxyexecutor.ValidateWebsocketRequest(streamCtx, strings.TrimSpace(gjson.GetBytes(payload, "model").String())); err != nil {
-						fail(err)
+					turnCtx, errAdmission := cliproxyexecutor.AdmitWebsocketRequest(streamCtx, strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
+					if errAdmission != nil {
+						fail(errAdmission)
 						return
 					}
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
@@ -305,14 +301,14 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					metadataMu.Unlock()
 					// Control frames bypass ALL response.create translations and defaults.
 					// Unknown fields and unsupported input are left to upstream validation.
-					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
-						fail(fmt.Errorf("websocket credential is no longer enabled"))
+					if errPolicy := websocketPolicyCheck(turnCtx, auth.ID)(); errPolicy != nil {
+						fail(errPolicy)
 						return
 					}
 					helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 						URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
 					})
-					if errWrite := writeCodexWebsocketMessage(sess, conn, payload, websocketPolicyCheck(streamCtx, auth.ID)); errWrite != nil {
+					if errWrite := writeCodexWebsocketMessage(sess, conn, payload, websocketPolicyCheck(turnCtx, auth.ID)); errWrite != nil {
 						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 						return
 					}

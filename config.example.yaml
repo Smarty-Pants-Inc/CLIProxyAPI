@@ -67,22 +67,31 @@ api-keys:
 # daily-token-cap is optional, nonnegative input+output tokens per UTC day;
 # 0 denies immediately. At/above the recorded cap, requests return 429 until
 # 00:00 UTC. Counts use existing usage records, independent of usage-statistics.
-# ponytail: v1 keeps counters in memory (reset on process restart, not reload).
+# daily-request-cap is optional, nonnegative logical requests per UTC day; 0
+# denies all. Admit requests 1..N; N+1 returns 429 until 00:00 UTC. Normal/count/
+# stream/image requests and client Responses create/append/steer/prewarm turns
+# each consume one slot before routing, even if later execution fails. Denied
+# models consume no slot; credential retries and chunk writes consume no extras.
+# Request admission is atomic; queued Responses turns count when processed.
+# ponytail: v1 keeps both counters in memory (restart resets them, not reload).
 # Usage is charged on the UTC day it is published; retries are distinct executions.
 # Already-admitted concurrent requests/streams may finish above the cap; no token
 # reservations or estimates. Missing upstream usage cannot be inferred.
-# Capped keys cannot use direct Realtime/WebRTC/sideband transports without token
-# usage records (503); Responses/Codex request usage remains metered as usual.
+# Capped keys cannot use direct Realtime/WebRTC/sideband or raw SDK HTTP
+# credential APIs lacking shared accounting/admission boundaries (503).
+# Responses/Codex execution remains metered/admitted as usual.
 # Model-checked Realtime control messages are buffered/limited to 16 MiB so a
 # fragmented model change is checked before any content is forwarded.
 # api-key-policies:
 #   - key-sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-#     allowed-auths:
-#       - "claude-*-dev4@smartypants.ai.json"
-#       - "verified-account@smartypants.ai"
-#     allowed-providers: [claude, codex]
-#     allowed-models: ["claude-*", "gpt-5*"]
-#     daily-token-cap: 1000000
+#     # Fill with exact training-OFF-verified Codex account files at install.
+#     # Filename shape only (not verified): codex-devN@smartypants.ai-pro.json.
+#     # Never replace this placeholder with a fleet-wide glob for TriStar.
+#     allowed-auths: ["TRAINING-OFF-VERIFIED-CODEX-AUTH-FILE-FILLED-AT-INSTALL.json"]
+#     allowed-providers: [codex] # gpt-6.1-sol uses Codex/ChatGPT OAuth accounts
+#     allowed-models: [gpt-6.1-sol]
+#     daily-token-cap: 2000000
+#     daily-request-cap: 100
 
 # Enable debug logging
 debug: false
