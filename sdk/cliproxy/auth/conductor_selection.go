@@ -1845,6 +1845,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		}
 		m.mu.Unlock()
 	}
+	recordSelectionProgress(ctx, authCopy.ID)
 	return authCopy, executor, nil
 }
 
@@ -2187,6 +2188,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		}
 		m.mu.Unlock()
 	}
+	recordSelectionProgress(ctx, authCopy.ID)
 	return authCopy, executor, providerKey, nil
 }
 

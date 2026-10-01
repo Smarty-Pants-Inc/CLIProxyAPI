@@ -31,9 +31,10 @@ import (
 // credential enters cooldown, and indexing a monotonic counter into a shrinking slice
 // silently re-seats the rotation, which starves some credentials and hammers others.
 type RoundRobinSelector struct {
-	mu         sync.Mutex
-	lastPicked map[string]string
-	maxKeys    int
+	mu           sync.Mutex
+	lastPicked   map[string]string
+	lastFailover map[string]string
+	maxKeys      int
 }
 
 // WeightedRoundRobinSelector provides smooth weighted round-robin selection.
@@ -496,6 +497,40 @@ type prevalidatedAuthCandidatesKey struct{}
 // Otherwise repeated retries ending at the last ID make every fresh session wrap
 // to the first ID, even when the accounts have identical quota state.
 type selectionRetryKey struct{}
+type selectionFailoverKey struct{}
+type selectionProgressKey struct{}
+
+// One request keeps advancing across capped rounds, including cached first picks.
+// It never writes the shared initial-session or affinity-failover cursors.
+type selectionProgress struct {
+	mu     sync.Mutex
+	lastID string
+}
+
+func withSelectionProgress(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectionProgressKey{}, &selectionProgress{})
+}
+
+func recordSelectionProgress(ctx context.Context, authID string) {
+	if ctx == nil {
+		return
+	}
+	if progress, ok := ctx.Value(selectionProgressKey{}).(*selectionProgress); ok {
+		progress.mu.Lock()
+		progress.lastID = authID
+		progress.mu.Unlock()
+	}
+}
+
+func withSelectionFailover(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectionFailoverKey{}, true)
+}
 
 func withSelectionRetry(ctx context.Context) context.Context {
 	if ctx == nil {
@@ -631,9 +666,12 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	retry := false
+	retry, failover := false, false
+	var progress *selectionProgress
 	if ctx != nil {
 		retry, _ = ctx.Value(selectionRetryKey{}).(bool)
+		failover, _ = ctx.Value(selectionFailoverKey{}).(bool)
+		progress, _ = ctx.Value(selectionProgressKey{}).(*selectionProgress)
 	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
@@ -646,11 +684,35 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		limit = 4096
 	}
 
-	if !retry {
+	lastID := s.lastPicked[key]
+	switch {
+	case retry:
+		if progress != nil {
+			progress.mu.Lock()
+			lastID = progress.lastID
+			progress.mu.Unlock()
+		}
+	case failover:
+		if s.lastFailover == nil {
+			s.lastFailover = make(map[string]string)
+		}
+		if _, ok := s.lastFailover[key]; !ok && len(s.lastFailover) >= limit {
+			s.lastFailover = make(map[string]string)
+		}
+		if previous, ok := s.lastFailover[key]; ok {
+			lastID = previous
+		}
+	default:
 		s.ensureRotationKey(key, limit)
+		lastID = s.lastPicked[key]
 	}
-	picked := available[successorIndex(available, s.lastPicked[key])]
-	if !retry {
+	picked := available[successorIndex(available, lastID)]
+	switch {
+	case retry:
+		// The execution loop records even picks served directly from affinity.
+	case failover:
+		s.lastFailover[key] = picked.ID
+	default:
 		s.lastPicked[key] = picked.ID
 	}
 	return picked, nil
@@ -1085,7 +1147,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 		// Keep affinity failover from advancing the cursor for initial picks.
-		auth, err := s.fallback.Pick(withSelectionRetry(ctx), provider, model, opts, fallbackAuths)
+		auth, err := s.fallback.Pick(withSelectionFailover(ctx), provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
 		}
@@ -1204,9 +1266,9 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			}
 			return auth, true, nil
 		}
-		// A matched conversation whose credential is unavailable is a failover,
-		// not a fresh session. Preserve the initial-pick cursor here too.
-		ctx = withSelectionRetry(ctx)
+		// Matched unavailable conversations share the fair failover cursor,
+		// separate from both initial picks and this request's retries.
+		ctx = withSelectionFailover(ctx)
 	}
 
 	fallbackAuths := highestPriorityAuths(available)
