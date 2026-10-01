@@ -66,8 +66,8 @@ func TestRound2Finding11HTTPAdmissionContext(t *testing.T) {
 			manager := NewManager(nil, nil, nil)
 			cfg := policyTestConfig("allowed-*.json")
 			cfg.APIKeyPolicies[0].AllowedModels = policyModels("key-policy-model")
-			// Capped raw HTTP is deliberately unavailable. Exercise successful
-			// preparation without a cap, then activate it after recording usage.
+			// All policy-bound raw HTTP is now unavailable, even without caps.
+			// Probe the shared context merge as well as its public fail-closed path.
 			manager.SetConfig(cfg)
 			executor := &round2PrepareExecutor{}
 			manager.RegisterExecutor(executor)
@@ -94,8 +94,17 @@ func TestRound2Finding11HTTPAdmissionContext(t *testing.T) {
 				}
 				return
 			}
+			requireControlStatus(t, err, 503)
+			if req.Header.Get("Authorization") != "" {
+				t.Fatal("unmetered policy request received credentials")
+			}
+			bound, err := manager.httpRequestContext(ctx, req.Context())
 			if err != nil {
 				t.Fatal(err)
+			}
+			req = req.WithContext(bound)
+			if !coreexecutor.HasClientExecutionPolicy(bound) || coreexecutor.ClientExecutionModel(bound) != "key-policy-model" {
+				t.Fatal("HTTP context merge erased exact-model execution anchor")
 			}
 			digest, _ := req.Context().Value(clientAPIKeyHashContextKey{}).(string)
 			if digest != cfg.APIKeyPolicies[0].KeySHA256 {

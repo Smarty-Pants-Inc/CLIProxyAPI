@@ -375,6 +375,11 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 			}
 			headers = http.Header{"Content-Type": []string{contentType}}
 		}
+		// Use the same error that supplied the body: a bootstrap wrapper may
+		// expose successful-handshake headers instead of the failure headers.
+		if upstreamHeaders, ok := direct.(interface{ Headers() http.Header }); ok {
+			headers = upstreamHeaders.Headers().Clone()
+		}
 		return &interfaces.ErrorMessage{
 			StatusCode:     status,
 			Error:          err,

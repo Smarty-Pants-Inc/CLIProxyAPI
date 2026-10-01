@@ -738,11 +738,29 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := cliproxyexecutor.ValidateClientHTTPRequest(req); err != nil {
+		return nil, err
+	}
+	if err := cliproxyexecutor.ClaimClientUpstreamAttempt(req.Context()); err != nil {
+		return nil, err
+	}
+	if cliproxyexecutor.ClientSingleAttempt(req.Context()) {
+		// Go's Transport can replay a failed write below this wrapper when GetBody
+		// is present. A single-attempt payload must not be replayable there either.
+		req.GetBody = nil
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {
 		return resp, errRoundTrip
+	}
+	if cliproxyexecutor.HasClientExecutionPolicy(req.Context()) && resp != nil && resp.StatusCode >= http.StatusBadRequest {
+		// Even a truncated error body is an upstream response, not a fresh
+		// transport failure eligible for retry/status rewriting.
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return nil, cliproxyexecutor.PreserveClientUpstreamError(req.Context(), resp.StatusCode, body, resp.Header)
 	}
 	if t.packetOnly {
 		t.reporter.ObserveResponsePacketOnly(resp)

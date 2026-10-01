@@ -62,6 +62,7 @@ func WithClientAPIKeyFromContext(ctx, source context.Context) context.Context {
 			if admission, ok := source.Value(clientRequestAdmissionContextKey{}).(*clientRequestAdmission); ok {
 				ctx = context.WithValue(ctx, clientRequestAdmissionContextKey{}, admission)
 			}
+			ctx = cliproxyexecutor.WithClientExecutionPolicyFromContext(ctx, source)
 			return coreusage.WithRecordObserverFromContext(ctx, source)
 		}
 	}
@@ -230,6 +231,7 @@ func (m *Manager) contextWithClientAuthCheck(ctx context.Context, selected *Auth
 			model = ClientRequestedModelFromContext(ctx)
 		}
 		fresh := context.WithValue(ctx, clientRequestAdmissionContextKey{}, (*clientRequestAdmission)(nil))
+		fresh = cliproxyexecutor.WithoutClientExecutionPolicy(fresh)
 		return m.AdmitClientRequest(fresh, model)
 	})
 	if m.HasClientAPIKeyPolicy(ctx) {

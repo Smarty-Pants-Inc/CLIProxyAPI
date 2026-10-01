@@ -25,6 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 // A synchronous in-memory WebSocket peer. Revoke on an actual transport write,
@@ -124,8 +125,19 @@ func round2Policy(t *testing.T, models bool) (*Handler, *auth.Manager, *config.C
 	return NewHandler(manager, cfg), manager, cfg, ctx, selected
 }
 
+// Connections already open before policy activation still need checked writes.
+// New policy-bound direct connections are denied at admission instead.
+func round2LegacyPolicy(t *testing.T) (*Handler, *auth.Manager, *config.Config, context.Context, *auth.Auth) {
+	handler, manager, cfg, _, selected := round2Policy(t, true)
+	manager.SetConfig(&config.Config{})
+	ctx := manager.WithClientRequest(auth.WithClientAPIKey(context.Background(), "synthetic-round2-key"), "gpt-realtime")
+	ctx = context.WithValue(ctx, liveModelInspectionContextKey{}, true)
+	return handler, manager, cfg, ctx, selected
+}
+
 func TestRound2TokenInitializationRevocation(t *testing.T) {
-	handler, manager, cfg, ctx, selected := round2Policy(t, true)
+	handler, manager, cfg, ctx, selected := round2LegacyPolicy(t)
+	defer handler.Close()
 	update, err := json.Marshal(map[string]any{"type": "session.update", "session": map[string]any{"instructions": strings.Repeat("i", 60<<10)}})
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +158,8 @@ func TestRound2TokenInitializationRevocation(t *testing.T) {
 }
 
 func TestRound2AllowedModelsMidSendRevocation(t *testing.T) {
-	handler, manager, cfg, ctx, selected := round2Policy(t, true)
+	handler, manager, cfg, ctx, selected := round2LegacyPolicy(t)
+	defer handler.Close()
 	payload := []byte(`{"type":"response.create","response":{"model":"gpt-realtime","instructions":"` + strings.Repeat("i", (16<<20)-128) + `"}}`)
 	source, _ := round2Websocket(t, payload, nil)
 	destination, transport := round2Websocket(t, nil, func() {
@@ -154,13 +167,17 @@ func TestRound2AllowedModelsMidSendRevocation(t *testing.T) {
 		revoked.APIKeyPolicies[0].AllowedAuths = nil
 		manager.SetConfig(revoked)
 	})
-	policy := handler.clientMessagePolicy(ctx, selected)
-	if policy == nil {
-		t.Fatal("allowed-models inspection not enabled")
+	// Exercise the same inspected-message buffering path without allowing a
+	// policy-bound direct connection. Hot policy activation on the first write
+	// must stop bytes.Reader.WriteTo at the next fragment boundary.
+	inspected := false
+	policy := func(payload []byte) error {
+		inspected = true
+		return manager.ValidateClientRequest(ctx, gjson.GetBytes(payload, "response.model").String())
 	}
 	err := copyWebsocketWithMessagePolicy(destination, source, policy, func() error { return handler.validateLiveAuth(ctx, selected) })
-	if err == nil {
-		t.Fatal("inspected message survived mid-send revocation")
+	if err == nil || !inspected {
+		t.Fatal("inspected message survived mid-send revocation or was not inspected")
 	}
 	if n := transport.wire.Len(); n == 0 || n > 4096+32 {
 		t.Fatalf("WriterTo bypassed fragment checks: %d bytes sent", n)
@@ -184,7 +201,8 @@ func (r round2EOFRevoker) Read(p []byte) (int, error) {
 
 // The final-flush check is shared by generated initialization and inspected relay.
 func TestRound2FinalFlushDenial(t *testing.T) {
-	handler, manager, cfg, ctx, selected := round2Policy(t, true)
+	handler, manager, cfg, ctx, selected := round2LegacyPolicy(t)
+	defer handler.Close()
 	connection, transport := round2Websocket(t, nil, nil)
 	reader := round2EOFRevoker{reader: strings.NewReader(`{"type":"session.update","session":{"instructions":"buffered"}}`), revoke: func() {
 		revoked := cfg.CloneForRuntime()

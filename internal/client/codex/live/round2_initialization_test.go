@@ -18,8 +18,10 @@ import (
 )
 
 // Exercise the real generated session.update path. A large message exceeds the
-// loopback socket buffers: the peer revokes after reading its first byte, before
-// draining the rest. An unchecked WriteMessage completes; checked writes abort.
+// loopback socket buffers: the peer activates a denying policy after reading its
+// first byte, before draining the rest. The connection starts unpolicied because
+// policy-bound direct Realtime is now denied before dialing. An unchecked
+// WriteMessage completes; checked writes abort.
 func TestRound2DirectInitializationRevocation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const key = "synthetic-init-key"
@@ -28,7 +30,7 @@ func TestRound2DirectInitializationRevocation(t *testing.T) {
 		KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{"original@example.com"},
 	}}}}
 	manager := auth.NewManager(nil, nil, nil)
-	manager.SetConfig(cfg)
+	manager.SetConfig(&config.Config{})
 	manager.RegisterExecutor(&captureExecutor{})
 	registerCredential(t, manager, &auth.Auth{ID: "init-auth", Provider: "codex", Status: auth.StatusActive,
 		Metadata: map[string]any{"access_token": "synthetic-token", "email": "original@example.com"}})
@@ -73,7 +75,7 @@ func TestRound2DirectInitializationRevocation(t *testing.T) {
 	router.GET("/v1/realtime", func(c *gin.Context) {
 		c.Set(ClientSecretSessionContextKey, json.RawMessage(session))
 		c.Set(ClientSecretPrincipalContextKey, "synthetic-session")
-		c.Request = c.Request.WithContext(auth.WithClientAPIKeyPolicies(c.Request.Context(), key, cfg.APIKeyPolicies))
+		c.Request = c.Request.WithContext(auth.WithClientAPIKeyPolicies(c.Request.Context(), key, nil))
 	}, handler.HandleDirectWebsocket)
 	request := httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-realtime", nil)
 	request.Header.Set("Connection", "Upgrade")

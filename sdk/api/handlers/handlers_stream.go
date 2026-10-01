@@ -569,7 +569,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
 			break
 		}
-		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
+		if h.AuthManager.ClientExecutionMustStop(ctx, bootstrapStreamErr) || bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
 			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
 			break
 		}

@@ -72,7 +72,7 @@ func TestAPIKeyPolicyDerivedRealtimeTokenRetainsAdmission(t *testing.T) {
 		return response
 	}
 	response := call()
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "enforcing WebRTC media relay") {
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "unavailable for client keys with policies") {
 		t.Fatalf("policy removal unconfined token: %d %s", response.Code, response.Body.String())
 	}
 	reloaded = reloaded.CloneForRuntime()

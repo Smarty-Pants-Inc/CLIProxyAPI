@@ -53,8 +53,14 @@ func (m *Manager) WithClientRequest(ctx context.Context, model string) context.C
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if original := coreexecutor.ClientExecutionModel(ctx); original != "" {
+		model = original
+	}
 	if strings.TrimSpace(model) != "" {
 		ctx = context.WithValue(ctx, clientRequestedModelContextKey{}, strings.TrimSpace(model))
+	}
+	if m != nil && strings.TrimSpace(model) != "" && m.HasClientAPIKeyPolicy(ctx) {
+		ctx = coreexecutor.WithClientExecutionPolicy(ctx, strings.TrimSpace(model), m.SingleAttemptClient(ctx))
 	}
 	if m == nil {
 		return ctx
@@ -104,15 +110,14 @@ func clientModelForRequest(ctx context.Context, opts coreexecutor.Options, fallb
 	return fallback
 }
 
-// ValidateMeteredClientRoute rejects capped keys on transports without shared
-// token usage/request admission; silently accepting would bypass daily caps.
+// ValidateMeteredClientRoute fails closed on transports without the shared
+// accounting, exact-wire-model and per-operation upstream attempt boundary.
 func (m *Manager) ValidateMeteredClientRoute(ctx context.Context) error {
-	for _, policy := range apiKeyPoliciesFromContext(m.withAPIKeyPolicies(ctx)) {
-		if policy.DailyTokenCap != nil || policy.DailyRequestCap != nil {
-			// ponytail: these live transports have neither canonical token usage nor
-			// a shared per-generation admission boundary. Do not offer a cap bypass.
-			return &Error{Code: "api_key_usage_unavailable", Message: "daily caps require accounted requests; direct Realtime/media or raw HTTP transport is unavailable for capped client keys", HTTPStatus: http.StatusServiceUnavailable}
-		}
+	if m.HasClientAPIKeyPolicy(ctx) {
+		// ponytail: direct Realtime/media and raw credential SDK calls have no
+		// common per-generation wire guard. Restricted clients must use the
+		// normal execution/Responses WebSocket paths, not an unchecked escape.
+		return &Error{Code: "api_key_usage_unavailable", Message: "direct Realtime/media or raw HTTP transport is unavailable for client keys with policies", HTTPStatus: http.StatusServiceUnavailable}
 	}
 	return nil
 }
@@ -165,6 +170,11 @@ func (m *Manager) ValidateClientRequest(ctx context.Context, model string) error
 	ctx = m.withAPIKeyPolicies(ctx)
 	policies := apiKeyPoliciesFromContext(ctx)
 	model = strings.TrimSpace(model)
+	if coreexecutor.HasClientExecutionPolicy(ctx) {
+		if err := m.ValidateClientExecution(ctx, model); err != nil {
+			return err
+		}
+	}
 	for _, policy := range policies {
 		if policy.AllowedModels != nil {
 			allowed := false
@@ -257,6 +267,10 @@ func (m *Manager) validateDailyCapsLocked(ctx context.Context, digest string) er
 }
 
 func isAPIKeyControlError(err error) bool {
+	var executionPolicy *coreexecutor.ClientExecutionPolicyError
+	if errors.As(err, &executionPolicy) {
+		return true
+	}
 	var policyErr *Error
 	return errors.As(err, &policyErr) && policyErr != nil && (policyErr.Code == "api_key_model_forbidden" || policyErr.Code == "api_key_daily_token_cap" || policyErr.Code == "api_key_daily_request_cap" || policyErr.Code == "api_key_policy_unavailable")
 }

@@ -32,7 +32,7 @@ func (e *round2PrepareTrap) PrepareRequest(request *http.Request, selected *auth
 
 func TestRound2RetainedCallRejectsReplacementBeforeDial(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler, manager, cfg, _, selected := round2Policy(t, true)
+	handler, manager, _, _, selected := round2LegacyPolicy(t)
 	defer handler.Close()
 	executor := &round2PrepareTrap{captureExecutor: captureExecutor{responseBody: io.NopCloser(strings.NewReader("v=0\r\no=upstream-answer\r\n"))}}
 	manager.RegisterExecutor(executor)
@@ -41,7 +41,7 @@ func TestRound2RetainedCallRejectsReplacementBeforeDial(t *testing.T) {
 		upstreamOffer: "v=0\r\no=gateway-offer\r\n",
 		session:       &fakeMediaSession{downstreamSDP: "v=0\r\no=downstream-answer\r\n"},
 	}
-	current := cfg
+	current := &config.Config{}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set("userApiKey", "synthetic-round2-key")
@@ -58,8 +58,8 @@ func TestRound2RetainedCallRejectsReplacementBeforeDial(t *testing.T) {
 		t.Fatalf("bootstrap = %d: %s", response.Code, response.Body.String())
 	}
 
-	// A new attaching request has no policy floor after policy removal. The
-	// retained call must still reject a same-ID, different-identity credential.
+	// An unpolicied retained call must still reject a same-ID replacement;
+	// the route prohibition for policy-bound keys is not its only defense.
 	current = &config.Config{}
 	manager.SetConfig(current)
 	replacement := selected.Clone()
@@ -131,7 +131,7 @@ func TestRound2RetainedCallSendIntersectsAdmissions(t *testing.T) {
 }
 
 func TestRound2RetainedCallRevokesDuringSend(t *testing.T) {
-	handler, manager, cfg, admitted, selected := round2Policy(t, true)
+	handler, manager, cfg, admitted, selected := round2LegacyPolicy(t)
 	defer handler.Close()
 	session := liveSession{authID: selected.ID, admittedAuth: selected.Clone(), policyContext: livePolicyContext(admitted)}
 	manager.SetConfig(&config.Config{})
@@ -148,7 +148,7 @@ func TestRound2RetainedCallRevokesDuringSend(t *testing.T) {
 	round2AssertNoFinalFrame(t, transport.wire.Bytes())
 }
 
-func TestRound2RetainedCallCompatibleAfterPolicyRemoval(t *testing.T) {
+func TestRound2RetainedCallPolicyRemovalNeverRelaxesRoute(t *testing.T) {
 	handler, manager, _, admitted, selected := round2Policy(t, true)
 	defer handler.Close()
 	session := liveSession{authID: selected.ID, admittedAuth: selected.Clone(), policyContext: livePolicyContext(admitted)}
@@ -159,12 +159,14 @@ func TestRound2RetainedCallCompatibleAfterPolicyRemoval(t *testing.T) {
 	if policy == nil {
 		t.Fatal("removing policy also removed retained model inspection")
 	}
-	if err := policy(payload); err != nil {
-		t.Fatal(err)
+	// Policy removal cannot relax an already-bound direct-call floor into an
+	// unrestricted transport. Even matching credentials/models now fail closed.
+	if err := policy(payload); err == nil {
+		t.Fatal("retained direct policy became unrestricted after removal")
 	}
 	connection, transport := round2Websocket(t, nil, nil)
 	err := writeCheckedWebsocketMessage(connection, websocket.TextMessage, bytes.NewReader(payload), func() error { return handler.validateRetainedLiveAuth(attach, selected, session) })
-	if err != nil || transport.wire.Len() == 0 || transport.wire.Bytes()[0]&0x80 == 0 {
-		t.Fatalf("compatible retained send failed: error=%v bytes=%d", err, transport.wire.Len())
+	if err == nil || transport.wire.Len() != 0 {
+		t.Fatalf("retained direct policy sent content: error=%v bytes=%d", err, transport.wire.Len())
 	}
 }

@@ -48,7 +48,13 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	return conn, closer, resp, err
 }
 
-func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, checks ...func() error) error {
+func writeWebsocketPayloadMessage(ctx context.Context, provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, checks ...func() error) error {
+	if err := cliproxyexecutor.ValidateClientWireModel(ctx, payload, true); err != nil {
+		return err
+	}
+	if err := cliproxyexecutor.ClaimClientUpstreamAttempt(ctx); err != nil {
+		return err
+	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		provider = "codex"
@@ -82,8 +88,8 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	return errSend
 }
 
-func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, checks ...func() error) error {
-	return writeWebsocketPayloadMessage("codex", sess, conn, payload, checks...)
+func writeCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, checks ...func() error) error {
+	return writeWebsocketPayloadMessage(ctx, "codex", sess, conn, payload, checks...)
 }
 
 func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {

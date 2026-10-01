@@ -11,11 +11,10 @@ import (
 func TestRound2RetainedCallImmutableIdentity(t *testing.T) {
 	for _, change := range []string{"email", "credential-lifetime", "same-account-refresh"} {
 		t.Run(change, func(t *testing.T) {
-			h, m, cfg, _, original := round2Policy(t, true)
+			// Legacy unpolicied calls still bind immutable credential identity.
+			// New policy-bound calls are refused before creating a session.
+			h, m, _, admitted, original := round2LegacyPolicy(t)
 			defer h.Close()
-			cfg.APIKeyPolicies[0].AllowedAuths = []string{"*@example.com"}
-			admitted := m.WithClientRequest(auth.WithClientAPIKeyPolicies(context.Background(), "synthetic-round2-key", cfg.APIKeyPolicies), "gpt-realtime")
-			admitted = context.WithValue(admitted, liveModelInspectionContextKey{}, true)
 			original.RegistrationEpoch = 1
 			session := liveSession{authID: original.ID, admittedAuth: original.Clone(), policyContext: livePolicyContext(admitted)}
 			m.SetConfig(&config.Config{})

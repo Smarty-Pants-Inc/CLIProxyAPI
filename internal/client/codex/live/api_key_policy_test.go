@@ -1,17 +1,16 @@
 package live
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -32,148 +31,94 @@ func TestAPIKeyPolicyDirectMediaRequiresEnforcingRelay(t *testing.T) {
 	request = request.WithContext(auth.WithClientAPIKey(context.Background(), key))
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "enforcing WebRTC media relay") {
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "unavailable for client keys with policies") {
 		t.Fatalf("direct media escaped policy: %d %s", response.Code, response.Body.String())
 	}
 }
 
-func TestAPIKeyPolicyFragmentedRelayRechecksEveryChunk(t *testing.T) {
-	const key = "synthetic-fragment-policy-client"
-	digest := sha256.Sum256([]byte(key))
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeyPolicies: []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{"verified@example.com"}}}}}
-	manager := auth.NewManager(nil, nil, nil)
-	manager.SetConfig(cfg)
+// assertPolicyWebsocketDenied checks denial before either upstream dialing or
+// downstream upgrade, so no client frame (including fragments) can be relayed.
+func assertPolicyWebsocketDenied(t *testing.T, manager *auth.Manager, cfg *config.Config, key string, snapshot, direct bool) {
+	t.Helper()
 	manager.RegisterExecutor(&captureExecutor{})
-	registerCredential(t, manager, &auth.Auth{ID: "fragment-policy-auth", Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"email": "verified@example.com", "access_token": "synthetic-token"}})
-	accepted := make(chan struct{})
-	remaining := make(chan []byte, 1)
+	registerCredential(t, manager, &auth.Auth{ID: "policy-auth", Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"email": "verified@example.com", "access_token": "synthetic-token"}})
+	var calls, payloadBytes atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer connection.Close()
-		connection.SetReadDeadline(time.Now().Add(5 * time.Second))
-		connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"session.created"}`))
-		_, reader, err := connection.NextReader()
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		first := make([]byte, 4096)
-		if _, err := io.ReadFull(reader, first); err != nil {
-			t.Error(err)
-			return
-		}
-		close(accepted)
-		tail, _ := io.ReadAll(reader)
-		remaining <- tail
+		calls.Add(1)
+		n, _ := io.Copy(io.Discard, r.Body)
+		payloadBytes.Add(n)
+		http.Error(w, "unexpected upstream handshake", http.StatusInternalServerError)
 	}))
 	defer upstream.Close()
 	handler := NewHandler(manager, nil)
 	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/v1"
 	router := gin.New()
+	endpoint := handler.HandleRealtimeWebsocket
+	if direct {
+		endpoint = handler.HandleDirectWebsocket
+	}
 	router.GET("/v1/realtime", func(c *gin.Context) {
-		c.Request = c.Request.WithContext(auth.WithClientAPIKeyPolicies(c.Request.Context(), key, cfg.APIKeyPolicies))
-	}, handler.HandleRealtimeWebsocket)
+		ctx := auth.WithClientAPIKey(c.Request.Context(), key)
+		if snapshot {
+			ctx = auth.WithClientAPIKeyPolicies(c.Request.Context(), key, cfg.APIKeyPolicies)
+		}
+		c.Request = c.Request.WithContext(ctx)
+	}, endpoint)
 	downstream := httptest.NewServer(router)
 	defer downstream.Close()
-	connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/realtime?model=gpt-realtime", nil)
+	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/realtime?model=gpt-realtime", nil)
+	if connection != nil {
+		_ = connection.Close()
+		t.Fatal("policied client upgraded to a websocket")
+	}
+	if !errors.Is(err, websocket.ErrBadHandshake) {
+		t.Fatalf("expected rejected handshake, got %v", err)
+	}
+	if response == nil {
+		t.Fatal("missing HTTP denial response")
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
-	connection.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, _, err := connection.ReadMessage(); err != nil {
-		t.Fatal(err)
+	if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "unavailable for client keys with policies") {
+		t.Fatalf("expected policy 503, got %d: %s", response.StatusCode, body)
 	}
-	writer, err := connection.NextWriter(websocket.TextMessage)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write(bytes.Repeat([]byte("a"), 128<<10)); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-accepted:
-	case <-time.After(3 * time.Second):
-		t.Fatal("initial permitted fragment was not forwarded")
-	}
-	revoked := cfg.CloneForRuntime()
-	revoked.APIKeyPolicies[0].AllowedAuths = nil
-	manager.SetConfig(revoked)
-	writer.Write([]byte("REVOKED-CLIENT-CONTENT"))
-	writer.Close()
-	connection.ReadMessage()
-	select {
-	case tail := <-remaining:
-		if bytes.Contains(tail, []byte("REVOKED-CLIENT-CONTENT")) {
-			t.Fatal("continuation fragment bypassed policy")
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("revoked fragmented relay not closed")
+	if calls.Load() != 0 || payloadBytes.Load() != 0 {
+		t.Fatalf("denied client reached upstream: handshakes=%d payload bytes=%d", calls.Load(), payloadBytes.Load())
 	}
 }
 
+func TestAPIKeyPolicyFragmentedRelayRechecksEveryChunk(t *testing.T) {
+	// Fragment forwarding is unreachable: policy denies the initial handshake.
+	testAPIKeyPolicyRealtimeEarlyDenial(t, true)
+}
+
 func TestAPIKeyPolicyRealtimeRelayRevocationDoesNotForward(t *testing.T) {
+	// Revocation is unnecessary: even initially authorized policy keys are denied.
+	testAPIKeyPolicyRealtimeEarlyDenial(t, false)
+}
+
+func testAPIKeyPolicyRealtimeEarlyDenial(t *testing.T, snapshot bool) {
+	t.Helper()
 	const key = "synthetic-realtime-policy-client"
-	digest := sha256.Sum256([]byte(key))
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeyPolicies: []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{"verified@example.com"}}}}}
-	manager := auth.NewManager(nil, nil, nil)
-	manager.SetConfig(cfg)
-	manager.RegisterExecutor(&captureExecutor{})
-	registerCredential(t, manager, &auth.Auth{ID: "realtime-policy-auth", Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"email": "verified@example.com", "access_token": "synthetic-token"}})
-	var frames atomic.Int32
-	done := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer close(done)
-		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			t.Error(err)
-			return
+	for _, direct := range []bool{false, true} {
+		name := "manager"
+		if snapshot {
+			name = "snapshot"
 		}
-		defer func() { _ = connection.Close() }()
-		_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_ = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"session.created"}`))
-		if _, _, err := connection.ReadMessage(); err == nil {
-			frames.Add(1)
+		if direct {
+			name += "/direct"
+		} else {
+			name += "/dispatch"
 		}
-	}))
-	defer upstream.Close()
-	handler := NewHandler(manager, nil)
-	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/v1"
-	router := gin.New()
-	router.GET("/v1/realtime", func(c *gin.Context) {
-		c.Request = c.Request.WithContext(auth.WithClientAPIKey(c.Request.Context(), key))
-		c.Next()
-	}, handler.HandleRealtimeWebsocket)
-	downstream := httptest.NewServer(router)
-	defer downstream.Close()
-	connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/realtime?model=gpt-realtime", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = connection.Close() }()
-	_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, _, err := connection.ReadMessage(); err != nil {
-		t.Fatal(err)
-	}
-	revoked := cfg.CloneForRuntime()
-	revoked.APIKeyPolicies[0].AllowedAuths = nil
-	manager.SetConfig(revoked)
-	if err := connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","input":"must not reach upstream"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := connection.ReadMessage(); err == nil {
-		t.Fatal("revoked relay stayed open")
-	}
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("revoked upstream relay not closed")
-	}
-	if frames.Load() != 0 {
-		t.Fatalf("revoked credential forwarded %d frames", frames.Load())
+		t.Run(name, func(t *testing.T) {
+			digest := sha256.Sum256([]byte(key))
+			cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeyPolicies: []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{"verified@example.com"}}}}}
+			manager := auth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			assertPolicyWebsocketDenied(t, manager, cfg, key, snapshot, direct)
+		})
 	}
 }

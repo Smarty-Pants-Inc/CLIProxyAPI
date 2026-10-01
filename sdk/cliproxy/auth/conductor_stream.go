@@ -244,6 +244,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
 			return nil, errPolicy
 		}
+		if errPolicy := m.ValidateClientExecution(ctx, execReq.Model); errPolicy != nil {
+			return nil, errPolicy
+		}
 		streamResult, errStream := executor.ExecuteStream(m.contextWithClientAuthCheck(ctx, auth), auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
@@ -265,6 +268,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					startRetry := time.Now()
 					if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
+						return nil, errPolicy
+					}
+					if errPolicy := m.ValidateClientExecution(ctx, execReq.Model); errPolicy != nil {
 						return nil, errPolicy
 					}
 					streamResult, errStream = executor.ExecuteStream(m.contextWithClientAuthCheck(ctx, auth), auth, execReq, execOpts)
@@ -294,6 +300,16 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if errStream != nil {
+			if m.ClientExecutionMustStop(ctx, errStream) {
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errStream), Options: execOpts}
+				result.RetryAfter = retryAfterFromError(errStream)
+				result.CredentialScope = isCredentialScopedError(errStream)
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				if streamResult != nil {
+					discardStreamChunks(streamResult.Chunks)
+				}
+				return nil, errStream
+			}
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
@@ -346,6 +362,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					if errPolicy := m.ValidateClientAuth(ctx, auth); errPolicy != nil {
 						return nil, errPolicy
 					}
+					if errPolicy := m.ValidateClientExecution(ctx, execReq.Model); errPolicy != nil {
+						return nil, errPolicy
+					}
 					retryStream, retryErr := executor.ExecuteStream(m.contextWithClientAuthCheck(ctx, auth), auth, execReq, execOpts)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
@@ -382,6 +401,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			if m.ClientExecutionMustStop(ctx, bootstrapErr) {
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(bootstrapErr), Options: execOpts}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				result.CredentialScope = isCredentialScopedError(bootstrapErr)
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				discardStreamChunks(streamResult.Chunks)
+				return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)
@@ -451,6 +478,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), emptyErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(emptyErr), Options: execOpts}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if m.ClientExecutionMustStop(ctx, emptyErr) {
+				return nil, currentErr
+			}
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue
