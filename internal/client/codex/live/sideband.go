@@ -47,6 +47,8 @@ var (
 type liveSession struct {
 	callID                string
 	authID                string
+	admittedAuth          *auth.Auth
+	policyContext         context.Context
 	model                 string
 	clientModel           string
 	sessionID             string
@@ -432,6 +434,10 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		defer releaseAttempt()
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	if errPolicy := h.validateRetainedLiveAuth(ctx, selected, session); errPolicy != nil {
+		writeSelectionError(c, errPolicy)
+		return
+	}
 
 	upstreamURL := buildSidebandURL(h.sidebandAPIBaseURL, style, callID)
 	upstreamHTTPURL := websocketHTTPURL(upstreamURL)
@@ -458,6 +464,9 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		})
 		dialer := newProxyAwareSidebandDialer(runtimeConfig, current)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
+		if errPolicy := h.validateRetainedLiveAuth(ctx, current, session); errPolicy != nil {
+			return nil, nil, errPolicy
+		}
 		return dialer.DialContext(ctx, upstreamURL, req.Header)
 	}
 
@@ -488,6 +497,11 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	closeUpstream := websocketCloseFunc("upstream", upstream)
+	if errPolicy := h.validateRetainedLiveAuth(ctx, selected, session); errPolicy != nil {
+		_ = closeUpstream()
+		writeSelectionError(c, errPolicy)
+		return
+	}
 	if selection != nil {
 		if errBind := selection.Bind(closeUpstream); errBind != nil {
 			consumeSession = true
@@ -521,7 +535,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsocketsWithMessagePolicy(downstream, upstream, h.clientMessagePolicy(ctx, selected), func() error { return h.validateLiveAuth(ctx, selected) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsocketsWithMessagePolicy(downstream, upstream, h.retainedClientMessagePolicy(ctx, selected, session), func() error { return h.validateRetainedLiveAuth(ctx, selected, session) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -694,40 +708,69 @@ func copyWebsocketWithMessagePolicy(destination, source *websocket.Conn, message
 			}
 			reader = bytes.NewReader(payload)
 		}
-		writer, errWriter := destination.NextWriter(messageType)
-		if errWriter != nil {
-			return errWriter
-		}
-		_, errCopy := io.Copy(policyCheckedWebsocketWriter{Writer: writer, checks: validateAuth}, reader)
-		if errCopy != nil {
-			// Do not close/flush a partially buffered message after revocation.
-			return errCopy
-		}
-		for _, validate := range validateAuth {
-			if errPolicy := validate(); errPolicy != nil {
-				return errPolicy
-			}
-		}
-		if errClose := writer.Close(); errClose != nil {
-			return errClose
+		if errWrite := writeCheckedWebsocketMessage(destination, messageType, reader, validateAuth...); errWrite != nil {
+			return errWrite
 		}
 	}
 }
 
-// Check each copied chunk, not just the first frame: a fragmented message may
-// remain open while the policy changes. io.Copy must not use Writer.ReadFrom.
+// Both generated initialization and relayed messages use the same checked path.
+// Never close a message writer on denial: Close would flush buffered content.
+func writeCheckedWebsocketMessage(destination *websocket.Conn, messageType int, reader io.Reader, checks ...func() error) error {
+	for _, validate := range checks {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
+	writer, errWriter := destination.NextWriter(messageType)
+	if errWriter != nil {
+		return errWriter
+	}
+	if _, errCopy := io.Copy(policyCheckedWebsocketWriter{Writer: writer, checks: checks}, reader); errCopy != nil {
+		return errCopy
+	}
+	for _, validate := range checks {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
+	return writer.Close()
+}
+
+// Bound writes inside the adapter: a reader's WriterTo (including bytes.Reader)
+// can otherwise hand io.Copy an entire inspected message in a single Write.
+// Gorilla's client writer buffers 4096 payload bytes by default. A larger
+// Write can flush multiple network fragments before returning to the policy gate.
+const policyCheckedWebsocketChunkSize = 4096
+
 type policyCheckedWebsocketWriter struct {
 	io.Writer
 	checks []func() error
 }
 
 func (w policyCheckedWebsocketWriter) Write(payload []byte) (int, error) {
-	for _, validate := range w.checks {
-		if err := validate(); err != nil {
-			return 0, err
+	total := 0
+	for len(payload) > 0 {
+		for _, validate := range w.checks {
+			if err := validate(); err != nil {
+				return total, err
+			}
 		}
+		size := len(payload)
+		if size > policyCheckedWebsocketChunkSize {
+			size = policyCheckedWebsocketChunkSize
+		}
+		n, err := w.Writer.Write(payload[:size])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n != size {
+			return total, io.ErrShortWrite
+		}
+		payload = payload[n:]
 	}
-	return w.Writer.Write(payload)
+	return total, nil
 }
 
 func websocketCloseDetails(err error) (int, string) {

@@ -1,6 +1,7 @@
 package live
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -213,7 +214,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 			writeRealtimeError(c, http.StatusServiceUnavailable, errPolicy.Error(), "server_error", "api_key_policy_unavailable")
 			return
 		}
-		if errWrite := upstream.WriteMessage(websocket.TextMessage, update); errWrite != nil {
+		if errWrite := writeCheckedWebsocketMessage(upstream, websocket.TextMessage, bytes.NewReader(update), func() error { return h.validateLiveAuth(ctx, selected) }); errWrite != nil {
 			_ = closeUpstream()
 			writeRealtimeError(c, http.StatusBadGateway, "Failed to apply Realtime client secret session", "api_error", "realtime_upstream_unavailable")
 			return

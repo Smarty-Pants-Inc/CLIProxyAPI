@@ -436,6 +436,8 @@ func (h *Handler) Handle(c *gin.Context) {
 			clientMeta := logging.GetClientRequestMetadata(ctx)
 			session := liveSession{
 				authID:          selected.ID,
+				admittedAuth:    selected.Clone(),
+				policyContext:   livePolicyContext(ctx),
 				model:           model,
 				clientModel:     clientModel,
 				media:           mediaSession,
