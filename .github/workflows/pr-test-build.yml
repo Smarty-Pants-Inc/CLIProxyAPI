@@ -10,7 +10,7 @@ permissions:
 jobs:
   build:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
 
   artifact:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
     timeout-minutes: 15
     permissions:
       contents: read
