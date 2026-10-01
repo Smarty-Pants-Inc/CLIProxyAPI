@@ -738,11 +738,21 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := cliproxyauth.CheckKeyPolicySend(req); err != nil {
+		return nil, err
+	}
+	if cliproxyauth.KeyPolicyFromContext(req.Context()) != nil {
+		req.GetBody = nil
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {
 		return resp, errRoundTrip
+	}
+	if cliproxyauth.KeyPolicyFromContext(req.Context()) != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		_ = resp.Body.Close()
+		return nil, &cliproxyauth.Error{Code: "api_key_policy_redirect_forbidden", Message: "api_key_policy_redirect_forbidden", HTTPStatus: 503}
 	}
 	if t.packetOnly {
 		t.reporter.ObserveResponsePacketOnly(resp)

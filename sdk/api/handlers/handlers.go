@@ -493,6 +493,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
+	parentCtx = coreauth.WithKeyPolicy(parentCtx, coreauth.KeyPolicyFromContext(requestCtx))
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""

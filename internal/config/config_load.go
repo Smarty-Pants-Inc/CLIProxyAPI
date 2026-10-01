@@ -51,12 +51,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return cfg, nil
 	}
 
+	if errValidate := validateSingleConfigDocument(data); errValidate != nil {
+		return nil, errValidate
+	}
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
-		if optional {
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
-		}
 		return nil, errValidate
 	}
 
@@ -82,13 +80,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
-		if optional {
-			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
-		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		return nil, errValidate
 	}
 	if errValidate := validateTrustedProxies(cfg.TrustedProxies); errValidate != nil {
 		return nil, errValidate

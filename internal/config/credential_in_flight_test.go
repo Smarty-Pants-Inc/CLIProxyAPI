@@ -45,16 +45,14 @@ func TestLoadConfigOptionalWhitespaceFallbackAppliesCredentialInFlightDefaults(t
 	assertOptionalConfigFallback(t, cfg)
 }
 
-func TestLoadConfigOptionalInvalidFallbackAppliesCredentialInFlightDefaults(t *testing.T) {
+func TestLoadConfigOptionalInvalidFailsClosed(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if errWrite := os.WriteFile(configPath, []byte(":"), 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
-	cfg, errLoad := LoadConfigOptional(configPath, true)
-	if errLoad != nil {
-		t.Fatalf("LoadConfigOptional() error = %v", errLoad)
+	if _, err := LoadConfigOptional(configPath, true); err == nil {
+		t.Fatal("nonempty malformed security configuration accepted")
 	}
-	assertOptionalConfigFallback(t, cfg)
 }
 
 func assertOptionalConfigFallback(t *testing.T, cfg *Config) {
