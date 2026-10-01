@@ -271,6 +271,10 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 		writeRealtimeError(c, http.StatusBadRequest, errSession.Error(), "invalid_request_error", "invalid_session")
 		return
 	}
+	if err := h.authorizeClientRequest(c, modelFromJSON(clientSession), false); err != nil {
+		writeSelectionError(c, err)
+		return
+	}
 	issuerPrincipal, _ := c.Get("userApiKey")
 	issuerProvider, _ := c.Get("accessProvider")
 	issuerPrincipalValue, _ := issuerPrincipal.(string)

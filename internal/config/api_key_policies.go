@@ -5,10 +5,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"io"
 	"path"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // A second YAML document must not silently hide or remove a security policy.
@@ -30,6 +31,10 @@ type APIKeyPolicy struct {
 	KeySHA256        string   `yaml:"key-sha256" json:"key-sha256"`
 	AllowedAuths     []string `yaml:"allowed-auths" json:"allowed-auths"`
 	AllowedProviders []string `yaml:"allowed-providers,omitempty" json:"allowed-providers,omitempty"`
+	// Nil means unrestricted; an explicit empty list denies every model.
+	AllowedModels *[]string `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
+	// Nil means no cap; zero denies generation immediately.
+	DailyTokenCap *int64 `yaml:"daily-token-cap,omitempty" json:"daily-token-cap,omitempty"`
 }
 
 // ValidateAPIKeyPolicies rejects ambiguous or malformed policies instead of dropping
@@ -57,6 +62,21 @@ func (cfg *Config) ValidateAPIKeyPolicies() error {
 			if _, errMatch := path.Match(pattern, ""); errMatch != nil {
 				return fmt.Errorf("api-key-policies[%d]: allowed-auths[%d] has invalid glob syntax", i, j)
 			}
+		}
+		var models []string
+		if policy.AllowedModels != nil {
+			models = *policy.AllowedModels
+		}
+		for j, pattern := range models {
+			if strings.TrimSpace(pattern) == "" {
+				return fmt.Errorf("api-key-policies[%d]: allowed-models[%d] is empty", i, j)
+			}
+			if _, errMatch := path.Match(pattern, ""); errMatch != nil {
+				return fmt.Errorf("api-key-policies[%d]: allowed-models[%d] has invalid glob syntax", i, j)
+			}
+		}
+		if policy.DailyTokenCap != nil && *policy.DailyTokenCap < 0 {
+			return fmt.Errorf("api-key-policies[%d]: daily-token-cap must be nonnegative", i)
 		}
 		for j, provider := range policy.AllowedProviders {
 			provider = strings.ToLower(strings.TrimSpace(provider))

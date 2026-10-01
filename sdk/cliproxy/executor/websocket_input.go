@@ -23,6 +23,23 @@ func WebsocketInputFromContext(ctx context.Context) <-chan WebsocketInput {
 
 // WithWebsocketAuthCheck supplies the live account-state check for a bound
 // connection. It may reject further frames but never select another account.
+type websocketRequestCheckKey struct{}
+
+// WithWebsocketRequestCheck checks effective client models on retained turns.
+func WithWebsocketRequestCheck(ctx context.Context, check func(string) error) context.Context {
+	return context.WithValue(ctx, websocketRequestCheckKey{}, check)
+}
+
+func ValidateWebsocketRequest(ctx context.Context, model string) error {
+	if ctx == nil {
+		return nil
+	}
+	if check, ok := ctx.Value(websocketRequestCheckKey{}).(func(string) error); ok && check != nil {
+		return check(model)
+	}
+	return nil
+}
+
 type websocketAuthCheckKey struct{}
 type websocketCredentialBindingKey struct{}
 

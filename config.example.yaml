@@ -61,12 +61,28 @@ api-keys:
 # a reload may narrow, but cannot unrestrict them. Home overlays retain local policies.
 # Restricted WebRTC requires the configured media relay (direct SDP is rejected).
 # Native credential/model callbacks must carry their owning host_callback_id.
+# allowed-models is optional and matches the client-visible model ID (before
+# routing aliases), case-sensitively with globs; omitted/null is unrestricted,
+# an explicit [] denies all. Non-matches return 403 before credential selection.
+# daily-token-cap is optional, nonnegative input+output tokens per UTC day;
+# 0 denies immediately. At/above the recorded cap, requests return 429 until
+# 00:00 UTC. Counts use existing usage records, independent of usage-statistics.
+# ponytail: v1 keeps counters in memory (reset on process restart, not reload).
+# Usage is charged on the UTC day it is published; retries are distinct executions.
+# Already-admitted concurrent requests/streams may finish above the cap; no token
+# reservations or estimates. Missing upstream usage cannot be inferred.
+# Capped keys cannot use direct Realtime/WebRTC/sideband transports without token
+# usage records (503); Responses/Codex request usage remains metered as usual.
+# Model-checked Realtime control messages are buffered/limited to 16 MiB so a
+# fragmented model change is checked before any content is forwarded.
 # api-key-policies:
 #   - key-sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #     allowed-auths:
 #       - "claude-*-dev4@smartypants.ai.json"
 #       - "verified-account@smartypants.ai"
 #     allowed-providers: [claude, codex]
+#     allowed-models: ["claude-*", "gpt-5*"]
+#     daily-token-cap: 1000000
 
 # Enable debug logging
 debug: false

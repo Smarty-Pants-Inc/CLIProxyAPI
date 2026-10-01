@@ -180,7 +180,11 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, authMa
 			}
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
-				c.Request = c.Request.WithContext(coreauth.WithClientAPIKeyPolicies(c.Request.Context(), result.Principal, result.APIKeyPolicies))
+				policyCtx := coreauth.WithClientAPIKeyPolicies(c.Request.Context(), result.Principal, result.APIKeyPolicies)
+				if authManager != nil {
+					policyCtx = authManager.WithClientRequest(policyCtx, "")
+				}
+				c.Request = c.Request.WithContext(policyCtx)
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)

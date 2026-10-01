@@ -635,6 +635,9 @@ func websocketPolicyFingerprints(ctx context.Context, auth *cliproxyauth.Auth, h
 
 func websocketPolicyCheck(ctx context.Context, authID string) func() error {
 	return func() error {
+		if err := cliproxyexecutor.ValidateWebsocketRequest(ctx, ""); err != nil {
+			return err
+		}
 		if !cliproxyexecutor.WebsocketAuthEnabled(ctx, authID) {
 			return statusErr{code: http.StatusServiceUnavailable, msg: "client API key allowlist no longer permits this websocket credential"}
 		}

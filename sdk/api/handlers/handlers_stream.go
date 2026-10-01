@@ -301,6 +301,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if err := h.AuthManager.ValidateClientRequest(ctx, modelName); err != nil {
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		errs <- executionErrorMessage(err)
+		close(errs)
+		return nil, nil, errs
+	}
+	ctx = h.AuthManager.WithClientRequest(ctx, modelName)
 	originalRequestedModel := modelName
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {

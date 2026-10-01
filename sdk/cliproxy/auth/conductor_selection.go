@@ -1387,7 +1387,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	if status == http.StatusOK {
 		return 0, false
 	}
-	if isRequestInvalidError(err) || isRequestStopError(err) {
+	if isRequestInvalidError(err) || isRequestStopError(err) || isAPIKeyControlError(err) {
 		return 0, false
 	}
 	if m.HomeEnabled() {
@@ -1761,6 +1761,9 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, err error) {
+	if err := m.ValidateClientRequest(ctx, clientModelForRequest(ctx, opts, model)); err != nil {
+		return nil, nil, err
+	}
 	ctx = m.withAPIKeyPolicies(ctx)
 	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	if m.HomeEnabled() {
@@ -2021,6 +2024,9 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, err error) {
+	if err := m.ValidateClientRequest(ctx, clientModelForRequest(ctx, opts, model)); err != nil {
+		return nil, nil, err
+	}
 	ctx = m.withAPIKeyPolicies(ctx)
 	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	opts.EnsureMetadata()
@@ -2084,6 +2090,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, _ string, err error) {
+	if err := m.ValidateClientRequest(ctx, clientModelForRequest(ctx, opts, model)); err != nil {
+		return nil, nil, "", err
+	}
 	ctx = m.withAPIKeyPolicies(ctx)
 	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	if m.HomeEnabled() {
@@ -2199,6 +2208,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (selectedAuth *Auth, _ ProviderExecutor, _ string, err error) {
+	if err := m.ValidateClientRequest(ctx, clientModelForRequest(ctx, opts, model)); err != nil {
+		return nil, nil, "", err
+	}
 	ctx = m.withAPIKeyPolicies(ctx)
 	defer m.validateAPIKeySelection(ctx, &selectedAuth, &err)
 	opts.EnsureMetadata()

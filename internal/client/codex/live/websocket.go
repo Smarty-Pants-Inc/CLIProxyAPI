@@ -45,6 +45,10 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	if requestedModel == "" {
 		requestedModel = defaultStandardRealtimeModel
 	}
+	if err := h.authorizeClientRequest(c, requestedModel, true); err != nil {
+		writeSelectionError(c, err)
+		return
+	}
 	selectionModel := codexRealtimeModel(requestedModel)
 	tokenSession := clientSecretSession(c)
 	if len(tokenSession) > 0 {
@@ -56,7 +60,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	}
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
-	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
+	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c), Metadata: map[string]any{coreexecutor.RequestedModelMetadataKey: requestedModel}}
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, nil, nil)
 	selection, selected, errSelect := h.selectOAuth(ctx, selectionModel, selectionOpts)
 	if errSelect != nil {
@@ -240,7 +244,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 
-	if errRelay := relayWebsockets(downstream, upstream, func() error { return h.authManager.ValidateClientAuth(ctx, selected) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsocketsWithMessagePolicy(downstream, upstream, h.clientMessagePolicy(ctx, selected), func() error { return h.validateLiveAuth(ctx, selected) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, h.currentConfig(), "relay", errRelay)
 		log.WithError(errRelay).Debug("codex realtime direct websocket relay closed")
 	}

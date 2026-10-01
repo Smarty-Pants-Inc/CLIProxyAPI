@@ -196,6 +196,16 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	upstreamBody, upstreamContentType, model, errPayload := prepareCallRequest(body, c.GetHeader("Content-Type"))
+	clientModel := model
+	if inherited := auth.ClientRequestedModelFromContext(c.Request.Context()); len(clientSecretSession(c)) > 0 && inherited != "" {
+		clientModel = inherited
+	}
+	if errPayload == nil {
+		if err := h.authorizeClientRequest(c, clientModel, true); err != nil {
+			writeSelectionError(c, err)
+			return
+		}
+	}
 	if errPayload == nil {
 		upstreamBody, upstreamContentType, model, errPayload = applyClientSecretCallSession(upstreamBody, upstreamContentType, model, clientSecretSession(c))
 	}
@@ -220,6 +230,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	selectionOpts := coreexecutor.Options{
+		Metadata:        map[string]any{coreexecutor.RequestedModelMetadataKey: clientModel},
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
 	}
@@ -278,10 +289,11 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 		var upstreamOffer string
 		mediaSession, upstreamOffer, errSDP = mediaRelay.NewSession(ctx, clientOffer, mediaSessionRoute{
-			proxyURL:     proxyURLForAuth(runtimeConfig, selected),
-			credential:   mediaCredentialName(selected, selectedIndex),
-			authIndex:    selectedIndex,
-			validateAuth: func() error { return h.authManager.ValidateClientAuth(ctx, selected) },
+			proxyURL:        proxyURLForAuth(runtimeConfig, selected),
+			credential:      mediaCredentialName(selected, selectedIndex),
+			authIndex:       selectedIndex,
+			validateAuth:    func() error { return h.validateLiveAuth(ctx, selected) },
+			validateMessage: h.clientMessagePolicy(ctx, selected),
 		})
 		if errSDP != nil {
 			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errSDP, http.StatusBadGateway), errSDP.Error())
@@ -425,6 +437,7 @@ func (h *Handler) Handle(c *gin.Context) {
 			session := liveSession{
 				authID:          selected.ID,
 				model:           model,
+				clientModel:     clientModel,
 				media:           mediaSession,
 				sessionID:       clientMeta.SessionID,
 				parentSessionID: clientMeta.ParentSessionID,

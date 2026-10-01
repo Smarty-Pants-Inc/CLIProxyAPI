@@ -95,6 +95,26 @@ type generateContextKey struct{}
 type streamContextKey struct{}
 type executionRequestIDContextKey struct{}
 type executionTraceIDContextKey struct{}
+type recordObserverContextKey struct{}
+
+// WithRecordObserver installs request-owned synchronous accounting before the
+// optional asynchronous usage sinks. It must not mutate the published record.
+func WithRecordObserver(ctx context.Context, observer func(Record)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, recordObserverContextKey{}, observer)
+}
+
+// WithRecordObserverFromContext preserves accounting across cancellation parents.
+func WithRecordObserverFromContext(ctx, source context.Context) context.Context {
+	if source != nil {
+		if observer, ok := source.Value(recordObserverContextKey{}).(func(Record)); ok {
+			return WithRecordObserver(ctx, observer)
+		}
+	}
+	return ctx
+}
 
 // WithExecutionRequestID attaches a specific execution instance request ID to the context.
 func WithExecutionRequestID(ctx context.Context, requestID string) context.Context {
@@ -403,6 +423,11 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.TraceID = trID
 		} else if trID := internallogging.GetRequestID(ctx); trID != "" {
 			record.TraceID = trID
+		}
+	}
+	if ctx != nil {
+		if observer, ok := ctx.Value(recordObserverContextKey{}).(func(Record)); ok && observer != nil {
+			observer(record)
 		}
 	}
 	// ensure worker is running even if Start was not called explicitly

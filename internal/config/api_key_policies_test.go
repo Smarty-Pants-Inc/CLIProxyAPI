@@ -10,7 +10,7 @@ import (
 const policyTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestAPIKeyPoliciesConfig(t *testing.T) {
-	payload := "api-key-policies:\n  - key-sha256: " + strings.ToUpper(policyTestHash) + "\n    allowed-auths: [\"claude-*.json\", \"verified@example.com\"]\n    allowed-providers: [Claude, codex]\n"
+	payload := "api-key-policies:\n  - key-sha256: " + strings.ToUpper(policyTestHash) + "\n    allowed-auths: [\"claude-*.json\", \"verified@example.com\"]\n    allowed-providers: [Claude, codex]\n    allowed-models: ['claude-*', 'gpt-5*']\n    daily-token-cap: 1000\n"
 	cfg, err := ParseConfigBytes([]byte(payload))
 	if err != nil {
 		t.Fatal(err)
@@ -20,6 +20,11 @@ func TestAPIKeyPoliciesConfig(t *testing.T) {
 	}
 	clone := cfg.CloneForRuntime()
 	clone.APIKeyPolicies[0].AllowedAuths[0] = "changed.json"
+	(*clone.APIKeyPolicies[0].AllowedModels)[0] = "changed-model"
+	*clone.APIKeyPolicies[0].DailyTokenCap = 1
+	if (*cfg.APIKeyPolicies[0].AllowedModels)[0] != "claude-*" || *cfg.APIKeyPolicies[0].DailyTokenCap != 1000 {
+		t.Fatal("runtime clone shares model/cap policy")
+	}
 	if cfg.APIKeyPolicies[0].AllowedAuths[0] != "claude-*.json" {
 		t.Fatal("runtime policy clone shares allowlist")
 	}
@@ -40,6 +45,11 @@ func TestAPIKeyPoliciesRejectMalformedConfig(t *testing.T) {
 	for _, tc := range []struct{ name, payload string }{
 		{"trailing-policy-document", "api-keys: [synthetic]\n---\napi-key-policies: [{key-sha256: " + policyTestHash + "}]"},
 		{"trailing-malformed-document", "api-key-policies: [{key-sha256: " + policyTestHash + "}]\n---\ninvalid: ["},
+		{"bad-model-glob", "api-key-policies: [{key-sha256: " + policyTestHash + ", allowed-models: ['[']}]"},
+		{"blank-model-glob", "api-key-policies: [{key-sha256: " + policyTestHash + ", allowed-models: ['']}]"},
+		{"bad-cap-negative", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-token-cap: -1}]"},
+		{"bad-cap-type", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-token-cap: infinite}]"},
+		{"bad-cap-overflow", "api-key-policies: [{key-sha256: " + policyTestHash + ", daily-token-cap: 9999999999999999999999}]"},
 		{"bad-hash", "api-key-policies: [{key-sha256: not-a-hash, allowed-auths: ['*']}]"},
 		{"bad-block-type", "api-key-policies: invalid"},
 		{"bad-yaml", "api-key-policies: ["},

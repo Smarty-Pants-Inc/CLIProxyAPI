@@ -19,6 +19,21 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
+func TestAPIKeyPolicyWebsocketControlErrorDoesNotRetry(t *testing.T) {
+	for _, refused := range []*coreauth.Error{
+		{Code: "api_key_model_forbidden", HTTPStatus: 403},
+		{Code: "api_key_daily_token_cap", HTTPStatus: 429},
+	} {
+		ctx := coreexecutor.WithWebsocketRequestCheck(context.Background(), func(string) error { return refused })
+		if err := websocketPolicyCheck(ctx, "synthetic-auth")(); err != refused {
+			t.Fatal("websocket lost client policy status")
+		}
+		if shouldRetryCodexWebsocketSend(refused) {
+			t.Fatal("client-local refusal triggered websocket reconnect/credential retry")
+		}
+	}
+}
+
 func TestAPIKeyPolicyWebsocketRevokedDuringHandshake(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(map[bool]string{false: "execute", true: "stream"}[stream], func(t *testing.T) {

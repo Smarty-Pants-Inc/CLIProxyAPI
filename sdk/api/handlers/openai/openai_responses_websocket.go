@@ -510,6 +510,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
 		executionParent := context.WithValue(c.Request.Context(), "gin", c)
+		if err := h.AuthManager.ValidateClientRequest(executionParent, requestModelName); err != nil {
+			if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, handlers.ExecutionErrorMessage(err)); errWrite != nil {
+				return
+			}
+			continue
+		}
+		executionParent = h.AuthManager.WithClientRequest(executionParent, requestModelName)
 		executionParent, routeOverridesModelResolution := h.PrepareStreamModelRoute(
 			executionParent,
 			h.HandlerType(),

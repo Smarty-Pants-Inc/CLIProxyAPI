@@ -136,6 +136,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 		}
 		processCreatePayload := func(payload []byte) bool {
+			if err := cliproxyexecutor.ValidateWebsocketRequest(streamCtx, strings.TrimSpace(gjson.GetBytes(payload, "model").String())); err != nil {
+				fail(err)
+				return false
+			}
 			metadataMu.Lock()
 			isAppend := gjson.GetBytes(payload, "type").String() == "response.append"
 			prevID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
@@ -277,6 +281,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.steer":
+					if err := cliproxyexecutor.ValidateWebsocketRequest(streamCtx, strings.TrimSpace(gjson.GetBytes(payload, "model").String())); err != nil {
+						fail(err)
+						return
+					}
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
 					metadataMu.Lock()
 					settings := responseSettings[parent]

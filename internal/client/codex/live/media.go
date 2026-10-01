@@ -46,10 +46,11 @@ type mediaRelayFactory interface {
 }
 
 type mediaSessionRoute struct {
-	proxyURL     string
-	credential   string
-	authIndex    string
-	validateAuth func() error
+	proxyURL        string
+	credential      string
+	authIndex       string
+	validateAuth    func() error
+	validateMessage func([]byte) error
 }
 
 type pionMediaRelay struct {
@@ -99,16 +100,17 @@ type dataChannelMessage struct {
 }
 
 type dataChannelPipe struct {
-	name         string
-	done         <-chan struct{}
-	queue        chan dataChannelMessage
-	ready        chan struct{}
-	readyOnce    sync.Once
-	writable     chan struct{}
-	destination  *webrtc.DataChannel
-	mu           sync.RWMutex
-	onError      func(error)
-	validateAuth func() error
+	name            string
+	done            <-chan struct{}
+	queue           chan dataChannelMessage
+	ready           chan struct{}
+	readyOnce       sync.Once
+	writable        chan struct{}
+	destination     *webrtc.DataChannel
+	mu              sync.RWMutex
+	onError         func(error)
+	validateAuth    func() error
+	validateMessage func([]byte) error
 }
 
 type dataChannelBridge struct {
@@ -318,6 +320,7 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, rou
 		session.fail("data_channel_failed", err)
 	})
 	session.bridge.downToUp.validateAuth = route.validateAuth
+	session.bridge.downToUp.validateMessage = route.validateMessage
 	validateForward := func() error {
 		if route.validateAuth != nil {
 			if errPolicy := route.validateAuth(); errPolicy != nil {
@@ -873,6 +876,12 @@ func (p *dataChannelPipe) run() {
 			if p.validateAuth != nil {
 				if errPolicy := p.validateAuth(); errPolicy != nil {
 					p.reportError(errPolicy)
+					return
+				}
+			}
+			if p.validateMessage != nil {
+				if err := p.validateMessage(message.data); err != nil {
+					p.reportError(err)
 					return
 				}
 			}

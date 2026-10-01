@@ -951,6 +951,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 }
 
 func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (_ *HomeDispatchSelection, err error) {
+	if err := m.ValidateClientRequest(ctx, clientModelForRequest(ctx, opts, model)); err != nil {
+		return nil, err
+	}
 	ctx = m.withAPIKeyPolicies(ctx)
 	defer func() { err = apiKeySelectionError(ctx, err) }()
 	if m == nil {

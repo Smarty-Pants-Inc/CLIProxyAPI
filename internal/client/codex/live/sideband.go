@@ -1,8 +1,10 @@
 package live
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -46,6 +48,7 @@ type liveSession struct {
 	callID                string
 	authID                string
 	model                 string
+	clientModel           string
 	sessionID             string
 	parentSessionID       string
 	ownerPrincipal        string
@@ -355,6 +358,14 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		h.sessions.release(session)
 	}()
 
+	clientModel := session.clientModel
+	if clientModel == "" {
+		clientModel = session.model
+	}
+	if err := h.authorizeClientRequest(c, clientModel, true); err != nil {
+		writeSelectionError(c, err)
+		return
+	}
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, c.Request.Header, nil, map[string]any{
@@ -381,6 +392,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		selectionOpts := coreexecutor.Options{
 			Headers: liveSelectionHeaders(c),
 			Metadata: map[string]any{
+				coreexecutor.RequestedModelMetadataKey:   clientModel,
 				coreexecutor.PinnedAuthMetadataKey:       session.authID,
 				coreexecutor.ExecutionSessionMetadataKey: callID,
 			},
@@ -509,7 +521,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream, func() error { return h.authManager.ValidateClientAuth(ctx, selected) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsocketsWithMessagePolicy(downstream, upstream, h.clientMessagePolicy(ctx, selected), func() error { return h.validateLiveAuth(ctx, selected) }); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -633,8 +645,14 @@ func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 }
 
 func relayWebsockets(downstream, upstream *websocket.Conn, validateAuth ...func() error) error {
+	return relayWebsocketsWithMessagePolicy(downstream, upstream, nil, validateAuth...)
+}
+
+func relayWebsocketsWithMessagePolicy(downstream, upstream *websocket.Conn, messagePolicy func([]byte) error, validateAuth ...func() error) error {
 	results := make(chan error, 2)
-	go func() { results <- copyWebsocket(upstream, downstream, validateAuth...) }()
+	go func() {
+		results <- copyWebsocketWithMessagePolicy(upstream, downstream, messagePolicy, validateAuth...)
+	}()
 	go func() { results <- copyWebsocket(downstream, upstream) }()
 
 	firstErr := <-results
@@ -649,6 +667,10 @@ func relayWebsockets(downstream, upstream *websocket.Conn, validateAuth ...func(
 }
 
 func copyWebsocket(destination, source *websocket.Conn, validateAuth ...func() error) error {
+	return copyWebsocketWithMessagePolicy(destination, source, nil, validateAuth...)
+}
+
+func copyWebsocketWithMessagePolicy(destination, source *websocket.Conn, messagePolicy func([]byte) error, validateAuth ...func() error) error {
 	for {
 		messageType, reader, errReader := source.NextReader()
 		if errReader != nil {
@@ -658,6 +680,19 @@ func copyWebsocket(destination, source *websocket.Conn, validateAuth ...func() e
 			if errPolicy := validate(); errPolicy != nil {
 				return errPolicy
 			}
+		}
+		if messagePolicy != nil {
+			payload, err := io.ReadAll(io.LimitReader(reader, 16<<20+1))
+			if err != nil {
+				return err
+			}
+			if len(payload) > 16<<20 {
+				return fmt.Errorf("policy-checked realtime message exceeds 16 MiB")
+			}
+			if err := messagePolicy(payload); err != nil {
+				return err
+			}
+			reader = bytes.NewReader(payload)
 		}
 		writer, errWriter := destination.NextWriter(messageType)
 		if errWriter != nil {

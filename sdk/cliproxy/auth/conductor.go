@@ -186,6 +186,7 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig            atomic.Value
 	apiKeyPoliciesConfigured atomic.Bool
+	apiKeyUsage              apiKeyDailyUsage
 
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider

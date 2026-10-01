@@ -11,6 +11,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 type clientAPIKeyHashContextKey struct{}
@@ -55,7 +56,10 @@ func WithClientAPIKeyFromContext(ctx, source context.Context) context.Context {
 			if policies, ok := source.Value(apiKeyAdmissionPoliciesContextKey{}).([]internalconfig.APIKeyPolicy); ok {
 				ctx = context.WithValue(ctx, apiKeyAdmissionPoliciesContextKey{}, policies)
 			}
-			return ctx
+			if model, ok := source.Value(clientRequestedModelContextKey{}).(string); ok {
+				ctx = context.WithValue(ctx, clientRequestedModelContextKey{}, model)
+			}
+			return coreusage.WithRecordObserverFromContext(ctx, source)
 		}
 	}
 	return ctx
@@ -134,6 +138,15 @@ func apiKeyPolicyUnavailableError() *Error {
 // ValidateClientAuth checks the current policy at direct execution boundaries,
 // including pinned credentials, refresh/preparation and retained websocket auths.
 func (m *Manager) ValidateClientAuth(ctx context.Context, auth *Auth) error {
+	if ctx != nil {
+		if model, ok := ctx.Value(clientRequestedModelContextKey{}).(string); ok {
+			if err := m.ValidateClientRequest(ctx, model); err != nil {
+				return err
+			}
+		} else if err := m.validateClientTokenCap(ctx); err != nil {
+			return err
+		}
+	}
 	for _, policy := range apiKeyPoliciesFromContext(m.withAPIKeyPolicies(ctx)) {
 		if !apiKeyPolicyAllows(policy, auth) {
 			return apiKeyPolicyUnavailableError()
@@ -167,7 +180,12 @@ func (m *Manager) HasClientAPIKeyPolicy(ctx context.Context) bool {
 // as the handler's current record. Re-registering the same ID cannot bless it.
 func (m *Manager) contextWithClientAuthCheck(ctx context.Context, selected *Auth) context.Context {
 	bound := selected.Clone()
-	result := ctx
+	result := cliproxyexecutor.WithWebsocketRequestCheck(ctx, func(model string) error {
+		if model == "" {
+			model, _ = ctx.Value(clientRequestedModelContextKey{}).(string)
+		}
+		return m.ValidateClientRequest(ctx, model)
+	})
 	if m.HasClientAPIKeyPolicy(ctx) {
 		result = cliproxyexecutor.WithWebsocketCredentialBinding(result)
 	}
@@ -193,7 +211,7 @@ func (m *Manager) validateAPIKeySelection(ctx context.Context, selected **Auth, 
 }
 
 func apiKeySelectionError(ctx context.Context, err error) error {
-	if err == nil || len(apiKeyPoliciesFromContext(ctx)) == 0 || isRequestTerminatedError(err) {
+	if err == nil || len(apiKeyPoliciesFromContext(ctx)) == 0 || isRequestTerminatedError(err) || isAPIKeyControlError(err) {
 		return err
 	}
 	if statusCodeFromError(err) == http.StatusTooManyRequests {

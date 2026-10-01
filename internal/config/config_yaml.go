@@ -241,7 +241,7 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 		}
 	case yaml.SequenceNode:
 		// Preserve explicit null style if dst was null and src is empty sequence
-		if dst.Kind == yaml.ScalarNode && dst.Tag == "!!null" && len(src.Content) == 0 {
+		if dst.Kind == yaml.ScalarNode && dst.Tag == "!!null" && len(src.Content) == 0 && !isAPIKeyPolicyControlPath(currentPath) {
 			// Keep as null to preserve original style
 			return
 		}
@@ -317,7 +317,15 @@ func appendPath(path []string, key string) []string {
 // isKnownDefaultValue returns true if the given node at the specified path
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
+func isAPIKeyPolicyControlPath(path []string) bool {
+	return len(path) >= 2 && path[0] == "api-key-policies" && (path[len(path)-1] == "allowed-models" || path[len(path)-1] == "daily-token-cap")
+}
+
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
+	// Pointer-backed security controls: explicit []/0 denies all, not a default.
+	if isAPIKeyPolicyControlPath(path) && node != nil && node.Tag != "!!null" {
+		return false
+	}
 	if isPluginConfigsSubtreePath(path) {
 		return false
 	}
@@ -402,7 +410,7 @@ func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
 
 			pruneKnownDefaultsInNewNode(childPath, valueNode)
 			if (valueNode.Kind == yaml.MappingNode || valueNode.Kind == yaml.SequenceNode) &&
-				len(valueNode.Content) == 0 {
+				len(valueNode.Content) == 0 && !isAPIKeyPolicyControlPath(childPath) {
 				continue
 			}
 
