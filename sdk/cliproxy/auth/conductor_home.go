@@ -357,6 +357,10 @@ type homeAuthDispatchResponse struct {
 	OriginalAlias string                 `json:"original_alias"`
 	ModelInfo     *homeDispatchModelInfo `json:"model_info,omitempty"`
 	Auth          Auth                   `json:"auth"`
+
+	// AuthFileName is the explicit credential basename supplied by trusted Home.
+	// Auth.FileName itself is not serialized, and IDs/labels are not identities.
+	AuthFileName string `json:"auth_file_name,omitempty"`
 }
 
 type homeDispatchModelInfo struct {
@@ -1140,6 +1144,15 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 			endScope()
 			return nil, &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 		}
+	}
+	if dispatch.AuthFileName != "" {
+		if dispatch.AuthFileName != strings.TrimSpace(dispatch.AuthFileName) ||
+			dispatch.AuthFileName == "." || dispatch.AuthFileName == ".." ||
+			strings.ContainsAny(dispatch.AuthFileName, "/\\\x00") {
+			endScope()
+			return nil, &Error{Code: "invalid_auth", Message: "home returned invalid credential basename", HTTPStatus: http.StatusBadGateway}
+		}
+		auth.FileName = dispatch.AuthFileName
 	}
 	observedModel := canonicalHomeDispatchModel(dispatch.Model, requestedModel)
 	if envelope.Present {

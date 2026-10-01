@@ -94,6 +94,14 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg
 // commitConfigUpdate applies only in-memory configuration state. Runtime work that
 // may block on plugins, models, storage, or networking is deliberately deferred.
 func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
+	return s.commitConfigUpdateFromSource(newCfg, false)
+}
+
+func (s *Service) commitHomeConfigUpdate(newCfg *config.Config) configCommit {
+	return s.commitConfigUpdateFromSource(newCfg, true)
+}
+
+func (s *Service) commitConfigUpdateFromSource(newCfg *config.Config, homeOverlay bool) configCommit {
 	if s == nil {
 		return configCommit{}
 	}
@@ -101,6 +109,7 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	s.configUpdateMu.Lock()
 	defer s.configUpdateMu.Unlock()
 
+	localUpdate := newCfg != nil && !homeOverlay
 	if newCfg == nil {
 		s.cfgMu.RLock()
 		newCfg = s.cfg
@@ -115,6 +124,11 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	}
 
 	s.cfgMu.Lock()
+	if localUpdate {
+		s.homeLocalSecurity = homeClientSecuritySnapshot(newCfg)
+	} else if s.homeLocalSecurity == nil {
+		s.homeLocalSecurity = homeClientSecuritySnapshot(s.cfg)
+	}
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
 	s.configSequence++

@@ -29,7 +29,11 @@ type Service struct {
 	// cfg holds the current application configuration.
 	cfg *config.Config
 
-	// cfgMu protects concurrent access to the configuration.
+	// homeLocalSecurity is the independent local client-authentication floor.
+	// Home commits must never replace it with effective remote keys or policies.
+	homeLocalSecurity *config.Config
+
+	// cfgMu protects concurrent access to cfg and homeLocalSecurity.
 	cfgMu sync.RWMutex
 
 	// configUpdateMu serializes config updates across watcher + home.

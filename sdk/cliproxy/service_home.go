@@ -24,6 +24,19 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// homeClientSecuritySnapshot copies only local client security, not remote or
+// provider configuration. Admission-time restrictions are retained in request
+// contexts separately; revoked remote keys must not become part of this floor.
+func homeClientSecuritySnapshot(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	return (&config.Config{SDKConfig: config.SDKConfig{
+		APIKeys:        cfg.APIKeys,
+		APIKeyPolicies: cfg.APIKeyPolicies,
+	}}).CloneForRuntime()
+}
+
 func mergeHomeAPIKeyPolicies(local, remote []config.APIKeyPolicy) []config.APIKeyPolicy {
 	result := append([]config.APIKeyPolicy(nil), local...)
 	for _, policy := range remote {
@@ -157,7 +170,8 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 		}
 	}
 	if work.config != nil {
-		if !s.applyConfigUpdateWithAuthSynthesis(ctx, work.config, true) {
+		commit := s.commitHomeConfigUpdate(work.config)
+		if commit.cfg == nil || !s.applyConfigRuntime(ctx, commit, true) {
 			return context.Canceled
 		}
 		work.committed = true
@@ -180,16 +194,20 @@ func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 		return nil, errContext
 	}
 
-	s.cfgMu.RLock()
+	s.cfgMu.Lock()
 	baseCfg := s.cfg
-	s.cfgMu.RUnlock()
+	if s.homeLocalSecurity == nil {
+		s.homeLocalSecurity = homeClientSecuritySnapshot(baseCfg)
+	}
+	localSecurity := s.homeLocalSecurity.CloneForRuntime()
+	s.cfgMu.Unlock()
 	if baseCfg == nil {
 		return work, nil
 	}
 
-	merged := *remoteCfg
-	// Local client restrictions are a floor; Home overlays may only narrow them.
-	mergeHomeClientSecurity(baseCfg, &merged)
+	merged := *remoteCfg.CloneForRuntime()
+	// Merge each overlay against the true local floor, never the prior overlay.
+	mergeHomeClientSecurity(localSecurity, &merged)
 	merged.Host = baseCfg.Host
 	merged.Port = baseCfg.Port
 	merged.TLS = baseCfg.TLS
@@ -247,7 +265,7 @@ func (s *Service) commitHomeConfig(lifetimeCtx, homeCtx context.Context, generat
 	if !s.homeLifetimeActive(homeCtx, lifetimeCtx, generation) {
 		return false
 	}
-	commit := s.commitConfigUpdate(work.config)
+	commit := s.commitHomeConfigUpdate(work.config)
 	if commit.cfg == nil {
 		return false
 	}
