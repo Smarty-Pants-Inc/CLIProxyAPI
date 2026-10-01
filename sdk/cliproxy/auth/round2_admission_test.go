@@ -66,8 +66,8 @@ func TestRound2Finding11HTTPAdmissionContext(t *testing.T) {
 			manager := NewManager(nil, nil, nil)
 			cfg := policyTestConfig("allowed-*.json")
 			cfg.APIKeyPolicies[0].AllowedModels = policyModels("key-policy-model")
-			cap := int64(5)
-			cfg.APIKeyPolicies[0].DailyTokenCap = &cap
+			// Capped raw HTTP is deliberately unavailable. Exercise successful
+			// preparation without a cap, then activate it after recording usage.
 			manager.SetConfig(cfg)
 			executor := &round2PrepareExecutor{}
 			manager.RegisterExecutor(executor)
@@ -115,6 +115,9 @@ func TestRound2Finding11HTTPAdmissionContext(t *testing.T) {
 			usage := coreusage.NewManager(0)
 			t.Cleanup(usage.Stop)
 			usage.Publish(req.Context(), coreusage.Record{RequestID: "http-admission-usage", Detail: coreusage.Detail{InputTokens: 5}})
+			cap := int64(5)
+			cfg.APIKeyPolicies[0].DailyTokenCap = &cap
+			manager.SetConfig(cfg)
 			requireControlStatus(t, manager.ValidateClientRequest(req.Context(), "key-policy-model"), 429)
 			if executor.httpCalls != 0 {
 				t.Fatal("denied HTTP request dispatched")
