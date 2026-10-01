@@ -74,6 +74,8 @@ api-keys:
 # models consume no slot; credential retries and chunk writes consume no extras.
 # Request admission is atomic; queued Responses turns count when processed.
 # ponytail: v1 keeps both counters in memory (restart resets them, not reload).
+# Token/request totals use int64; accounting uses average O(1) map updates,
+# never scans prior usage. Deduplication retains one entry per execution ID/day.
 # Usage is charged on the UTC day it is published; retries are distinct executions.
 # Already-admitted concurrent requests/streams may finish above the cap; no token
 # reservations or estimates. Missing upstream usage cannot be inferred.
@@ -90,8 +92,9 @@ api-keys:
 #     allowed-auths: ["TRAINING-OFF-VERIFIED-CODEX-AUTH-FILE-FILLED-AT-INSTALL.json"]
 #     allowed-providers: [codex] # gpt-6.1-sol uses Codex/ChatGPT OAuth accounts
 #     allowed-models: [gpt-6.1-sol]
-#     daily-token-cap: 2000000
-#     daily-request-cap: 100
+#     daily-token-cap: 1000000000 # TriStar: 1B tokens/day, provisional
+#     # daily-request-cap: <install-approved nonnegative integer>
+#     # Set TriStar's request cap at install; 100/day was packet-job-only.
 
 # Enable debug logging
 debug: false
