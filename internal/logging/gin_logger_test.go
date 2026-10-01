@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -148,6 +149,71 @@ func TestGinLogrusLoggerAddsRequestIDForCodexBackend(t *testing.T) {
 	}
 	if requestIDFromGin != requestIDFromContext {
 		t.Fatalf("expected Gin request ID %q to match context request ID %q", requestIDFromGin, requestIDFromContext)
+	}
+}
+
+func TestGinLogrusLoggerMasksManagementAPIKeyDeletionQuery(t *testing.T) {
+	previousMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+		gin.SetMode(previousMode)
+	})
+
+	const fakeKey = "fake-api-key-DO-NOT-USE-0123456789"
+	const escapedKey = "%66ake-api-key-DO-NOT-USE-012345678%39"
+	const normalQuery = "note=keep%20visible&value_hint=ordinary-value"
+	const path = "/v0/management/api-keys"
+	for _, tc := range []struct {
+		name, param, query, wantQuery string
+	}{
+		{"value", "value", "value=" + fakeKey, "value=fake...6789"},
+		{"escaped_value", "value", "value=" + escapedKey, "value=fake...6789"},
+		{"escaped_name_and_value", "value", "v%61lue=" + escapedKey, "v%61lue=fake...6789"},
+		{"existing_key", "key", "key=" + fakeKey, "key=fake...6789"},
+		{"nonsecret_only", "", normalQuery, normalQuery},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query, wantQuery := tc.query, tc.wantQuery
+			if tc.param != "" {
+				query += "&" + normalQuery
+				wantQuery += "&" + normalQuery
+			}
+			engine := gin.New()
+			engine.Use(GinLogrusLogger())
+			engine.DELETE(path, func(c *gin.Context) {
+				if tc.param != "" && c.Query(tc.param) != fakeKey {
+					t.Errorf("handler did not receive the decoded fake key")
+				}
+				if c.Query("note") != "keep visible" {
+					t.Errorf("handler did not receive the decoded nonsecret query")
+				}
+				c.Status(http.StatusOK)
+			})
+			hook.Reset()
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, path+"?"+query, nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", recorder.Code)
+			}
+			entries := hook.AllEntries()
+			if len(entries) != 1 {
+				t.Fatalf("access log count = %d, want 1", len(entries))
+			}
+			message := entries[0].Message
+			if strings.Contains(message, fakeKey) || strings.Contains(message, escapedKey) {
+				t.Errorf("access log leaked a full fake key: %q", message)
+			}
+			if !strings.Contains(message, "DELETE") || !strings.Contains(message, `"`+path+"?"+wantQuery+`"`) {
+				t.Errorf("access log = %q, want DELETE and query %q", message, wantQuery)
+			}
+		})
 	}
 }
 
