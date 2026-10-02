@@ -206,13 +206,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data := bytes.TrimSpace(line[5:])
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
+				eventType := gjson.GetBytes(data, "type").String()
+				if codexFrameCommitsUpstreamWork(eventType, data) {
+					replaySafe = false
+				}
 				modelErr := modelGuard.Observe(data)
 				if modelErr != nil {
 					closeBootstrapBody()
 					return nil, modelErr
 				}
 				translatedLine = append([]byte("data: "), data...)
-				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -417,9 +420,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				eventType := gjson.GetBytes(data, "type").String()
-				isTerminal := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
-				// Bootstrap completion alone does not commit translated downstream output.
-				if !isTerminal && !isCodexBootstrapBufferableEvent(eventType, data) {
+				if codexFrameCommitsUpstreamWork(eventType, data) {
 					streamReplaySafe = false
 				}
 				modelErr := modelGuard.Observe(data)

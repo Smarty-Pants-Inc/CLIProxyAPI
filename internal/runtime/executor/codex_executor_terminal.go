@@ -522,13 +522,34 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata", "keepalive":
 		return true
 	case "response.output_item.added":
-		return isCodexBufferableOutputItem(payload)
+		return isCodexBufferableOutputItem(gjson.GetBytes(payload, "item"))
 	case "response.content_part.added":
 		return isCodexEmptyPart(payload)
 	case "response.reasoning_summary_part.added":
 		return isCodexEmptyPart(payload)
 	default:
 		return false
+	}
+}
+
+// codexFrameCommitsUpstreamWork reports whether a frame shows work that a replay on another
+// credential would repeat. It is checked before model identity, so a frame that is rejected for a
+// missing or wrong model still closes the replay latch. Terminal frames are judged by the output they
+// carry: an output-free quota refusal stays replayable, but a completion that reports finished
+// server-tool output does not, even when no earlier frame announced that work.
+func codexFrameCommitsUpstreamWork(eventType string, payload []byte) bool {
+	switch eventType {
+	case "error":
+		return false
+	case "response.completed", "response.done", "response.incomplete", "response.failed":
+		for _, item := range gjson.GetBytes(payload, "response.output").Array() {
+			if !isCodexBufferableOutputItem(item) {
+				return true
+			}
+		}
+		return false
+	default:
+		return !isCodexBootstrapBufferableEvent(eventType, payload)
 	}
 }
 
@@ -540,8 +561,7 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 // web_search_call is announced with status "in_progress" and its searching event follows
 // immediately, and failing the attempt over after one would run it again on another credential - and
 // errs the same way for anything else this list has not been taught about.
-func isCodexBufferableOutputItem(payload []byte) bool {
-	item := gjson.GetBytes(payload, "item")
+func isCodexBufferableOutputItem(item gjson.Result) bool {
 	switch item.Get("type").String() {
 	case "message":
 		return isCodexEmptyContentList(item.Get("content"))

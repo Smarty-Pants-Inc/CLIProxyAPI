@@ -380,6 +380,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			if codexFrameCommitsUpstreamWork(gjson.GetBytes(payload, "type").String(), payload) {
+				replaySafe = false
+			}
 			if modelErr := modelGuard.Observe(payload); modelErr != nil {
 				return failModelGuard(modelErr)
 			}
@@ -688,8 +691,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			eventType := gjson.GetBytes(payload, "type").String()
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
-			// Bootstrap completion alone does not commit translated downstream output.
-			if !isTerminalEvent && !isCodexBootstrapBufferableEvent(eventType, payload) {
+			if codexFrameCommitsUpstreamWork(eventType, payload) {
 				streamReplaySafe = false
 			}
 			if modelErr := modelGuard.Observe(payload); modelErr != nil {
