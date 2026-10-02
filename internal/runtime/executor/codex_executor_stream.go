@@ -225,7 +225,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					if replaySafe && isCodexOverloadBootstrapFailure(terminalBody) {
+					// A quota refusal (usage_limit_reached, insufficient_quota) also fails over here:
+					// another credential or a lower-priority fallback can still serve (smarty-dev#3200).
+					// ponytail: SSE only. WebSocket quota failover is cut until its disconnect
+					// arbitration lands (smarty-dev#3484).
+					if replaySafe && (isCodexOverloadBootstrapFailure(terminalBody) || isCodexUsageLimitError(terminalBody)) {
 						timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 						timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
 						if !timeoutReached {

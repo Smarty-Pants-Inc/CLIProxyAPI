@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -288,5 +290,54 @@ func TestNonReplayableStopManagerDoesNotReplay(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A failed Home release acknowledgement during teardown must not replace an upstream request
+// stop with a new home_unavailable 503: the stop, its 429 status and its cause stay primary.
+func TestNonReplayableStopSurvivesFailedHomeRelease(t *testing.T) {
+	for _, bootstrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream_bootstrap=%t", bootstrap), func(t *testing.T) {
+			upstream := &Error{HTTPStatus: http.StatusTooManyRequests, Message: "fixture quota exhausted"}
+			executor := &retryContractHomeExecutor{failure: nonReplayableTestStreamStopError{upstream}, streamBootstrap: bootstrap}
+			dispatcher := &accountedHomeExecutionDispatcher{auths: []Auth{
+				{ID: "home-retry-a", Provider: "home-retry-contract", Status: StatusActive},
+				{ID: "home-retry-b", Provider: "home-retry-contract", Status: StatusActive},
+			}}
+			registry := executionregistry.New()
+			unacknowledged := make(chan struct{})
+			var releaseSeen atomic.Bool
+			registry.SetReleaseSink(func(group executionregistry.ReleaseGroup, sequence int64) *executionregistry.ReleaseTicket {
+				releaseSeen.Store(true)
+				return executionregistry.NewReleaseTicket(group, sequence, unacknowledged)
+			})
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{
+				Home:                  internalconfig.HomeConfig{Enabled: true},
+				CredentialConcurrency: internalconfig.CredentialConcurrencyConfig{CPACancelBound: 10 * time.Millisecond},
+			})
+			manager.PublishHomeDispatch(dispatcher, registry, 1)
+			manager.RegisterExecutor(executor)
+
+			retryLimit := -1
+			_, err := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 1, &retryLimit, 0, 0)
+			if !releaseSeen.Load() {
+				t.Fatal("Home release was not attempted")
+			}
+			var homeErr *Error
+			if errors.As(err, &homeErr) && homeErr.Code == "home_unavailable" {
+				t.Fatalf("release failure replaced the upstream stop: %v", err)
+			}
+			var stop interface{ IsRequestStop() bool }
+			if !errors.As(err, &stop) || !stop.IsRequestStop() {
+				t.Fatalf("request-stop marker lost: %T %v", err, err)
+			}
+			if !errors.Is(err, upstream) || statusCodeFromError(err) != http.StatusTooManyRequests {
+				t.Fatalf("original 429 cause lost: %T %v", err, err)
+			}
+			if calls := len(executor.calls); calls != 1 {
+				t.Fatalf("upstream attempts = %d, want 1", calls)
+			}
+		})
 	}
 }

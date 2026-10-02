@@ -638,10 +638,10 @@ func newCodexBootstrapOverloadErr(body []byte) statusErr {
 // stream is a transient capacity rejection that a different credential may be able to serve.
 // Only these failures justify replacing the whole attempt during bootstrap; every other terminal
 // failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
-// A quota refusal (usage_limit_reached, insufficient_quota) also qualifies: another credential,
-// or a lower-priority fallback such as the Claude alias of smarty-dev#3200, can still serve.
+// Quota refusals are not included here: only the SSE executor fails them over (smarty-dev#3200;
+// WebSocket quota failover waits on smarty-dev#3484).
 func isCodexOverloadBootstrapFailure(body []byte) bool {
-	if isCodexModelCapacityError(body) || isCodexUsageLimitError(body) {
+	if isCodexModelCapacityError(body) {
 		return true
 	}
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))

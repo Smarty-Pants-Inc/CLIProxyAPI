@@ -8,24 +8,19 @@ import (
 	"testing"
 	"time"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestCodexZeroTranslatedReplaySafety(t *testing.T) {
 	defer setCodexBootstrapNowForTest(func() time.Time { return time.Unix(1_700_000_000, 0) })()
-	for _, transport := range []string{"sse", "ws", "sse_budget_exhausted", "ws_budget_exhausted"} {
+	for _, transport := range []string{"sse", "sse_budget_exhausted"} {
 		for _, cooling := range []bool{true, false} {
 			for _, quota := range []string{"usage_limit_reached", "insufficient_quota"} {
 				for _, unsafe := range []bool{true, false} {
 					t.Run(fmt.Sprintf("%s/model_cooling=%t/%s/unsafe=%t", transport, cooling, quota, unsafe), func(t *testing.T) {
 						responseID := "resp_sse_replay"
 						tool, identity := codexSSEReplayTool, codexSSEReplayIdentity
-						if strings.HasPrefix(transport, "ws") {
-							responseID = "resp_replay"
-							tool, identity = WSReplayUnsafeTool, WSReplayIdentity
-						}
 						// response.created emits a Gemini chunk and masks the conductor's
 						// zero-payload retry path. None of these nonterminal events do.
 						frames := []string{fmt.Sprintf(`{"type":"response.in_progress","response":{"id":%q}}`, responseID)}
@@ -43,36 +38,22 @@ func TestCodexZeroTranslatedReplaySafety(t *testing.T) {
 						if unsafe {
 							// Unlike identity, searching is not bootstrap-bufferable: it
 							// enters the live loop without committing a Gemini payload.
-							itemID := "tool_replay"
-							if strings.HasPrefix(transport, "sse") {
-								itemID = "search_sse_replay"
-							}
+							itemID := "search_sse_replay"
 							frames = append(frames, fmt.Sprintf(`{"type":"response.web_search_call.searching","item_id":%q,"output_index":0}`, itemID))
 						}
 						var translationState any
 						for _, frame := range frames {
-							chunks := sdktranslator.TranslateStream(context.Background(), sdktranslator.FromString("codex"), sdktranslator.FromString("gemini"), WSReplayModel, nil, nil, []byte("data: "+frame), &translationState)
+							chunks := sdktranslator.TranslateStream(context.Background(), sdktranslator.FromString("codex"), sdktranslator.FromString("gemini"), codexSSEReplayModel, nil, nil, []byte("data: "+frame), &translationState)
 							if len(chunks) != 0 {
 								t.Fatalf("nonterminal fixture must translate to ZERO chunks: frame=%s chunks=%q", frame, chunks)
 							}
 						}
 						frames = append(frames, fmt.Sprintf(`{"type":"response.failed","response":{"id":%q,"status":"failed","error":{"type":%q,"message":"fixture quota exhausted","resets_in_seconds":3600}}}`, responseID, quota))
-						var manager *cliproxyauth.Manager
-						var primaryID string
-						var attempts func() (int32, int32)
-						if strings.HasPrefix(transport, "sse") {
-							var first, second interface{ Load() int32 }
-							manager, first, second, primaryID = codexSSEReplayManager(t, frames, cooling)
-							attempts = func() (int32, int32) { return first.Load(), second.Load() }
-						} else {
-							fixture := WSReplayNewFixture(t, cooling, frames)
-							manager, primaryID = fixture.manager, fixture.primaryID
-							attempts = func() (int32, int32) { return fixture.primaryRequests.Load(), fixture.secondaryRequests.Load() }
-						}
+						manager, firstAttempts, secondAttempts, primaryID := codexSSEReplayManager(t, frames, cooling)
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 						defer cancel()
 						result, err := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{
-							Model: WSReplayModel, Payload: []byte(`{"model":"gpt-5.6-terra","input":[]}`),
+							Model: codexSSEReplayModel, Payload: []byte(`{"model":"gpt-5.6-terra","input":[]}`),
 						}, cliproxyexecutor.Options{
 							SourceFormat: sdktranslator.FromString("codex"), ResponseFormat: sdktranslator.FromString("gemini"), Stream: true,
 						})
@@ -81,7 +62,7 @@ func TestCodexZeroTranslatedReplaySafety(t *testing.T) {
 						if result != nil {
 							payload, streamErr = drainChunks(result)
 						}
-						first, second := attempts()
+						first, second := firstAttempts.Load(), secondAttempts.Load()
 						wantSecond := int32(0)
 						if !unsafe {
 							wantSecond = 1
@@ -136,7 +117,7 @@ func TestCodexZeroTranslatedReplaySafety(t *testing.T) {
 							}
 						}
 						credential, ok := manager.GetByID(primaryID)
-						if !ok || credential.ModelStates[WSReplayModel] == nil || !credential.ModelStates[WSReplayModel].Quota.Exceeded || !credential.ModelStates[WSReplayModel].NextRetryAfter.After(time.Now()) {
+						if !ok || credential.ModelStates[codexSSEReplayModel] == nil || !credential.ModelStates[codexSSEReplayModel].Quota.Exceeded || !credential.ModelStates[codexSSEReplayModel].NextRetryAfter.After(time.Now()) {
 							t.Errorf("primary quota cooldown was lost: %+v", credential)
 						}
 					})

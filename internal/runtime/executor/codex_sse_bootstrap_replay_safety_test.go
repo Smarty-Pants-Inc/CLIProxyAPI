@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	codexSSEReplayModel    = "gpt-5.6-terra"
 	codexSSEReplayPreamble = `{"type":"response.created","response":{"id":"resp_sse_replay","output":[]}}`
 	codexSSEReplayTool     = `{"type":"response.output_item.added","output_index":0,"item":{"id":"search_sse_replay","type":"web_search_call","status":"in_progress"}}`
 	codexSSEReplayIdentity = `{"type":"response.in_progress","response":{"id":"resp_sse_replay","model":"gpt-5.6-terra"}}`

@@ -1174,6 +1174,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if selection != nil {
 				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
+					if isRequestStopError(errStream) {
+						// The upstream stop stays primary; a failed release ack must not replace
+						// its status, cause and reset with a new home_unavailable 503.
+						logEntryWithRequestID(ctx).Warnf("home release after request stop failed: %v", errEnd)
+						return nil, errStream
+					}
 					return nil, errEnd
 				}
 			}
