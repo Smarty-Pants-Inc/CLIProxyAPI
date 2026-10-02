@@ -40,6 +40,7 @@ type UsageReporter struct {
 	accessTokenHash     string
 	authType            string
 	apiKey              string
+	apiKeySHA256        string
 	sessionID           string
 	parentSessionID     string
 	source              string
@@ -85,6 +86,10 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	apiKeySHA256 := ""
+	if cliproxyauth.KeyPolicyFromContext(ctx) != nil {
+		apiKeySHA256 = usage.APIKeyDigest(authenticatedAPIKeyFromContext(ctx))
+	}
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -123,6 +128,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias:           strings.TrimSpace(alias),
 		requestedAt:     time.Now(),
 		apiKey:          apiKey,
+		apiKeySHA256:    apiKeySHA256,
 		sessionID:       sessionID,
 		parentSessionID: parentSessionID,
 		source:          resolveUsageSource(auth, apiKey),
@@ -644,6 +650,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,
+		APIKeySHA256:        r.apiKeySHA256,
 		SessionID:           r.sessionID,
 		ParentSessionID:     r.parentSessionID,
 		AuthID:              r.authID,
@@ -786,6 +793,14 @@ func APIKeyFromContext(ctx context.Context) string {
 	}
 	if cliproxyauth.KeyPolicyFromContext(ctx) != nil {
 		return "[REDACTED]"
+	}
+	return authenticatedAPIKeyFromContext(ctx)
+}
+
+// authenticatedAPIKeyFromContext reads only the authenticated principal, never headers.
+func authenticatedAPIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
 	}
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil {

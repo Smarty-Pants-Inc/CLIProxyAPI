@@ -52,6 +52,8 @@ api-keys:
 # Optional client-key policies (SHA256 of the configured key; exact runtime auth IDs).
 # Codex Responses HTTP/SSE only; other paths, Home/plugins, redirects/retries fail closed.
 # ws-auth must stay true. Nil models/caps are unlimited; [] models/auths and 0 caps deny.
+# Policy additions/removals/changes on existing keys take effect only after restart.
+# New keys added together with a policy take effect on reload.
 # UTC daily counters survive reload, NOT restart. One active operation per key:
 # request overshoot 0; token overshoot <= one operation's input+output. Missing usage exhausts.
 # api-key-policies:

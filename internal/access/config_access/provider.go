@@ -7,18 +7,30 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
-// Register ensures the config-access provider is available to the access manager.
-func Register(cfg *sdkconfig.SDKConfig) {
-	if cfg == nil {
-		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
-		return
+var registrationMu sync.Mutex
+var registeredConfig *config.Config
+
+// Register publishes immutable access policy snapshots. Only initial registration
+// starts a new process lifetime; an empty reload still remembers removed keys.
+func Register(cfg *sdkconfig.SDKConfig, initial ...bool) {
+	registrationMu.Lock()
+	defer registrationMu.Unlock()
+	if len(initial) != 0 && initial[0] {
+		registeredConfig = nil
 	}
+	next := &config.Config{}
+	if cfg != nil {
+		next.SDKConfig = *cfg
+	}
+	registeredConfig = config.PreserveAPIKeyPolicies(registeredConfig, next)
+	cfg = &registeredConfig.SDKConfig
 
 	keys := normalizeKeys(cfg.APIKeys)
 	if len(keys) == 0 {

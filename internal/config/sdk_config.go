@@ -58,6 +58,9 @@ type SDKConfig struct {
 	APIKeys        []string       `yaml:"api-keys" json:"api-keys"`
 	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
 
+	// PolicyReloadState is process-local history, including removed keys. Never persist it.
+	PolicyReloadState map[string]APIKeyPolicyReloadState `yaml:"-" json:"-"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

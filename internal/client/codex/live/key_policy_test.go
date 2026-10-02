@@ -21,7 +21,7 @@ func livePolicyConfig() *config.Config {
 	return &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"owner"}, APIKeyPolicies: []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:])}}}, WebsocketAuth: true}
 }
 
-func TestKeyPolicyActivationClosesRawRelays(t *testing.T) {
+func TestR3KeyPolicyReloadKeepsRawRelays(t *testing.T) {
 	for _, mode := range []string{"direct", "sideband", "pending initialization"} {
 		t.Run(mode, func(t *testing.T) {
 			arrived, proceed := make(chan struct{}), make(chan struct{})
@@ -48,7 +48,9 @@ func TestKeyPolicyActivationClosesRawRelays(t *testing.T) {
 			m := auth.NewManager(nil, nil, nil)
 			m.RegisterExecutor(&captureExecutor{})
 			registerCredential(t, m, &auth.Auth{ID: "A", Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"access_token": "synthetic"}})
-			h := NewHandler(m, nil)
+			baseline := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"owner"}}, WebsocketAuth: true}
+			m.SetConfig(baseline)
+			h := NewHandler(m, baseline)
 			defer h.Close()
 			h.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http")
 			h.sessions.put("call", liveSession{authID: "A", model: defaultLiveModel, ownerPrincipal: "owner", ownerProvider: "config-api-key"})
@@ -84,8 +86,8 @@ func TestKeyPolicyActivationClosesRawRelays(t *testing.T) {
 					t.Fatal(err)
 				}
 				close(proceed)
-				if err := <-result; err == nil {
-					t.Fatal("policy activation allowed pending initialization")
+				if err := <-result; err != nil {
+					t.Fatalf("deferred policy closed pending initialization: %v", err)
 				}
 				return
 			}
@@ -106,14 +108,14 @@ func TestKeyPolicyActivationClosesRawRelays(t *testing.T) {
 			}
 			_ = conn.WriteMessage(websocket.TextMessage, []byte("after"))
 			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-			if _, body, err := conn.ReadMessage(); err == nil {
-				t.Fatalf("post-policy frame relayed: %q", body)
+			if _, body, err := conn.ReadMessage(); err != nil || string(body) != "after" {
+				t.Fatalf("deferred policy changed raw relay: body=%q err=%v", body, err)
 			}
 		})
 	}
 }
 
-func TestKeyPolicyOwnerHangupIsLocal(t *testing.T) {
+func TestR3KeyPolicyOwnerHangupRefused(t *testing.T) {
 	for _, owner := range []string{"other", "owner"} {
 		m := auth.NewManager(nil, nil, nil)
 		m.SetConfig(livePolicyConfig())
@@ -131,8 +133,8 @@ func TestKeyPolicyOwnerHangupIsLocal(t *testing.T) {
 		c.Set("accessProvider", "config-api-key")
 		h.HandleHangup(c)
 		c.Writer.WriteHeaderNow()
-		if owner == "owner" && (!closed || rr.Code != 204) {
-			t.Fatalf("owner cleanup: closed=%t status=%d", closed, rr.Code)
+		if owner == "owner" && (closed || rr.Code != 503 || !strings.Contains(rr.Body.String(), "api_key_policy_unavailable")) {
+			t.Fatalf("restricted hangup touched resource: closed=%t status=%d body=%s", closed, rr.Code, rr.Body.String())
 		}
 		if owner == "other" && (closed || rr.Code != 403) {
 			t.Fatalf("foreign cleanup: closed=%t status=%d", closed, rr.Code)

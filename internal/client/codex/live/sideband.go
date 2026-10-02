@@ -308,6 +308,9 @@ const (
 
 // HandleSideband relays live session sideband WebSocket frames bidirectionally.
 func (h *Handler) HandleSideband(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.authManager == nil || h.sessions == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex live sideband unavailable")
 		return
@@ -346,12 +349,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		writeRealtimeError(c, http.StatusForbidden, "Realtime call belongs to another API principal", "invalid_request_error", "realtime_call_scope_mismatch")
 		return
 	}
-	ctx, rawResources, releaseRaw, allowed := h.trackRawRelay(c)
-	if !allowed {
-		h.sessions.release(session)
-		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
-		return
-	}
+	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
 	defer releaseRaw()
 	consumeSession := false
 	defer func() {

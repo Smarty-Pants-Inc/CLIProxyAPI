@@ -58,7 +58,7 @@ func (m *Manager) KeyPolicies(key string) []config.APIKeyPolicy {
 }
 
 // ponytail: reuse the authenticated principal, never re-read competing client headers.
-// This also fences sockets opened before a policy was enabled on their key.
+// Restricted clients cannot enter SDK raw execution without policy admission.
 func (m *Manager) MissingKeyPolicy(ctx context.Context) bool {
 	if m == nil || ctx == nil || KeyPolicyFromContext(ctx) != nil {
 		return false

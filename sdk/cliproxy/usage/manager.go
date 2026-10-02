@@ -2,6 +2,8 @@ package usage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
@@ -30,10 +32,13 @@ type Record struct {
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
-	ExecutorType    string
-	Model           string
-	Alias           string
-	APIKey          string
+	ExecutorType string
+	Model        string
+	Alias        string
+	APIKey       string
+	// APIKeySHA256 preserves the authenticated client identity for native accounting
+	// when APIKey is redacted. Native consumers must not hash this digest again.
+	APIKeySHA256    string
 	SessionID       string
 	ParentSessionID string
 	AuthID          string
@@ -410,6 +415,9 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	}
 	withoutPlugins := ctx != nil && ctx.Value(withoutPluginsKey{}) == true
 	if withoutPlugins {
+		if record.APIKeySHA256 == "" {
+			record.APIKeySHA256 = APIKeyDigest(record.APIKey)
+		}
 		record.APIKey = "[REDACTED]"
 	}
 	observeRecord(ctx, record)
@@ -482,6 +490,15 @@ func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 
 // RegisterNamedPlugin registers or replaces a named plugin on the default manager.
 func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
+
+// APIKeyDigest identifies an authenticated client without retaining its key.
+func APIKeyDigest(key string) string {
+	if key == "" || key == "[REDACTED]" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(digest[:])
+}
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }

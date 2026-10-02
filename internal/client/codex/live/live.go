@@ -4,8 +4,6 @@ package live
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,7 +58,7 @@ type Handler struct {
 	mediaRelayConfig     config.CodexLiveMediaRelayConfig
 	mediaRelayConfigured bool
 	mediaLimiter         *mediaSessionLimiter
-	rawRelayOwners       map[*liveSessionResources]string
+	rawRelayOwners       map[*liveSessionResources]struct{}
 }
 
 // NewHandler creates a Codex live session handler.
@@ -90,19 +88,10 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	h.mediaRelayMu.Lock()
 	previousConfig := h.mediaRelayConfig
 	previouslyConfigured := h.mediaRelayConfigured
-	h.cfg = cfg
-	var retire []*liveSessionResources
-	for resources, digest := range h.rawRelayOwners {
-		if hasRawKeyPolicy(cfg, digest) {
-			retire = append(retire, resources)
-		}
-	}
+	h.cfg = config.PreserveAPIKeyPolicies(h.cfg, cfg)
 	if previouslyConfigured && reflect.DeepEqual(previousConfig, relayConfig) {
 		currentErr := h.mediaRelayErr
 		h.mediaRelayMu.Unlock()
-		for _, resources := range retire {
-			resources.close()
-		}
 		return currentErr
 	}
 	if h.mediaLimiter == nil {
@@ -118,10 +107,6 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	h.mediaRelayConfig = relayConfig
 	h.mediaRelayConfigured = true
 	h.mediaRelayMu.Unlock()
-	for _, resources := range retire {
-		resources.close()
-	}
-
 	if relayErr == nil && (previouslyConfigured || relayConfig.Enabled) {
 		message := "codex live media relay configured"
 		if previouslyConfigured {
@@ -132,34 +117,44 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	return relayErr
 }
 
-func hasRawKeyPolicy(cfg *config.Config, digest string) bool {
-	if cfg != nil {
-		for _, p := range cfg.APIKeyPolicies {
-			if p.KeySHA256 == digest {
-				return true
+// refuseKeyPolicy runs before parsing, claiming sessions, creating secrets or dialing.
+func (h *Handler) refuseKeyPolicy(c *gin.Context) bool {
+	owner, _ := requestOwner(c)
+	restricted := false
+	if h != nil {
+		if h.authManager != nil {
+			restricted = len(h.authManager.KeyPolicies(owner)) != 0
+		}
+		if cfg := h.currentConfig(); cfg != nil {
+			for _, p := range cfg.APIKeyPolicies {
+				if p.KeySHA256 == config.APIKeyDigest(owner) {
+					restricted = true
+				}
 			}
 		}
 	}
-	return false
+	if metadata, ok := c.Get("accessMetadata"); ok {
+		if values, ok := metadata.(map[string]string); ok && values["key_policy"] != "" {
+			restricted = true
+		}
+	}
+	if restricted {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+	}
+	return restricted
 }
 
-// Register before dialing, so reload cancels pending handshakes as well as relays.
-// add() immediately closes resources that arrive after their owner was cut off.
-func (h *Handler) trackRawRelay(c *gin.Context) (context.Context, *liveSessionResources, func(), bool) {
-	owner, _ := requestOwner(c)
-	b := sha256.Sum256([]byte(owner))
-	digest := hex.EncodeToString(b[:])
+// Track only accepted unpolicied relays for server shutdown. Policy hot-activation
+// is unsupported; reload never closes a previously admitted raw session.
+func (h *Handler) trackRawRelay(c *gin.Context) (context.Context, *liveSessionResources, func()) {
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	resources := &liveSessionResources{}
 	resources.add(func() error { cancel(); return nil })
 	h.mediaRelayMu.Lock()
-	allowed := !hasRawKeyPolicy(h.cfg, digest) && len(h.authManager.KeyPolicies(owner)) == 0
-	if allowed {
-		if h.rawRelayOwners == nil {
-			h.rawRelayOwners = make(map[*liveSessionResources]string)
-		}
-		h.rawRelayOwners[resources] = digest
+	if h.rawRelayOwners == nil {
+		h.rawRelayOwners = make(map[*liveSessionResources]struct{})
 	}
+	h.rawRelayOwners[resources] = struct{}{}
 	h.mediaRelayMu.Unlock()
 	release := func() {
 		h.mediaRelayMu.Lock()
@@ -167,10 +162,7 @@ func (h *Handler) trackRawRelay(c *gin.Context) (context.Context, *liveSessionRe
 		h.mediaRelayMu.Unlock()
 		resources.close()
 	}
-	if !allowed {
-		release()
-	}
-	return ctx, resources, release, allowed
+	return ctx, resources, release
 }
 
 func liveMediaConfigLogFields(relayConfig config.CodexLiveMediaRelayConfig) log.Fields {
@@ -246,16 +238,15 @@ func (h *Handler) Close() {
 
 // Handle forwards a WebRTC SDP bootstrap request to the Codex realtime calls endpoint.
 func (h *Handler) Handle(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.authManager == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable")
 		return
 	}
 
-	ctx, rawResources, releaseRaw, allowed := h.trackRawRelay(c)
-	if !allowed {
-		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
-		return
-	}
+	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
 	rawRetained := false
 	defer func() {
 		if !rawRetained {

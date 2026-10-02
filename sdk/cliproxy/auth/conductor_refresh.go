@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -414,6 +415,28 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	return false
 }
 
+// refreshBindingChanged fences refresh results against ordinary same-ID material
+// replacement. Generation alone cannot distinguish replacement from note/proxy edits.
+// Callers compare the base snapshot with current state under the manager lock.
+func refreshBindingChanged(base, current *Auth) bool {
+	if base == nil || current == nil {
+		return false
+	}
+	if base.ID != current.ID || base.Provider != current.Provider {
+		return true
+	}
+	for _, key := range []string{
+		"access_token", "accessToken", "refresh_token", "refreshToken", "id_token", "idToken", "api_key",
+		"account_id", "accountId", "email", "project_id", "projectId", "organization_id", "organizationId",
+		"dca_token", "base_url", "api_base_url",
+	} {
+		if !reflect.DeepEqual(base.Metadata[key], current.Metadata[key]) || base.Attributes[key] != current.Attributes[key] {
+			return true
+		}
+	}
+	return false
+}
+
 // ClearUnauthorizedModelStates resets model states whose last error was an unauthorized failure.
 func ClearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	return clearUnauthorizedModelStates(auth, now)
@@ -528,6 +551,8 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		// Use the same effective provider key as request execution so OpenAI-compat
 		// auths registered under namespaced keys still resolve for refresh.
 		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
+		// Capture the refresh base while mutable runtime state is still locked.
+		auth = auth.Clone()
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
@@ -541,7 +566,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		}
 	}
 
-	base := auth.Clone()
+	base := auth
 	updated, err := exec.Refresh(ctx, base.Clone())
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
@@ -554,7 +579,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
+			if current.RegistrationEpoch != base.RegistrationEpoch || refreshBindingChanged(base, current) {
 				m.mu.Unlock()
 				return nil, err
 			}

@@ -65,7 +65,7 @@ func TestKeyPolicyHTTP(t *testing.T) {
 		{name: "socket Responses", allowed: "A", want: 503, cap: 10},
 		{name: "socket Realtime", allowed: "A", path: "/v1/realtime", want: 503, cap: 10},
 		{name: "socket sideband", allowed: "A", path: "/v1/live/call", want: 503, cap: 10},
-		{name: "local hangup", allowed: "A", path: "/v1/realtime/calls/call/hangup", want: 404, cap: 10},
+		{name: "restricted hangup", allowed: "A", path: "/v1/realtime/calls/call/hangup", want: 503, cap: 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32

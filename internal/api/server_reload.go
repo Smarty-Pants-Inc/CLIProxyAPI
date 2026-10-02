@@ -62,6 +62,13 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		_ = yaml.Unmarshal(s.oldConfigYaml, &oldCfg)
 	}
 
+	cfg = config.PreserveAPIKeyPolicies(s.cfg, cfg)
+	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		s.cfg = config.RetainAPIKeyPolicyWarnings(s.cfg, cfg)
+		log.WithError(errValidate).Warn("rejected config update with invalid API key policies")
+		return false
+	}
+
 	// Update request logger enabled state if it has changed
 	previousRequestLog := false
 	if oldCfg != nil {
@@ -122,6 +129,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	}
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
+		s.handlers.AuthManager.SetConfig(cfg)
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
 

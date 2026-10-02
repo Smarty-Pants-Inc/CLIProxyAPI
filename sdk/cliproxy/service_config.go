@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -119,6 +120,13 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	}
 
 	s.cfgMu.Lock()
+	newCfg = internalconfig.PreserveAPIKeyPolicies(s.cfg, newCfg)
+	if errValidate := newCfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		s.cfg = internalconfig.RetainAPIKeyPolicyWarnings(s.cfg, newCfg)
+		s.cfgMu.Unlock()
+		log.WithError(errValidate).Warn("rejected config update with invalid API key policies")
+		return configCommit{}
+	}
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
 	s.configSequence++

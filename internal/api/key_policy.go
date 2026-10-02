@@ -47,10 +47,6 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	}
 	unavailable := &auth.Error{HTTPStatus: 503, Message: "api_key_policy_unavailable"}
 	path := c.Request.URL.Path
-	if c.Request.Method == http.MethodPost && c.FullPath() == "/v1/realtime/calls/:call_id/hangup" {
-		c.Set("keyPolicyLocalHangup", true)
-		return func() {}, true
-	}
 	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses") {
 		return fail(unavailable)
 	}

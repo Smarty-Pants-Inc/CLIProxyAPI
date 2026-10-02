@@ -31,6 +31,9 @@ func (h *Handler) HandleRealtimeWebsocket(c *gin.Context) {
 
 // HandleDirectWebsocket relays a standard Realtime WebSocket through Codex OAuth.
 func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.authManager == nil {
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable", "server_error", "codex_auth_unavailable")
 		return
@@ -41,11 +44,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		return
 	}
 
-	ctx, rawResources, releaseRaw, allowed := h.trackRawRelay(c)
-	if !allowed {
-		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
-		return
-	}
+	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
 	defer releaseRaw()
 	requestedModel := strings.TrimSpace(c.Query("model"))
 	if requestedModel == "" {

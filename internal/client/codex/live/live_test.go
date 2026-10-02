@@ -482,6 +482,9 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	runtimeConfig := &config.Config{}
 	runtimeConfig.ProxyURL = "http://global-proxy.example:8080"
+	runtimeConfig.APIKeys = []string{"owner"}
+	runtimeConfig.WebsocketAuth = true
+	manager.SetConfig(runtimeConfig)
 	handler := NewHandler(manager, runtimeConfig)
 	handler.mediaRelay = mediaRelay
 	router := gin.New()
@@ -539,8 +542,8 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	if err := handler.UpdateConfig(livePolicyConfig()); err != nil {
 		t.Fatal(err)
 	}
-	if !mediaSession.closed.Load() {
-		t.Fatal("policy activation left retained WebRTC relay open")
+	if mediaSession.closed.Load() {
+		t.Fatal("deferred policy closed retained WebRTC relay")
 	}
 	mediaSession.closeHandler("test_closed")
 	if !mediaSession.closed.Load() {
