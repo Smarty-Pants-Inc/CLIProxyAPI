@@ -403,6 +403,9 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 // quota/plan-limit exhaustion (error.type == "usage_limit_reached"). This is the
 // signal Codex emits when a credential's usage quota is depleted, and it carries
 // reset timing (resets_at/resets_in_seconds) parsed by parseCodexRetryAfter.
+// OpenAI's insufficient_quota (as type or code) is the same depletion; in a stream it arrives
+// as response.failed, and treating it as a usage limit lets the request fail over to another
+// credential before the client sees it (smarty-dev#3200).
 // Transient per-minute rate limits (rate_limit_error/rate_limit_exceeded) are
 // intentionally excluded, as they should be retried rather than cooled down.
 func isCodexUsageLimitError(errorBody []byte) bool {
@@ -412,9 +415,12 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 	candidates := []string{
 		gjson.GetBytes(errorBody, "error.type").String(),
 		gjson.GetBytes(errorBody, "type").String(),
+		gjson.GetBytes(errorBody, "error.code").String(),
+		gjson.GetBytes(errorBody, "code").String(),
 	}
 	for _, candidate := range candidates {
-		if strings.EqualFold(strings.TrimSpace(candidate), "usage_limit_reached") {
+		switch strings.ToLower(strings.TrimSpace(candidate)) {
+		case "usage_limit_reached", "insufficient_quota":
 			return true
 		}
 	}
@@ -612,8 +618,10 @@ func newCodexBootstrapOverloadErr(body []byte) statusErr {
 // stream is a transient capacity rejection that a different credential may be able to serve.
 // Only these failures justify replacing the whole attempt during bootstrap; every other terminal
 // failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
+// A quota refusal (usage_limit_reached, insufficient_quota) also qualifies: another credential,
+// or a lower-priority fallback such as the Claude alias of smarty-dev#3200, can still serve.
 func isCodexOverloadBootstrapFailure(body []byte) bool {
-	if isCodexModelCapacityError(body) {
+	if isCodexModelCapacityError(body) || isCodexUsageLimitError(body) {
 		return true
 	}
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
