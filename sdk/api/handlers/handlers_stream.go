@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -534,6 +535,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	bootstrapEligible := func(err error) bool {
+		var stop interface{ IsRequestStop() bool }
+		if errors.As(err, &stop) && stop != nil && stop.IsRequestStop() {
+			return false
+		}
 		status := statusFromError(err)
 		if status == 0 {
 			return true
