@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -43,7 +44,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	// effects. Once one arrives, no synchronous error may replay this request.
 	replaySafe := true
 	defer func() {
-		if err != nil && !replaySafe {
+		var stop interface{ IsRequestStop() bool }
+		if err != nil && !replaySafe && !errors.As(err, &stop) {
 			err = helps.WrapCodexNonReplayableError(err)
 		}
 	}()
@@ -361,6 +363,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if !modelGuard.Authoritative() {
 		closeBootstrapBody()
 		if bootstrapTerminalErr != nil {
+			if !replaySafe {
+				// A genuine upstream refusal (e.g. quota) stops replay but keeps its own
+				// cooling scope, so the exhausted credential still cools.
+				return nil, helps.WrapCodexNonReplayableStreamError(bootstrapTerminalErr)
+			}
 			return nil, bootstrapTerminalErr
 		}
 		return nil, modelGuard.Missing()

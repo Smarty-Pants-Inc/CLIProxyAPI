@@ -250,16 +250,17 @@ func TestCodexSSEBootstrapReplaySafety_UnverifiedToolErrorsDoNotRetryOrLeak(t *t
 		tail          []string
 		modelMismatch bool
 		readError     bool
+		upstreamQuota bool
 	}{
 		{name: "wrong_identity", tail: []string{`{"type":"response.in_progress","response":{"model":"wrong-model"}}`}, modelMismatch: true},
 		{name: "missing_terminal_identity", tail: []string{`{"type":"response.completed","response":{"output":[]}}`}, modelMismatch: true},
 		{name: "missing_identity_eof"},
-		{name: "missing_identity_usage_quota", tail: []string{codexSSEReplayQuotaEvent(codexSSEReplayQuotas[0].body)}},
-		{name: "missing_identity_quota_type", tail: []string{codexSSEReplayQuotaEvent(codexSSEReplayQuotas[1].body)}},
-		{name: "missing_identity_quota_code", tail: []string{codexSSEReplayQuotaEvent(codexSSEReplayQuotas[2].body)}},
+		{name: "missing_identity_usage_quota", tail: []string{codexSSEReplayQuotaEvent(codexSSEReplayQuotas[0].body)}, upstreamQuota: true},
+		{name: "missing_identity_quota_type", tail: []string{codexSSEReplayQuotaEvent(codexSSEReplayQuotas[1].body)}, upstreamQuota: true},
+		{name: "missing_identity_quota_code", tail: []string{codexSSEReplayQuotaEvent(codexSSEReplayQuotas[2].body)}, upstreamQuota: true},
 		// Explicit error.status is not a separate SSE HTTP-status path. It must
 		// not reopen retries once the preceding server-tool frame made replay unsafe.
-		{name: "explicit_error_status", tail: []string{`{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"quota"}}`}},
+		{name: "explicit_error_status", tail: []string{`{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"quota"}}`}, upstreamQuota: true},
 		{name: "body_read_error", readError: true},
 		{name: "unverified_frame_budget", tail: make([]string, codexBootstrapMaxBufferedFrames)},
 	}
@@ -278,9 +279,15 @@ func TestCodexSSEBootstrapReplaySafety_UnverifiedToolErrorsDoNotRetryOrLeak(t *t
 			if err == nil {
 				t.Fatal("unverified unsafe attempt must terminate with a synchronous error")
 			}
-			var requestScoped interface{ IsRequestScoped() bool }
-			if !errors.As(err, &requestScoped) || !requestScoped.IsRequestScoped() {
+			var stop interface{ IsRequestStop() bool }
+			if !errors.As(err, &stop) || !stop.IsRequestStop() {
 				t.Errorf("unsafe synchronous error must prevent credential retries: %T %v", err, err)
+			}
+			// Upstream quota refusals keep their own cooling scope (see
+			// UnverifiedToolQuotaKeepsCooldown); local failures stay request-scoped.
+			var requestScoped interface{ IsRequestScoped() bool }
+			if gotScoped := errors.As(err, &requestScoped) && requestScoped.IsRequestScoped(); gotScoped == tc.upstreamQuota {
+				t.Errorf("request-scoped = %t, want %t: %T %v", gotScoped, !tc.upstreamQuota, err, err)
 			}
 			if tc.readError && !errors.Is(err, io.ErrUnexpectedEOF) {
 				t.Errorf("non-replayable wrapper must preserve read error via Unwrap: %T %v", err, err)
@@ -292,5 +299,57 @@ func TestCodexSSEBootstrapReplaySafety_UnverifiedToolErrorsDoNotRetryOrLeak(t *t
 				}
 			}
 		})
+	}
+}
+
+// An unverified unsafe quota refusal must stop this turn without dropping the
+// scheduler's quota state, so the next independent request picks a healthy credential.
+func TestCodexSSEBootstrapReplaySafety_UnverifiedToolQuotaKeepsCooldown(t *testing.T) {
+	defer setCodexBootstrapNowForTest(func() time.Time { return time.Unix(1_700_000_000, 0) })()
+	for _, modelLevelCooling := range []bool{true, false} {
+		for _, quota := range codexSSEReplayQuotas {
+			t.Run(fmt.Sprintf("model_cooling=%t/%s", modelLevelCooling, quota.name), func(t *testing.T) {
+				manager, firstAttempts, secondAttempts, firstID := codexSSEReplayManager(t, []string{
+					codexSSEReplayPreamble, codexSSEReplayTool, codexSSEReplayQuotaEvent(quota.body),
+				}, modelLevelCooling)
+				result, err := codexSSEReplayExecute(t, manager)
+				if result != nil {
+					payload, streamErr := drainChunks(result)
+					t.Fatalf("unverified stream escaped: payload=%s streamErr=%v", payload, streamErr)
+				}
+				if firstAttempts.Load() != 1 || secondAttempts.Load() != 0 {
+					t.Fatalf("unsafe turn attempts = %d,%d; want 1,0", firstAttempts.Load(), secondAttempts.Load())
+				}
+				var stop interface{ IsRequestStop() bool }
+				if !errors.As(err, &stop) || !stop.IsRequestStop() {
+					t.Errorf("unsafe quota lost hard stop: %T %v", err, err)
+				}
+				codexSSEReplayAssertQuota(t, err, !modelLevelCooling, quota.retryAfter)
+
+				auth, ok := manager.GetByID(firstID)
+				if !ok {
+					t.Fatal("primary fixture credential disappeared")
+				}
+				state := auth.ModelStates[codexSSEReplayModel]
+				if state == nil || !state.Quota.Exceeded || !state.NextRetryAfter.After(time.Now()) {
+					t.Errorf("model quota cooldown not recorded: %+v", state)
+				}
+				if credentialQuota := auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota"; credentialQuota != !modelLevelCooling {
+					t.Errorf("credential quota = %t (%+v); want %t", credentialQuota, auth.Quota, !modelLevelCooling)
+				}
+
+				next, errNext := codexSSEReplayExecute(t, manager)
+				if errNext != nil || next == nil {
+					t.Fatalf("next independent request failed: %v", errNext)
+				}
+				payload, streamErr := drainChunks(next)
+				if firstAttempts.Load() != 1 || secondAttempts.Load() != 1 {
+					t.Errorf("next request attempts = %d,%d; want exhausted credential skipped (1,1)", firstAttempts.Load(), secondAttempts.Load())
+				}
+				if streamErr != nil || !strings.Contains(payload, `"type":"response.completed"`) {
+					t.Errorf("next request did not complete on healthy credential: payload=%s err=%v", payload, streamErr)
+				}
+			})
+		}
 	}
 }
