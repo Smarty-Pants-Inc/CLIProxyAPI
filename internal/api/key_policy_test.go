@@ -49,6 +49,8 @@ func TestKeyPolicyHTTP(t *testing.T) {
 		{name: "output only", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10},
 		{name: "input only SSE", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10, stream: true},
 		{name: "output only SSE", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10, stream: true},
+		{name: "mixed aliases", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10},
+		{name: "mixed aliases SSE", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10, stream: true},
 		{name: "token meter", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10},
 		{name: "request meter", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 1},
 		{name: "allowed", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10},
@@ -110,6 +112,9 @@ func TestKeyPolicyHTTP(t *testing.T) {
 					usage = `{"input_tokens":1}`
 				} else if strings.HasPrefix(tc.name, "output only") {
 					usage = `{"output_tokens":1}`
+				} else if strings.HasPrefix(tc.name, "mixed aliases") {
+					// F31: canonical counts total 200; conflicting legacy aliases total 2.
+					usage = `{"input_tokens":100,"output_tokens":100,"prompt_tokens":1,"completion_tokens":1}`
 				}
 				fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"gpt-6.1-sol\",\"output\":[],\"usage\":%s}}\n\n", usage)
 			}))
@@ -120,7 +125,7 @@ func TestKeyPolicyHTTP(t *testing.T) {
 			if !tc.legacy {
 				cfg.APIKeyPolicies = []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{tc.allowed}, AllowedModels: &models, DailyRequestCap: &tc.cap}}
 			}
-			if tc.name == "partial usage" || strings.Contains(tc.name, "only") {
+			if tc.name == "partial usage" || strings.Contains(tc.name, "only") || strings.HasPrefix(tc.name, "mixed aliases") {
 				cfg.APIKeyPolicies[0].DailyTokenCap = &tc.cap
 			}
 			if tc.name == "token meter" {
@@ -167,7 +172,7 @@ func TestKeyPolicyHTTP(t *testing.T) {
 			if tc.want == 200 || tc.name == "no retry" || tc.name == "redirect" {
 				wantCalls = 1
 			}
-			if tc.name == "token meter" || tc.name == "request meter" || tc.name == "partial usage" || strings.Contains(tc.name, "only") {
+			if tc.name == "token meter" || tc.name == "request meter" || tc.name == "partial usage" || strings.Contains(tc.name, "only") || strings.HasPrefix(tc.name, "mixed aliases") {
 				rr = httptest.NewRecorder()
 				req = httptest.NewRequest("POST", path, strings.NewReader(`{"model":"gpt-6.1-sol","input":"hello"}`))
 				req.Header.Set("Authorization", "Bearer test-key")

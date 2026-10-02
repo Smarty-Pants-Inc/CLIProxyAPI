@@ -9,8 +9,12 @@ import (
 
 // PolicyModel rejects ambiguous JSON and tools that can execute a second model.
 func PolicyModel(body []byte) (string, error) {
+	// F29: bounded whole-value validation first, then a depth-bounded duplicate walk.
+	if !json.Valid(body) {
+		return "", errDeepJSON
+	}
 	d := json.NewDecoder(bytes.NewReader(body))
-	if err := uniqueJSON(d); err != nil {
+	if err := uniqueJSON(d, 0); err != nil {
 		return "", err
 	}
 	if _, err := d.Token(); err != io.EOF {
@@ -41,7 +45,16 @@ func PolicyModel(body []byte) (string, error) {
 	return model, nil
 }
 
-func uniqueJSON(d *json.Decoder) error {
+// maxPolicyJSONDepth bounds nesting in policied request bodies; real Responses
+// bodies (including tool JSON schemas) stay far below it.
+const maxPolicyJSONDepth = 512
+
+var errDeepJSON = fmt.Errorf("invalid or too deeply nested JSON")
+
+func uniqueJSON(d *json.Decoder, depth int) error {
+	if depth > maxPolicyJSONDepth {
+		return errDeepJSON
+	}
 	token, err := d.Token()
 	if err != nil {
 		return err
@@ -63,7 +76,7 @@ func uniqueJSON(d *json.Decoder) error {
 			}
 			seen[name] = true
 		}
-		if err := uniqueJSON(d); err != nil {
+		if err := uniqueJSON(d, depth+1); err != nil {
 			return err
 		}
 	}

@@ -1010,7 +1010,20 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 		n, err := strconv.ParseInt(node.Raw, 10, 64)
 		return err == nil && n >= 0
 	}
-	detail.Incomplete = !known(usageNode.Get("total_tokens")) && !(known(usageNode.Get("input_tokens")) && known(usageNode.Get("output_tokens")))
+	// F31: validate the same nodes parseOpenAIStyleUsageNode charges (aliases first),
+	// and never trust a body whose canonical and alias counts disagree.
+	counted := func(alias, canonical string) gjson.Result {
+		if node := usageNode.Get(alias); node.Exists() {
+			return node
+		}
+		return usageNode.Get(canonical)
+	}
+	conflict := func(alias, canonical string) bool {
+		a, c := usageNode.Get(alias), usageNode.Get(canonical)
+		return a.Exists() && c.Exists() && a.Raw != c.Raw
+	}
+	detail.Incomplete = conflict("prompt_tokens", "input_tokens") || conflict("completion_tokens", "output_tokens") ||
+		(!known(usageNode.Get("total_tokens")) && !(known(counted("prompt_tokens", "input_tokens")) && known(counted("completion_tokens", "output_tokens"))))
 	detail.ResponseServiceTier = responseServiceTier
 	return detail, true
 }

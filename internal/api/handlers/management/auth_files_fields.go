@@ -96,6 +96,11 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 	if coreauth.IsConfigAPIKeyAuth(targetAuth) {
 		h.mu.Lock()
+		if h.policyConfigFrozenLocked() {
+			h.mu.Unlock()
+			c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+			return
+		}
 		handled, errToggle := toggleConfigAPIKeyExcludedAll(h.cfg, targetAuth, *req.Disabled)
 		if errToggle != nil {
 			h.mu.Unlock()
