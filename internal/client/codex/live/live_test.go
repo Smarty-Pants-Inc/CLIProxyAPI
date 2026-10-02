@@ -254,6 +254,20 @@ func (r *fakeMediaRelay) NewSession(_ context.Context, clientOffer string, route
 	return r.session, r.upstreamOffer, r.err
 }
 
+// echoMediaRelay forwards both SDPs unchanged. The gateway now refuses SDP
+// passthrough (F24B cut), so tests of the shared call path run on this relay.
+type echoMediaRelay struct{}
+
+func (echoMediaRelay) NewSession(_ context.Context, offer string, _ mediaSessionRoute) (mediaRelaySession, string, error) {
+	return &echoMediaSession{}, offer, nil
+}
+
+type echoMediaSession struct{ fakeMediaSession }
+
+func (s *echoMediaSession) AcceptUpstreamAnswer(_ context.Context, answer string) (string, error) {
+	return answer, nil
+}
+
 type fakeMediaSession struct {
 	upstreamAnswer string
 	callIDAtAccept string
@@ -334,6 +348,7 @@ func TestHandlerRewritesLiveCallAndSchedulesOAuth(t *testing.T) {
 	})
 
 	handler := NewHandler(manager, nil)
+	handler.mediaRelay = echoMediaRelay{}
 	router := gin.New()
 	router.POST("/v1/live", handler.Handle)
 
@@ -482,10 +497,13 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	runtimeConfig := &config.Config{}
 	runtimeConfig.ProxyURL = "http://global-proxy.example:8080"
+	runtimeConfig.APIKeys = []string{"owner"}
+	runtimeConfig.WebsocketAuth = true
+	manager.SetConfig(runtimeConfig)
 	handler := NewHandler(manager, runtimeConfig)
 	handler.mediaRelay = mediaRelay
 	router := gin.New()
-	router.POST("/v1/live", handler.Handle)
+	router.POST("/v1/live", func(c *gin.Context) { c.Set("userApiKey", "owner"); handler.Handle(c) })
 
 	const boundary = "media-relay-boundary"
 	body := multipartBody(boundary, "v=0\r\no=desktop-offer\r\n", `{"model":"gpt-live-1-codex"}`)
@@ -535,6 +553,12 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	if mediaSession.closeHandler == nil {
 		t.Fatal("media session close handler was not installed")
+	}
+	if err := handler.UpdateConfig(livePolicyConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if mediaSession.closed.Load() {
+		t.Fatal("deferred policy closed retained WebRTC relay")
 	}
 	mediaSession.closeHandler("test_closed")
 	if !mediaSession.closed.Load() {
@@ -695,6 +719,7 @@ func TestHandlerForwardsUnauthorizedHomeResponseWithoutRefresh(t *testing.T) {
 	}
 	manager.RegisterExecutor(executor)
 	handler := NewHandler(manager, nil)
+	handler.mediaRelay = echoMediaRelay{}
 	router := gin.New()
 	router.POST("/v1/live", handler.Handle)
 
@@ -772,6 +797,7 @@ func TestHandlerReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
 			manager.RegisterExecutor(executor)
 			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), authID)
 			handler := NewHandler(manager, runtimeConfig)
+			handler.mediaRelay = echoMediaRelay{}
 			router := gin.New()
 			var apiResponse []byte
 			router.Use(func(c *gin.Context) {
@@ -814,6 +840,7 @@ func TestHandlerUsesLiveModelForHomeDispatch(t *testing.T) {
 	manager.RegisterExecutor(executor)
 
 	handler := NewHandler(manager, nil)
+	handler.mediaRelay = echoMediaRelay{}
 	router := gin.New()
 	router.POST("/v1/live", handler.Handle)
 
@@ -860,6 +887,7 @@ func TestHomeLiveSessionExpiryReleasesSelection(t *testing.T) {
 	})
 
 	handler := NewHandler(manager, nil)
+	handler.mediaRelay = echoMediaRelay{}
 	handler.sessions.lifetime = 20 * time.Millisecond
 	router := gin.New()
 	router.POST("/v1/live", handler.Handle)

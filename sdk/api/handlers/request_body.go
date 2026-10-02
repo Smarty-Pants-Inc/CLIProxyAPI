@@ -13,7 +13,11 @@ import (
 
 // ReadRequestBody reads the incoming request body and decodes supported
 // Content-Encoding values before handlers inspect JSON fields.
-func ReadRequestBody(c *gin.Context) ([]byte, error) {
+func ReadRequestBody(c *gin.Context) ([]byte, error) { return ReadRequestBodyLimit(c, 0) }
+
+// ReadRequestBodyLimit is ReadRequestBody with every decoded layer capped at
+// limit bytes while it is decoded; zero means no cap.
+func ReadRequestBodyLimit(c *gin.Context, limit int64) ([]byte, error) {
 	raw, err := c.GetRawData()
 	if err != nil {
 		return nil, err
@@ -27,7 +31,7 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) {
 		return raw, nil
 	}
 
-	decoded, err := decodeRequestBody(raw, encoding)
+	decoded, err := decodeRequestBody(raw, encoding, limit)
 	if err != nil {
 		if json.Valid(raw) {
 			return raw, nil
@@ -37,7 +41,7 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) {
 	return decoded, nil
 }
 
-func decodeRequestBody(raw []byte, encoding string) ([]byte, error) {
+func decodeRequestBody(raw []byte, encoding string, limit int64) ([]byte, error) {
 	parts := strings.Split(encoding, ",")
 	body := raw
 	for i := len(parts) - 1; i >= 0; i-- {
@@ -46,7 +50,7 @@ func decodeRequestBody(raw []byte, encoding string) ([]byte, error) {
 		case "", "identity":
 			continue
 		case "zstd":
-			decoded, err := decodeZstdRequestBody(body)
+			decoded, err := decodeZstdRequestBody(body, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -58,16 +62,27 @@ func decodeRequestBody(raw []byte, encoding string) ([]byte, error) {
 	return body, nil
 }
 
-func decodeZstdRequestBody(raw []byte) ([]byte, error) {
-	decoder, err := zstd.NewReader(bytes.NewReader(raw))
+func decodeZstdRequestBody(raw []byte, limit int64) ([]byte, error) {
+	var opts []zstd.DOption
+	if limit > 0 {
+		opts = append(opts, zstd.WithDecoderMaxMemory(uint64(limit)))
+	}
+	decoder, err := zstd.NewReader(bytes.NewReader(raw), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zstd request decoder: %w", err)
 	}
 	defer decoder.Close()
 
-	decoded, err := io.ReadAll(decoder)
+	var src io.Reader = decoder
+	if limit > 0 {
+		src = io.LimitReader(decoder, limit+1)
+	}
+	decoded, err := io.ReadAll(src)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode zstd request body: %w", err)
+	}
+	if limit > 0 && int64(len(decoded)) > limit {
+		return nil, fmt.Errorf("decoded request body exceeds %d bytes", limit)
 	}
 	return decoded, nil
 }

@@ -18,16 +18,25 @@ import (
 
 // HandleTranslation reports that the Codex OAuth upstream has no translation session capability.
 func (h *Handler) HandleTranslation(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	writeCapabilityNotSupported(c, "Realtime translation sessions")
 }
 
 // HandleTranscriptionSession reports that the Codex OAuth upstream has no transcription-only capability.
 func (h *Handler) HandleTranscriptionSession(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	writeCapabilityNotSupported(c, "Realtime transcription-only sessions")
 }
 
 // HandleSIPControl reports that the Codex OAuth upstream has no SIP dialog capability.
 func (h *Handler) HandleSIPControl(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	action := "control"
 	if c != nil && c.Request != nil && c.Request.URL != nil {
 		parts := strings.Split(strings.Trim(c.Request.URL.Path, "/"), "/")
@@ -40,6 +49,9 @@ func (h *Handler) HandleSIPControl(c *gin.Context) {
 
 // HandleHangup forwards hangup for a locally created WebRTC call using its pinned OAuth credential.
 func (h *Handler) HandleHangup(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.authManager == nil || h.sessions == nil {
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex live session service unavailable", "server_error", "realtime_session_unavailable")
 		return
@@ -59,6 +71,8 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 		writeRealtimeError(c, http.StatusForbidden, "Realtime call belongs to another API principal", "invalid_request_error", "realtime_call_scope_mismatch")
 		return
 	}
+
+	defer h.sessions.complete(session, "client_hangup")
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, liveSelectionHeaders(c), nil, map[string]any{

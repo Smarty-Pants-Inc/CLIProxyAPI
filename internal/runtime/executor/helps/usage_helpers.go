@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,7 @@ type UsageReporter struct {
 	accessTokenHash     string
 	authType            string
 	apiKey              string
+	apiKeySHA256        string
 	sessionID           string
 	parentSessionID     string
 	source              string
@@ -84,6 +86,10 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	apiKeySHA256 := ""
+	if cliproxyauth.KeyPolicyFromContext(ctx) != nil {
+		apiKeySHA256 = usage.APIKeyDigest(authenticatedAPIKeyFromContext(ctx))
+	}
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -122,6 +128,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias:           strings.TrimSpace(alias),
 		requestedAt:     time.Now(),
 		apiKey:          apiKey,
+		apiKeySHA256:    apiKeySHA256,
 		sessionID:       sessionID,
 		parentSessionID: parentSessionID,
 		source:          resolveUsageSource(auth, apiKey),
@@ -643,6 +650,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,
+		APIKeySHA256:        r.apiKeySHA256,
 		SessionID:           r.sessionID,
 		ParentSessionID:     r.parentSessionID,
 		AuthID:              r.authID,
@@ -738,11 +746,21 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := cliproxyauth.CheckKeyPolicySend(req); err != nil {
+		return nil, err
+	}
+	if cliproxyauth.KeyPolicyFromContext(req.Context()) != nil {
+		req.GetBody = nil
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {
 		return resp, errRoundTrip
+	}
+	if cliproxyauth.KeyPolicyFromContext(req.Context()) != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		_ = resp.Body.Close()
+		return nil, &cliproxyauth.Error{Code: "api_key_policy_redirect_forbidden", Message: "api_key_policy_redirect_forbidden", HTTPStatus: 503}
 	}
 	if t.packetOnly {
 		t.reporter.ObserveResponsePacketOnly(resp)
@@ -770,6 +788,17 @@ func (r *usageTTFTReadCloser) Read(p []byte) (int, error) {
 }
 
 func APIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if cliproxyauth.KeyPolicyFromContext(ctx) != nil {
+		return "[REDACTED]"
+	}
+	return authenticatedAPIKeyFromContext(ctx)
+}
+
+// authenticatedAPIKeyFromContext reads only the authenticated principal, never headers.
+func authenticatedAPIKeyFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
@@ -974,6 +1003,27 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 		return usage.Detail{ResponseServiceTier: responseServiceTier}, true
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
+	known := func(node gjson.Result) bool {
+		if node.Type != gjson.Number {
+			return false
+		}
+		n, err := strconv.ParseInt(node.Raw, 10, 64)
+		return err == nil && n >= 0
+	}
+	// F31: validate the same nodes parseOpenAIStyleUsageNode charges (aliases first),
+	// and never trust a body whose canonical and alias counts disagree.
+	counted := func(alias, canonical string) gjson.Result {
+		if node := usageNode.Get(alias); node.Exists() {
+			return node
+		}
+		return usageNode.Get(canonical)
+	}
+	conflict := func(alias, canonical string) bool {
+		a, c := usageNode.Get(alias), usageNode.Get(canonical)
+		return a.Exists() && c.Exists() && a.Raw != c.Raw
+	}
+	detail.Incomplete = conflict("prompt_tokens", "input_tokens") || conflict("completion_tokens", "output_tokens") ||
+		(!known(usageNode.Get("total_tokens")) && !(known(counted("prompt_tokens", "input_tokens")) && known(counted("completion_tokens", "output_tokens"))))
 	detail.ResponseServiceTier = responseServiceTier
 	return detail, true
 }

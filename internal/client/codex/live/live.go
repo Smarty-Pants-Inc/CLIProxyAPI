@@ -58,6 +58,7 @@ type Handler struct {
 	mediaRelayConfig     config.CodexLiveMediaRelayConfig
 	mediaRelayConfigured bool
 	mediaLimiter         *mediaSessionLimiter
+	rawRelayOwners       map[*liveSessionResources]struct{}
 }
 
 // NewHandler creates a Codex live session handler.
@@ -87,7 +88,7 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	h.mediaRelayMu.Lock()
 	previousConfig := h.mediaRelayConfig
 	previouslyConfigured := h.mediaRelayConfigured
-	h.cfg = cfg
+	h.cfg = config.PreserveAPIKeyPolicies(h.cfg, cfg)
 	if previouslyConfigured && reflect.DeepEqual(previousConfig, relayConfig) {
 		currentErr := h.mediaRelayErr
 		h.mediaRelayMu.Unlock()
@@ -106,7 +107,6 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	h.mediaRelayConfig = relayConfig
 	h.mediaRelayConfigured = true
 	h.mediaRelayMu.Unlock()
-
 	if relayErr == nil && (previouslyConfigured || relayConfig.Enabled) {
 		message := "codex live media relay configured"
 		if previouslyConfigured {
@@ -115,6 +115,54 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 		log.WithFields(liveMediaConfigLogFields(relayConfig)).Info(message)
 	}
 	return relayErr
+}
+
+// refuseKeyPolicy runs before parsing, claiming sessions, creating secrets or dialing.
+func (h *Handler) refuseKeyPolicy(c *gin.Context) bool {
+	owner, _ := requestOwner(c)
+	restricted := false
+	if h != nil {
+		if h.authManager != nil {
+			restricted = len(h.authManager.KeyPolicies(owner)) != 0
+		}
+		if cfg := h.currentConfig(); cfg != nil {
+			for _, p := range cfg.APIKeyPolicies {
+				if p.KeySHA256 == config.APIKeyDigest(owner) {
+					restricted = true
+				}
+			}
+		}
+	}
+	if metadata, ok := c.Get("accessMetadata"); ok {
+		if values, ok := metadata.(map[string]string); ok && values["key_policy"] != "" {
+			restricted = true
+		}
+	}
+	if restricted {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+	}
+	return restricted
+}
+
+// Track only accepted unpolicied relays for server shutdown. Policy hot-activation
+// is unsupported; reload never closes a previously admitted raw session.
+func (h *Handler) trackRawRelay(c *gin.Context) (context.Context, *liveSessionResources, func()) {
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	resources := &liveSessionResources{}
+	resources.add(func() error { cancel(); return nil })
+	h.mediaRelayMu.Lock()
+	if h.rawRelayOwners == nil {
+		h.rawRelayOwners = make(map[*liveSessionResources]struct{})
+	}
+	h.rawRelayOwners[resources] = struct{}{}
+	h.mediaRelayMu.Unlock()
+	release := func() {
+		h.mediaRelayMu.Lock()
+		delete(h.rawRelayOwners, resources)
+		h.mediaRelayMu.Unlock()
+		resources.close()
+	}
+	return ctx, resources, release
 }
 
 func liveMediaConfigLogFields(relayConfig config.CodexLiveMediaRelayConfig) log.Fields {
@@ -171,6 +219,15 @@ func (h *Handler) Close() {
 	if h == nil {
 		return
 	}
+	h.mediaRelayMu.Lock()
+	var retire []*liveSessionResources
+	for resources := range h.rawRelayOwners {
+		retire = append(retire, resources)
+	}
+	h.mediaRelayMu.Unlock()
+	for _, resources := range retire {
+		resources.close()
+	}
 	if h.sessions != nil {
 		h.sessions.closeAll("server_stopped")
 	}
@@ -181,11 +238,21 @@ func (h *Handler) Close() {
 
 // Handle forwards a WebRTC SDP bootstrap request to the Codex realtime calls endpoint.
 func (h *Handler) Handle(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.authManager == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable")
 		return
 	}
 
+	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
+	rawRetained := false
+	defer func() {
+		if !rawRetained {
+			releaseRaw()
+		}
+	}()
 	body, errRead := readBody(c.Request.Body)
 	if errRead != nil {
 		status := clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest)
@@ -211,10 +278,19 @@ func (h *Handler) Handle(c *gin.Context) {
 		writeLiveError(c, http.StatusServiceUnavailable, mediaRelayErr.Error())
 		return
 	}
+	// F24B cut: an SDP-passthrough call connects the client straight to the provider,
+	// so restart cannot end it, and a call admitted before the first policy would
+	// outlive it. Accept only calls on the gateway-owned media relay, always, before
+	// selection or dialing. ponytail: refuse instead of building provider-side call
+	// termination; restoring passthrough is tracked outside #31.
+	if mediaRelay == nil {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_requires_media_relay")
+		return
+	}
 	var mediaSession mediaRelaySession
 	mediaRetained := false
 
-	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = context.WithValue(ctx, "gin", c)
 	selectionOpts := coreexecutor.Options{
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
@@ -382,6 +458,10 @@ func (h *Handler) Handle(c *gin.Context) {
 		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model, responseBody)
 		log.WithField("status", resp.StatusCode).Warnf("codex live upstream request failed: %s", logging.SafeDiagnosticForLog(string(responseBody)))
 	}
+	if ctx.Err() != nil {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+		return
+	}
 	responseBodyToWrite := responseBody
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	callID := ""
@@ -452,10 +532,15 @@ func (h *Handler) Handle(c *gin.Context) {
 			}
 			storedSession = h.sessions.put(callID, session)
 			sessionStored = storedSession.callID != ""
+			rawRetained = sessionStored
+			if storedSession.resources != nil {
+				storedSession.resources.add(func() error { releaseRaw(); return nil })
+			}
 			if mediaSession != nil {
 				mediaSession.SetCloseHandler(func(reason string) {
 					h.sessions.complete(storedSession, reason)
 				})
+				rawResources.add(func() error { return mediaSession.CloseWithReason("raw_session_closed") })
 				mediaRetained = true
 			}
 		}

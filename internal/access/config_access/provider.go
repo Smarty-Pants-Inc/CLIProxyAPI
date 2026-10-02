@@ -2,19 +2,35 @@ package configaccess
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
-// Register ensures the config-access provider is available to the access manager.
-func Register(cfg *sdkconfig.SDKConfig) {
-	if cfg == nil {
-		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
-		return
+var registrationMu sync.Mutex
+var registeredConfig *config.Config
+
+// Register publishes immutable access policy snapshots. Only initial registration
+// starts a new process lifetime; an empty reload still remembers removed keys.
+func Register(cfg *sdkconfig.SDKConfig, initial ...bool) {
+	registrationMu.Lock()
+	defer registrationMu.Unlock()
+	if len(initial) != 0 && initial[0] {
+		registeredConfig = nil
 	}
+	next := &config.Config{}
+	if cfg != nil {
+		next.SDKConfig = *cfg
+	}
+	registeredConfig = config.PreserveAPIKeyPolicies(registeredConfig, next)
+	cfg = &registeredConfig.SDKConfig
 
 	keys := normalizeKeys(cfg.APIKeys)
 	if len(keys) == 0 {
@@ -24,16 +40,17 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.APIKeyPolicies...),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name     string
+	keys     map[string]struct{}
+	policies map[string]string
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []string, policies ...config.APIKeyPolicy) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +59,12 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	policySet := map[string]string{}
+	for _, p := range policies {
+		b, _ := json.Marshal([]config.APIKeyPolicy{p})
+		policySet[p.KeySHA256] = string(b)
+	}
+	return &provider{name: providerName, keys: keySet, policies: policySet}
 }
 
 func (p *provider) Identifier() string {
@@ -90,12 +112,15 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
+			digest := sha256.Sum256([]byte(candidate.value))
+			metadata := map[string]string{"source": candidate.source}
+			if policy := p.policies[hex.EncodeToString(digest[:])]; policy != "" {
+				metadata["key_policy"] = policy
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
+				Metadata:  metadata,
 			}, nil
 		}
 	}

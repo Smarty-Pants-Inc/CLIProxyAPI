@@ -10,6 +10,13 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+type nativeOnlyContextKey struct{}
+
+// WithoutPluginHooks keeps native translation isolated across configuration reloads.
+func WithoutPluginHooks(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeOnlyContextKey{}, true)
+}
+
 // Registry manages translation functions across schemas.
 type Registry struct {
 	mu        sync.RWMutex
@@ -122,6 +129,9 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	}
 	hooks := r.hooks
 	r.mu.RUnlock()
+	if ctx.Value(nativeOnlyContextKey{}) == true {
+		hooks = nil
+	}
 
 	if fn != nil {
 		summaryConfig := thinking.ExtractSummaryConfig(req.Body, from.String())
@@ -223,6 +233,9 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 	}
 	hooks := r.hooks
 	r.mu.RUnlock()
+	if ctx != nil && ctx.Value(nativeOnlyContextKey{}) == true {
+		hooks = nil
+	}
 
 	body := rawJSON
 	if hooks != nil {
@@ -259,6 +272,9 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 	}
 	hooks := r.hooks
 	r.mu.RUnlock()
+	if ctx != nil && ctx.Value(nativeOnlyContextKey{}) == true {
+		hooks = nil
+	}
 
 	body := rawJSON
 	if hooks != nil {
@@ -300,7 +316,7 @@ func (r *Registry) NormalizeRequest(ctx context.Context, from, to Format, model 
 	hooks := r.hooks
 	r.mu.RUnlock()
 
-	if hooks != nil {
+	if hooks != nil && ctx.Value(nativeOnlyContextKey{}) != true {
 		return hooks.NormalizeRequest(ctx, from, to, model, body, stream)
 	}
 	return body
