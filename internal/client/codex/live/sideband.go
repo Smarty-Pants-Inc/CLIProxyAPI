@@ -351,6 +351,13 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
 	defer releaseRaw()
+	// F28: the call owns this join attempt before any selection or dial. Owner hangup,
+	// expiry or shutdown closes session.resources, which cancels ctx (aborting a
+	// pending handshake) and closes any socket attached later. If the call already
+	// completed, add runs the closer at once.
+	if session.resources != nil {
+		session.resources.add(func() error { rawResources.close(); return nil })
+	}
 	consumeSession := false
 	defer func() {
 		if consumeSession {
@@ -450,6 +457,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 			AuthValue: authValue,
 		})
 		dialer := newProxyAwareSidebandDialer(runtimeConfig, current)
+		closeDialOnCancel(dialer, ctx)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
 		return dialer.DialContext(ctx, upstreamURL, req.Header)
 	}
@@ -717,8 +725,29 @@ func proxyURLForAuth(cfg *config.Config, selected *auth.Auth) string {
 	return ""
 }
 
+// closeDialOnCancel closes the dialed transport when ctx ends. gorilla/websocket
+// honors only the context deadline during the handshake, not cancellation, so a
+// cancelled join would otherwise wait for HandshakeTimeout.
+func closeDialOnCancel(dialer *websocket.Dialer, ctx context.Context) {
+	next := dialer.NetDialContext
+	if next == nil {
+		next = (&net.Dialer{}).DialContext
+	}
+	dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, errDial := next(dialCtx, network, address)
+		if errDial == nil {
+			context.AfterFunc(ctx, func() { _ = conn.Close() })
+		}
+		return conn, errDial
+	}
+}
+
+// sidebandHandshakeTimeout bounds an upstream sideband handshake; it matches the
+// Codex Responses websocket handshake timeout.
+const sidebandHandshakeTimeout = 30 * time.Second
+
 func newSidebandDialer(proxyURL string) *websocket.Dialer {
-	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment}
+	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: sidebandHandshakeTimeout}
 	if strings.TrimSpace(proxyURL) == "" {
 		return dialer
 	}
