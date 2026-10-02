@@ -258,6 +258,50 @@ func TestLegacySelectorPath_SkipsQuotaExhaustedAccounts(t *testing.T) {
 	}
 }
 
+// smarty-dev#3200: a Codex account whose plan window is full but which still has a credit
+// grant keeps serving, so it stays ahead of a lower-priority fallback credential; once the
+// credits are gone the fallback tier serves.
+func TestQuotaUsageOf_CodexCreditsKeepFullAccountEligible(t *testing.T) {
+	now := time.Now()
+	reset := strconv.FormatInt(now.Add(time.Hour).Unix(), 10)
+	codex := func(extra map[string]string) *Auth {
+		signals := map[string]string{"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-At": reset}
+		for k, v := range extra {
+			signals[k] = v
+		}
+		return &Auth{ID: "codex", Provider: "codex", Attributes: map[string]string{"priority": "10"}, Quota: QuotaState{ObservedAt: now, Signals: signals}}
+	}
+	cases := []struct {
+		name          string
+		auth          *Auth
+		wantExhausted bool
+	}{
+		{"no credit signals", codex(nil), true},
+		{"credits with balance", codex(map[string]string{"X-Codex-Credits-Has-Credits": "True", "X-Codex-Credits-Balance": "59474.06"}), false},
+		{"credits without balance header", codex(map[string]string{"X-Codex-Credits-Has-Credits": "true"}), false},
+		{"credits with zero balance", codex(map[string]string{"X-Codex-Credits-Has-Credits": "True", "X-Codex-Credits-Balance": "0"}), true},
+		{"no credits", codex(map[string]string{"X-Codex-Credits-Has-Credits": "False", "X-Codex-Credits-Balance": "0"}), true},
+		{"unlimited credits", codex(map[string]string{"X-Codex-Credits-Unlimited": "True"}), false},
+	}
+	fallback := claudeQuotaAuth("claude", 0.2, 0.2, now.Add(time.Hour), now)
+	manager := NewManager(nil, nil, nil)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := quotaUsageOf(tc.auth, now); got.exhausted != tc.wantExhausted || got.utilization != 1 {
+				t.Fatalf("quotaUsageOf = %+v, want exhausted=%v utilization=1", got, tc.wantExhausted)
+			}
+			want := "codex"
+			if tc.wantExhausted {
+				want = "claude"
+			}
+			available, err := manager.availableAuthsForRouteModel([]*Auth{tc.auth, fallback}, "mixed", "", now)
+			if err != nil || len(available) != 1 || available[0].ID != want {
+				t.Fatalf("available = %v, %v; want [%s]", authIDs(available), err, want)
+			}
+		})
+	}
+}
+
 func TestQuotaUsageOf_OutOfRangeResetNeverSkips(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	cases := map[string]map[string]string{
