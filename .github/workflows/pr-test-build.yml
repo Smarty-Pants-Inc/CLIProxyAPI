@@ -11,7 +11,8 @@ jobs:
   build:
     # Public fork on a self-hosted pool: never run an outside fork's PR code (smarty-dev#1246, Light 5941520806).
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
+    # Depot overflow (smarty-dev#2267, Paul YES 2026-10-02): ordinary pull_request runs only; queue drafts and priority-ci use smarty-priority; push and other events stay on smarty-linux-x64.
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/mergify/merge-queue/') || startsWith(github.ref, 'refs/heads/tmp-mergify/merge-queue/') || startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'smarty-priority' || github.event_name == 'pull_request' && 'depot-ubuntu-24.04' || 'smarty-linux-x64' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
