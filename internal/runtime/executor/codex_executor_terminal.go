@@ -403,6 +403,9 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 // quota/plan-limit exhaustion (error.type == "usage_limit_reached"). This is the
 // signal Codex emits when a credential's usage quota is depleted, and it carries
 // reset timing (resets_at/resets_in_seconds) parsed by parseCodexRetryAfter.
+// OpenAI's insufficient_quota (as type or code) is the same depletion; in a stream it arrives
+// as response.failed, and treating it as a usage limit lets the request fail over to another
+// credential before the client sees it (smarty-dev#3200).
 // Transient per-minute rate limits (rate_limit_error/rate_limit_exceeded) are
 // intentionally excluded, as they should be retried rather than cooled down.
 func isCodexUsageLimitError(errorBody []byte) bool {
@@ -412,9 +415,12 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 	candidates := []string{
 		gjson.GetBytes(errorBody, "error.type").String(),
 		gjson.GetBytes(errorBody, "type").String(),
+		gjson.GetBytes(errorBody, "error.code").String(),
+		gjson.GetBytes(errorBody, "code").String(),
 	}
 	for _, candidate := range candidates {
-		if strings.EqualFold(strings.TrimSpace(candidate), "usage_limit_reached") {
+		switch strings.ToLower(strings.TrimSpace(candidate)) {
+		case "usage_limit_reached", "insufficient_quota":
 			return true
 		}
 	}
@@ -516,13 +522,34 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata", "keepalive":
 		return true
 	case "response.output_item.added":
-		return isCodexBufferableOutputItem(payload)
+		return isCodexBufferableOutputItem(gjson.GetBytes(payload, "item"))
 	case "response.content_part.added":
 		return isCodexEmptyPart(payload)
 	case "response.reasoning_summary_part.added":
 		return isCodexEmptyPart(payload)
 	default:
 		return false
+	}
+}
+
+// codexFrameCommitsUpstreamWork reports whether a frame shows work that a replay on another
+// credential would repeat. It is checked before model identity, so a frame that is rejected for a
+// missing or wrong model still closes the replay latch. Terminal frames are judged by the output they
+// carry: an output-free quota refusal stays replayable, but a completion that reports finished
+// server-tool output does not, even when no earlier frame announced that work.
+func codexFrameCommitsUpstreamWork(eventType string, payload []byte) bool {
+	switch eventType {
+	case "error":
+		return false
+	case "response.completed", "response.done", "response.incomplete", "response.failed":
+		for _, item := range gjson.GetBytes(payload, "response.output").Array() {
+			if !isCodexBufferableOutputItem(item) {
+				return true
+			}
+		}
+		return false
+	default:
+		return !isCodexBootstrapBufferableEvent(eventType, payload)
 	}
 }
 
@@ -534,8 +561,7 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 // web_search_call is announced with status "in_progress" and its searching event follows
 // immediately, and failing the attempt over after one would run it again on another credential - and
 // errs the same way for anything else this list has not been taught about.
-func isCodexBufferableOutputItem(payload []byte) bool {
-	item := gjson.GetBytes(payload, "item")
+func isCodexBufferableOutputItem(item gjson.Result) bool {
 	switch item.Get("type").String() {
 	case "message":
 		return isCodexEmptyContentList(item.Get("content"))
@@ -612,6 +638,8 @@ func newCodexBootstrapOverloadErr(body []byte) statusErr {
 // stream is a transient capacity rejection that a different credential may be able to serve.
 // Only these failures justify replacing the whole attempt during bootstrap; every other terminal
 // failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
+// Quota refusals are not included here: only the SSE executor fails them over (smarty-dev#3200;
+// WebSocket quota failover waits on smarty-dev#3484).
 func isCodexOverloadBootstrapFailure(body []byte) bool {
 	if isCodexModelCapacityError(body) {
 		return true

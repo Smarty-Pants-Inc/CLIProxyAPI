@@ -154,6 +154,30 @@ func TestCodexExecutor_BootstrapBuffering_CapacityFailsAttemptWithoutLeakingHand
 	}
 }
 
+// smarty-dev#3200: a quota refusal inside an HTTP 200 stream must fail the attempt before the
+// handshake escapes, keeping its 429 quota classification, so the conductor can serve the
+// request from another credential (or the Claude fallback tier) instead of leaking it.
+func TestCodexExecutor_BootstrapBuffering_QuotaRefusalFailsAttemptWithoutLeakingHandshake(t *testing.T) {
+	for name, event := range map[string]string{
+		"insufficient_quota":  `{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"insufficient_quota","message":"You exceeded your current quota"}},"sequence_number":2}`,
+		"usage_limit_reached": `{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}},"sequence_number":2}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := codexSSEServer(codexCreatedEvent, codexInProgressEvent, event)
+			defer server.Close()
+
+			req, opts := codexTestRequest()
+			result, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+			if err == nil || result != nil {
+				t.Fatalf("ExecuteStream = %v, %v; want a failed attempt and no stream", result, err)
+			}
+			if got := statusCodeFromTestError(t, err); got != http.StatusTooManyRequests {
+				t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+			}
+		})
+	}
+}
+
 // A non-overload terminal failure must keep the original in-stream delivery semantics: the
 // buffered handshake is flushed first and the error arrives as a stream chunk, so the conductor
 // sees a committed stream and does not burn another credential on a request-level fault.
