@@ -3,7 +3,6 @@ package responses
 import (
 	"bytes"
 	"encoding/json"
-	"strconv"
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
@@ -109,13 +108,44 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
 // provider through this gateway (for example a Claude fallback, smarty-dev#3200) carries it, and
 // clients replay output items verbatim.
 func stripCodexReasoningItemStatus(rawJSON []byte) []byte {
-	for i, item := range gjson.GetBytes(rawJSON, "input").Array() {
-		if item.Get("type").String() != "reasoning" || !item.Get("status").Exists() {
-			continue
-		}
-		rawJSON = deleteCodexRequestFields(rawJSON, "input."+strconv.Itoa(i)+".status")
+	input := util.GetGJSONBytesNoCopy(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
 	}
-	return rawJSON
+
+	inputItems := input.Array()
+	hasStatus := false
+	for _, item := range inputItems {
+		if item.Get("type").String() == "reasoning" && item.Get("status").Exists() {
+			hasStatus = true
+			break
+		}
+	}
+	if !hasStatus {
+		return rawJSON
+	}
+
+	changed := false
+	rebuiltInput := make([][]byte, 0, len(inputItems))
+	for _, item := range inputItems {
+		itemRaw := []byte(item.Raw)
+		if item.Get("type").String() == "reasoning" && item.Get("status").Exists() {
+			if updatedItem, errDelete := sjson.DeleteBytes(itemRaw, "status"); errDelete == nil {
+				itemRaw = updatedItem
+				changed = true
+			}
+		}
+		rebuiltInput = append(rebuiltInput, itemRaw)
+	}
+	if !changed {
+		return rawJSON
+	}
+
+	updated, errSet := sjson.SetRawBytes(rawJSON, "input", translatorcommon.JoinRawArray(rebuiltInput))
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 // stripCodexResponsesCacheBreakpoints removes any "prompt_cache_breakpoint" hint
