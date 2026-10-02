@@ -385,7 +385,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if allowRetry && !ephemeralResult {
+			if allowRetry && !ephemeralResult && !isRequestStopError(errStream) {
 				alreadyTried := didRefreshOnUnauthorized
 				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, errStream, alreadyTried)
 				if okRefresh {
@@ -436,6 +436,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if isRequestStopError(errStream) {
+				return nil, errStream
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					return nil, wrapRequestStopError(errStream)
@@ -466,7 +469,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if allowRetry && !ephemeralResult {
+			if allowRetry && !ephemeralResult && !isRequestStopError(bootstrapErr) {
 				alreadyTried := didRefreshOnUnauthorized
 				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, bootstrapErr, alreadyTried)
 				if okRefresh {
@@ -519,6 +522,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			// This also owns the replacement producer after a bootstrap 401 retry.
 			// Cancel before every stop, return, or model-pool failover below.
 			cancelAttempt()
+			if isRequestStopError(bootstrapErr) {
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(bootstrapErr), Options: execOpts}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				result.CredentialScope = isCredentialScopedError(bootstrapErr)
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)

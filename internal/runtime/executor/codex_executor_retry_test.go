@@ -249,6 +249,16 @@ func TestIsCodexUsageLimitError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "insufficient_quota code",
+			body: []byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`),
+			want: true,
+		},
+		{
+			name: "insufficient_quota type",
+			body: []byte(`{"error":{"type":"insufficient_quota"}}`),
+			want: true,
+		},
+		{
 			name: "transient rate limit is excluded",
 			body: []byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}`),
 			want: false,

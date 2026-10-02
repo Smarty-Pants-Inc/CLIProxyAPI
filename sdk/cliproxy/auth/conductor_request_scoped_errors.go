@@ -184,7 +184,7 @@ func extractErrorBody(err error) string {
 // If a rule matches, it returns (action, true).
 // If no rule matches, it returns ("", false).
 func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Config) (string, bool) {
-	if err == nil {
+	if err == nil || isRequestStopError(err) {
 		return "", false
 	}
 	rules := extractRequestScopedErrorRules(auth, cfg)

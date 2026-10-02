@@ -58,7 +58,7 @@ func TestManagerStreamReceiverLocalDuplexStopBypassesMatchingCooldownRule(t *tes
 	if !IsLocalCompactionAffinityStop(local) || local.StatusCode() != 503 {
 		t.Fatalf("callback did not produce wrapped local 503: %v", local)
 	}
-	if action, ok := matchRequestScopedErrorAction(a, local, manager.runtimeConfigSnapshot()); !ok || action == "" {
+	if action, ok := matchRequestScopedErrorAction(a, unwrapRequestStopError(local), manager.runtimeConfigSnapshot()); !ok || action == "" {
 		t.Fatal("fixture must match the upstream cooldown rule")
 	}
 	chunks := make(chan core.StreamChunk, 1)

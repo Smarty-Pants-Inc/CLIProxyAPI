@@ -234,7 +234,7 @@ func TestCompactionJSONSecurityReceiverSkipsMatchingAccountCooldown(t *testing.T
 	validate := opts.Metadata[core.CompactionAffinityValidatorMetadataKey].(func(string, []byte) error)
 	local := &receiverDuplexAffinityError{cause: validate(a.ID, []byte(`{"input":[],"input":[]}`))}
 	requireCompactionJSONLocalStop(t, local)
-	if _, ok := matchRequestScopedErrorAction(a, local, manager.runtimeConfigSnapshot()); !ok {
+	if _, ok := matchRequestScopedErrorAction(a, unwrapRequestStopError(local), manager.runtimeConfigSnapshot()); !ok {
 		t.Fatal("fixture does not match account policy")
 	}
 	chunks := make(chan core.StreamChunk, 1)
