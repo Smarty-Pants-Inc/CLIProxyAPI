@@ -39,6 +39,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	modelGuard := helps.NewCodexModelGuard(baseModel)
+	// Identity verification may require holding events that already started upstream
+	// effects. Once one arrives, no synchronous error may replay this request.
+	replaySafe := true
+	defer func() {
+		if err != nil && !replaySafe {
+			err = helps.WrapCodexNonReplayableError(err)
+		}
+	}()
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -171,7 +179,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	var initialChunks [][]byte
 	streamStarted := false
 	immediateTerminal := false
-	// bootstrapTerminalErr holds a non-overload terminal failure seen while buffering. It is
+	// bootstrapTerminalErr holds a terminal failure that cannot fail over while buffering. It is
 	// delivered as an in-stream chunk after the buffered handshake so downstream behaviour stays
 	// identical to the unbuffered path instead of silently turning into a credential failover.
 	var bootstrapTerminalErr error
@@ -214,7 +222,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					if isCodexOverloadBootstrapFailure(terminalBody) {
+					if replaySafe && isCodexOverloadBootstrapFailure(terminalBody) {
 						timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 						timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
 						if !timeoutReached {
@@ -250,8 +258,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					bootstrapTerminalErr = streamErr
 					break
 				}
-				if isCodexBootstrapBufferableEvent(eventType, data) {
-					isHandshake = true
+				isHandshake = isCodexBootstrapBufferableEvent(eventType, data)
+				if !isHandshake {
+					// The identity guard can still withhold this frame, but a later
+					// matching model must never make its upstream effects replayable.
+					replaySafe = false
 				}
 				switch eventType {
 				case "response.output_item.done":
@@ -360,6 +371,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
 	}
 	if bootstrapTerminalErr != nil {
+		if !replaySafe {
+			// Some downstream formats render held events into no payloads at all.
+			bootstrapTerminalErr = helps.WrapCodexNonReplayableStreamError(bootstrapTerminalErr)
+		}
 		// Buffered handshake payloads are flushed first so the conductor observes a committed
 		// stream and delivers this failure in-stream, exactly as the unbuffered path would.
 		out <- cliproxyexecutor.StreamChunk{Err: bootstrapTerminalErr}
@@ -372,8 +387,18 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
 
+	streamReplaySafe := replaySafe
 	go func() {
 		defer close(out)
+		sendError := func(err error) {
+			if !streamReplaySafe {
+				err = helps.WrapCodexNonReplayableStreamError(err)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: err}:
+			case <-ctx.Done():
+			}
+		}
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
@@ -391,32 +416,28 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				data := bytes.TrimSpace(line[5:])
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
+				eventType := gjson.GetBytes(data, "type").String()
+				isTerminal := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
+				// Bootstrap completion alone does not commit translated downstream output.
+				if !isTerminal && !isCodexBootstrapBufferableEvent(eventType, data) {
+					streamReplaySafe = false
+				}
 				modelErr := modelGuard.Observe(data)
 				if modelErr != nil {
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: modelErr}:
-					case <-ctx.Done():
-					}
+					sendError(modelErr)
 					return
 				}
 				translatedLine = append([]byte("data: "), data...)
-				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
-						case <-ctx.Done():
-						}
+						sendError(errClearReplay)
 						return
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-					case <-ctx.Done():
-					}
+					sendError(streamErr)
 					return
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
@@ -426,10 +447,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					streamErr := newCodexEmptyIncompleteStreamError()
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-					case <-ctx.Done():
-					}
+					sendError(streamErr)
 					return
 				}
 				switch eventType {
@@ -478,10 +496,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
-		select {
-		case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-		case <-ctx.Done():
-		}
+		sendError(streamErr)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }

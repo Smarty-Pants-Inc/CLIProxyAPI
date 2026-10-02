@@ -33,6 +33,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	modelGuard := helps.NewCodexModelGuard(baseModel)
+	// Identity verification can require holding an event whose upstream effects
+	// have already started. A later model handshake must never reopen replay.
+	replaySafe := true
+	defer func() {
+		if err != nil && !replaySafe {
+			err = helps.WrapCodexNonReplayableError(err)
+		}
+	}()
 
 	prepared, err := e.prepareCodexWebsocketStream(ctx, auth, req, opts)
 	if err != nil {
@@ -401,8 +409,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
-				if timeoutReached {
-					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
+				if timeoutReached || !replaySafe {
+					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, timeout=%t replay_safe=%t; delivering in-stream after model verification", bufferedFrames, timeSinceStart, timeoutReached, replaySafe)
 					bootstrapTerminalErr = wsErr
 					break
 				}
@@ -414,7 +422,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// the disconnect here would close the client connection before the retry can
 				// deliver anything. Every other terminal failure is forwarded in-stream and
 				// legitimately terminates the session, so it keeps the notifying variant.
-				failoverPending := isCodexOverloadBootstrapFailure(terminalBody)
+				failoverPending := replaySafe && isCodexOverloadBootstrapFailure(terminalBody)
 				if failoverPending && timeoutReached {
 					failoverPending = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
@@ -458,6 +466,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			eventType := gjson.GetBytes(payload, "type").String()
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
+			bufferableEvent := isCodexBootstrapBufferableEvent(eventType, payload)
+			// Refusals above consult the safety of prior events, not the refusal
+			// itself. Holding other events for identity does not make them safe.
+			if !bufferableEvent {
+				replaySafe = false
+			}
 			if helps.HasMeaningfulCodexOutputDelta(payload) {
 				sawOutputDelta = true
 			}
@@ -518,7 +532,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if !modelGuard.Authoritative() && (!windowOpen || isTerminalEvent) {
 				return failModelGuard(modelGuard.Missing())
 			}
-			if windowOpen && (isCodexBootstrapBufferableEvent(eventType, payload) || !modelGuard.Authoritative()) && !isTerminalEvent {
+			if windowOpen && (bufferableEvent || !modelGuard.Authoritative()) && !isTerminalEvent {
 				frameBytes := len(payload)
 				for i := range currentChunks {
 					frameBytes += len(currentChunks[i])
@@ -558,6 +572,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
 	}
 	if bootstrapTerminalErr != nil {
+		if !replaySafe {
+			// Some downstream formats render held events into no payloads at all.
+			bootstrapTerminalErr = helps.WrapCodexNonReplayableStreamError(bootstrapTerminalErr)
+		}
 		if isEphemeralSession {
 			closeCodexWebsocketSession(sess, "bootstrap_terminal_error")
 		}
@@ -584,6 +602,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
 	}
 
+	streamReplaySafe := replaySafe
 	go func() {
 		terminateReason := "completed"
 		var terminateErr error
@@ -605,6 +624,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}()
 
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if chunk.Err != nil && !streamReplaySafe {
+				chunk.Err = helps.WrapCodexNonReplayableStreamError(chunk.Err)
+			}
 			if ctx == nil {
 				out <- chunk
 				return true
@@ -664,6 +686,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			eventType := gjson.GetBytes(payload, "type").String()
+			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
+			// Bootstrap completion alone does not commit translated downstream output.
+			if !isTerminalEvent && !isCodexBootstrapBufferableEvent(eventType, payload) {
+				streamReplaySafe = false
+			}
 			if modelErr := modelGuard.Observe(payload); modelErr != nil {
 				_ = send(cliproxyexecutor.StreamChunk{Err: modelErr})
 				return
@@ -707,8 +735,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return
 			}
 
-			eventType := gjson.GetBytes(payload, "type").String()
-			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
 			if helps.HasMeaningfulCodexOutputDelta(payload) {
 				sawOutputDelta = true
 			}
