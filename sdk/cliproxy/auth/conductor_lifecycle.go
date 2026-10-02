@@ -147,7 +147,8 @@ func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (
 }
 
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
-// under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
+// under the manager lock, rejecting changed credential bindings while preserving
+// concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
 	return m.updateInternal(ctx, base, updated, updateModeRefresh)
 }
@@ -182,6 +183,10 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		return nil, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
 	}
 	if mode == updateModeRefresh {
+		if refreshBindingChanged(base, existing) {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("update auth %s: stale refresh credential binding", auth.ID)
+		}
 		merged := MergeRefreshedAuth(base, existing, auth)
 		if merged != nil {
 			auth = merged

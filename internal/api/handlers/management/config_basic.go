@@ -259,7 +259,15 @@ func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
 }
 func (h *Handler) PutWebsocketAuth(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.WebsocketAuth = v })
+	var body struct {
+		Value *bool `json:"value"`
+	}
+	if c.ShouldBindJSON(&body) != nil || body.Value == nil || (!*body.Value && len(h.cfg.APIKeyPolicies) != 0) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid ws-auth for api-key-policies"})
+		return
+	}
+	h.cfg.WebsocketAuth = *body.Value
+	h.persist(c)
 }
 
 // Request retry

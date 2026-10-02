@@ -119,6 +119,16 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if m.MissingKeyPolicy(ctx) {
+		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
+	}
+	if op := KeyPolicyFromContext(ctx); op != nil {
+		a, exec, err := op.selectExecutor(req, opts)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+		return exec.Execute(ctx, a, req, opts)
+	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
@@ -179,6 +189,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if m.MissingKeyPolicy(ctx) || KeyPolicyFromContext(ctx) != nil {
+		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
+	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
@@ -232,6 +245,36 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if m.MissingKeyPolicy(ctx) {
+		return nil, policyError("api_key_policy_unavailable", 503)
+	}
+	if op := KeyPolicyFromContext(ctx); op != nil {
+		a, exec, err := op.selectExecutor(req, opts)
+		if err != nil {
+			return nil, err
+		}
+		result, err := exec.ExecuteStream(ctx, a, req, opts)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil || result.Chunks == nil {
+			return nil, policyError("api_key_policy_unavailable", 503)
+		}
+		chunks := make(chan cliproxyexecutor.StreamChunk)
+		done := make(chan struct{})
+		op.streamDone = done
+		go func() {
+			defer close(done)
+			defer close(chunks)
+			for chunk := range result.Chunks {
+				select {
+				case chunks <- chunk:
+				case <-ctx.Done():
+				}
+			}
+		}()
+		return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: chunks}, nil
+	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
 	req, opts = cliproxysession.Enrich(req, opts)
 	if m.HomeEnabled() {
@@ -1983,6 +2026,9 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 // If the registered executor for the auth provider implements RequestPreparer,
 // it will be invoked to modify the request (e.g., add headers).
 func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
+	if req != nil && (m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(req.Context()) != nil) {
+		return policyError("api_key_policy_unavailable", 503)
+	}
 	if req == nil || authID == "" {
 		return nil
 	}
@@ -2012,6 +2058,9 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	}
 	if req == nil {
 		return &Error{Code: "invalid_request", Message: "http request is nil"}
+	}
+	if m.MissingKeyPolicy(ctx) || m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(ctx) != nil || KeyPolicyFromContext(req.Context()) != nil {
+		return policyError("api_key_policy_unavailable", 503)
 	}
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
@@ -2059,6 +2108,9 @@ func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, target
 
 // HttpRequest injects provider credentials into the supplied HTTP request and executes it.
 func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	if m.MissingKeyPolicy(ctx) || KeyPolicyFromContext(ctx) != nil || (req != nil && (m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(req.Context()) != nil)) {
+		return nil, policyError("api_key_policy_unavailable", 503)
+	}
 	if m == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "manager is nil"}
 	}

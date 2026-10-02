@@ -95,6 +95,7 @@ func TestStandardRealtimeCallMapsModelAndLocation(t *testing.T) {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 	handler := NewHandler(manager, nil)
+	handler.mediaRelay = echoMediaRelay{}
 	router := gin.New()
 	router.POST("/v1/realtime/calls", handler.Handle)
 

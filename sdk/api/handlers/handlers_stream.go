@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -296,6 +297,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if h.AuthManager != nil && h.AuthManager.MissingKeyPolicy(ctx) {
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		errs <- executionErrorMessage(&coreauth.Error{HTTPStatus: 503, Message: "api_key_policy_unavailable"})
+		close(errs)
+		return nil, nil, errs
+	}
 	originalRequestedModel := modelName
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {

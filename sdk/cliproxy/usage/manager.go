@@ -2,6 +2,8 @@ package usage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
@@ -30,10 +32,13 @@ type Record struct {
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
-	ExecutorType    string
-	Model           string
-	Alias           string
-	APIKey          string
+	ExecutorType string
+	Model        string
+	Alias        string
+	APIKey       string
+	// APIKeySHA256 preserves the authenticated client identity for native accounting
+	// when APIKey is redacted. Native consumers must not hash this digest again.
+	APIKeySHA256    string
 	SessionID       string
 	ParentSessionID string
 	AuthID          string
@@ -77,6 +82,8 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
+	// Incomplete means token consumption is unknown, not zero.
+	Incomplete          bool
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64
@@ -293,8 +300,9 @@ type Plugin interface {
 }
 
 type queueItem struct {
-	ctx    context.Context
-	record Record
+	ctx            context.Context
+	record         Record
+	withoutPlugins bool
 }
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
@@ -405,6 +413,14 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.TraceID = trID
 		}
 	}
+	withoutPlugins := ctx != nil && ctx.Value(withoutPluginsKey{}) == true
+	if withoutPlugins {
+		if record.APIKeySHA256 == "" {
+			record.APIKeySHA256 = APIKeyDigest(record.APIKey)
+		}
+		record.APIKey = "[REDACTED]"
+	}
+	observeRecord(ctx, record)
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
@@ -412,7 +428,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 		m.mu.Unlock()
 		return
 	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
+	m.queue = append(m.queue, queueItem{ctx: ctx, record: record, withoutPlugins: withoutPlugins})
 	m.mu.Unlock()
 	m.cond.Signal()
 }
@@ -446,6 +462,11 @@ func (m *Manager) dispatch(item queueItem) {
 		if plugin == nil {
 			continue
 		}
+		if item.withoutPlugins {
+			if _, builtin := plugin.(interface{ BuiltinUsageSink() }); !builtin {
+				continue
+			}
+		}
 		safeInvoke(plugin, item.ctx, item.record)
 	}
 }
@@ -469,6 +490,15 @@ func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 
 // RegisterNamedPlugin registers or replaces a named plugin on the default manager.
 func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
+
+// APIKeyDigest identifies an authenticated client without retaining its key.
+func APIKeyDigest(key string) string {
+	if key == "" || key == "[REDACTED]" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(digest[:])
+}
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }

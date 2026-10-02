@@ -308,6 +308,9 @@ const (
 
 // HandleSideband relays live session sideband WebSocket frames bidirectionally.
 func (h *Handler) HandleSideband(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.authManager == nil || h.sessions == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex live sideband unavailable")
 		return
@@ -346,6 +349,15 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		writeRealtimeError(c, http.StatusForbidden, "Realtime call belongs to another API principal", "invalid_request_error", "realtime_call_scope_mismatch")
 		return
 	}
+	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
+	defer releaseRaw()
+	// F28: the call owns this join attempt before any selection or dial. Owner hangup,
+	// expiry or shutdown closes session.resources, which cancels ctx (aborting a
+	// pending handshake) and closes any socket attached later. If the call already
+	// completed, add runs the closer at once.
+	if session.resources != nil {
+		session.resources.add(func() error { rawResources.close(); return nil })
+	}
 	consumeSession := false
 	defer func() {
 		if consumeSession {
@@ -355,7 +367,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		h.sessions.release(session)
 	}()
 
-	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = context.WithValue(ctx, "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, c.Request.Header, nil, map[string]any{
 		coreexecutor.ExecutionSessionMetadataKey: session.callID,
@@ -445,6 +457,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 			AuthValue: authValue,
 		})
 		dialer := newProxyAwareSidebandDialer(runtimeConfig, current)
+		closeDialOnCancel(dialer, ctx)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
 		return dialer.DialContext(ctx, upstreamURL, req.Header)
 	}
@@ -476,6 +489,11 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	closeUpstream := websocketCloseFunc("upstream", upstream)
+	rawResources.add(closeUpstream)
+	if ctx.Err() != nil {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+		return
+	}
 	if selection != nil {
 		if errBind := selection.Bind(closeUpstream); errBind != nil {
 			consumeSession = true
@@ -496,6 +514,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		return
 	}
 	closeDownstream := websocketCloseFunc("downstream", downstream)
+	rawResources.add(closeDownstream)
 	if selection != nil {
 		if errBind := selection.Bind(closeDownstream); errBind != nil {
 			consumeSession = true
@@ -706,8 +725,29 @@ func proxyURLForAuth(cfg *config.Config, selected *auth.Auth) string {
 	return ""
 }
 
+// closeDialOnCancel closes the dialed transport when ctx ends. gorilla/websocket
+// honors only the context deadline during the handshake, not cancellation, so a
+// cancelled join would otherwise wait for HandshakeTimeout.
+func closeDialOnCancel(dialer *websocket.Dialer, ctx context.Context) {
+	next := dialer.NetDialContext
+	if next == nil {
+		next = (&net.Dialer{}).DialContext
+	}
+	dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, errDial := next(dialCtx, network, address)
+		if errDial == nil {
+			context.AfterFunc(ctx, func() { _ = conn.Close() })
+		}
+		return conn, errDial
+	}
+}
+
+// sidebandHandshakeTimeout bounds an upstream sideband handshake; it matches the
+// Codex Responses websocket handshake timeout.
+const sidebandHandshakeTimeout = 30 * time.Second
+
 func newSidebandDialer(proxyURL string) *websocket.Dialer {
-	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment}
+	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: sidebandHandshakeTimeout}
 	if strings.TrimSpace(proxyURL) == "" {
 		return dialer
 	}
