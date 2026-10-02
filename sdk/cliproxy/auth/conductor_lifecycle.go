@@ -217,14 +217,19 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+		carriedHold := false
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
+			carriedHold = true
 		}
+		unauthorizedCleared := false
 		credChanged := CredentialsChanged(existing, auth)
 		if credChanged {
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
+				unauthorizedCleared = true
 				auth.Unavailable = false
 				auth.LastError = nil
+				auth.FailureScope = ""
 				auth.StatusMessage = ""
 				auth.Status = StatusActive
 			}
@@ -240,6 +245,12 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
 			}
+			carriedHold = true
+		}
+		// Holds carried over from the existing record keep the failure scope
+		// recorded with them; a reloaded record has none of its own.
+		if carriedHold && !unauthorizedCleared && auth.LastError == nil {
+			widenFailureScope(auth, existing.FailureScope)
 		}
 	}
 	now := time.Now()

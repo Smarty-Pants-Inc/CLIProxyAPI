@@ -148,11 +148,15 @@ type Manager struct {
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
 	syncSchedulerMu           sync.Mutex
-	structuralEpoch           atomic.Uint64
-	syncedVersion             atomic.Uint64
-	auths                     map[string]*Auth
-	authEpochs                map[string]uint64
-	scheduler                 *authScheduler
+
+	// codexReprobeCycle serialises Codex quota re-probe cycles so they never overlap.
+	codexReprobeCycle sync.Mutex
+
+	structuralEpoch atomic.Uint64
+	syncedVersion   atomic.Uint64
+	auths           map[string]*Auth
+	authEpochs      map[string]uint64
+	scheduler       *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.

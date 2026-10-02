@@ -383,6 +383,13 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			auth.StatusMessage = reason
 		}
 		auth.LastError = cloneError(record.LastError)
+		if record.FailureScope != "" {
+			widenFailureScope(auth, record.FailureScope)
+		} else {
+			// A record without a scope (for example from an older build) has
+			// unknown provenance.
+			widenFailureScope(auth, FailureScopeUnknown)
+		}
 		return true
 	}
 
@@ -396,6 +403,13 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		LastError:      cloneError(record.LastError),
 		UpdatedAt:      updatedAt,
 	})
+	if record.FailureScope != "" {
+		widenModelFailureScope(state, record.FailureScope)
+	} else {
+		// A model record without a scope has unknown provenance.
+		widenModelFailureScope(state, FailureScopeModelOther)
+	}
+	widenFailureScope(auth, FailureScopeModel)
 	auth.Generation++
 	auth.UpdatedAt = updatedAt
 	updateAggregatedAvailability(auth, now)
@@ -421,6 +435,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
+			state.FailureScope = ""
 			applyCooldownFields(&state.Quota, QuotaState{})
 			state.UpdatedAt = now
 			changed = true
@@ -509,6 +524,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 
 	if !auth.Disabled && auth.Status != StatusDisabled && !hasModelError(auth, now) {
 		auth.LastError = nil
+		auth.FailureScope = ""
 		auth.StatusMessage = ""
 		auth.Status = StatusActive
 	}
@@ -660,6 +676,7 @@ func cooldownStateRecordEqual(a, b CooldownStateRecord) bool {
 		a.Model != b.Model ||
 		a.Status != b.Status ||
 		a.Reason != b.Reason ||
+		a.FailureScope != b.FailureScope ||
 		!a.NextRetryAfter.Equal(b.NextRetryAfter) ||
 		!a.UpdatedAt.Equal(b.UpdatedAt) ||
 		!cooldownQuotaEqual(a.Quota, b.Quota) {
@@ -698,6 +715,7 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		Reason:         cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
 		Quota:          cooldownFieldsOf(auth.Quota),
 		LastError:      cloneError(auth.LastError),
+		FailureScope:   auth.FailureScope,
 		UpdatedAt:      auth.UpdatedAt,
 	}, true
 }
@@ -717,6 +735,7 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		Reason:         cooldownReason(state.StatusMessage, state.Quota, state.LastError),
 		Quota:          cooldownFieldsOf(state.Quota),
 		LastError:      cloneError(state.LastError),
+		FailureScope:   state.FailureScope,
 		UpdatedAt:      state.UpdatedAt,
 	}, true
 }
@@ -796,6 +815,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
+					auth.FailureScope = ""
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 				}
@@ -821,6 +841,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						auth.LastError = cloneError(result.Error)
 						auth.StatusMessage = result.Error.Message
 					}
+					// Record the scope where the failure is recorded: a credential-scoped
+					// quota refusal holds the whole credential; anything else stays on
+					// this model's state.
+					if result.CredentialScope && statusCodeFromResult(result.Error) == 429 {
+						widenFailureScope(auth, credentialFailureScope(result.Error))
+					} else {
+						widenFailureScope(auth, FailureScopeModel)
+					}
+
+					// Per-model provenance: only a plain quota refusal (the 429 branch
+					// below) keeps the model's scope at model_quota.
+					modelScope := FailureScopeModelOther
 
 					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
@@ -899,6 +931,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next = state.Quota.NextRecoverAt
 								}
 							}
+							if quotaOnlyError(result.Error) {
+								modelScope = FailureScopeModelQuota
+							}
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
 								Exceeded:      true,
@@ -922,6 +957,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 											otherRetryAfter = otherState.NextRetryAfter
 										}
 										otherState.NextRetryAfter = otherRetryAfter
+										widenModelFailureScope(otherState, FailureScopeModelQuota)
 										applyCooldownFields(&otherState.Quota, QuotaState{
 											Exceeded:      true,
 											Reason:        "credential_quota",
@@ -955,6 +991,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
+					widenModelFailureScope(state, modelScope)
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && state.NextRetryAfter.IsZero() {
 						state.NextRetryAfter = now.Add(transientErrorCooldown)
 						state.Unavailable = true
@@ -1159,6 +1196,7 @@ func mergeModelState(target, source *ModelState) *ModelState {
 		Unavailable:    target.Unavailable || source.Unavailable,
 		NextRetryAfter: target.NextRetryAfter,
 		LastError:      cloneError(preferred.LastError),
+		FailureScope:   target.FailureScope,
 		Quota: QuotaState{
 			Exceeded:      target.Quota.Exceeded || source.Quota.Exceeded,
 			Reason:        preferred.Quota.Reason,
@@ -1169,6 +1207,7 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	}
 	merged.Quota = mergeQuotaObservation(merged.Quota, fallback.Quota)
 	merged.Quota = mergeQuotaObservation(merged.Quota, preferred.Quota)
+	widenModelFailureScope(&merged, source.FailureScope)
 	if source.NextRetryAfter.After(merged.NextRetryAfter) {
 		merged.NextRetryAfter = source.NextRetryAfter
 	}
@@ -1208,6 +1247,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.StatusMessage = ""
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
+	state.FailureScope = ""
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.UpdatedAt = now
 }
@@ -1418,6 +1458,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.NextRecoverAt = time.Time{}
 	auth.Quota.BackoffLevel = 0
 	auth.LastError = nil
+	auth.FailureScope = ""
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
 }
@@ -2188,6 +2229,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.UpdatedAt = now
+	// A failure recorded without a model is credential-wide.
+	widenFailureScope(auth, credentialFailureScope(resultErr))
 	if resultErr != nil {
 		auth.LastError = cloneError(resultErr)
 		if resultErr.Message != "" {
