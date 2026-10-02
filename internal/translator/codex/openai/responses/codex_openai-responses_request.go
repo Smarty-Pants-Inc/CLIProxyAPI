@@ -49,7 +49,6 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options", "prompt_cache_retention")
 	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
-	rawJSON = stripCodexReasoningItemStatus(rawJSON)
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
@@ -101,51 +100,6 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
 		}
 	}
 	return rawJSON
-}
-
-// stripCodexReasoningItemStatus removes "status" from replayed reasoning input items. Codex
-// rejects it ("Unknown parameter: 'input[N].status'"), but a reasoning item served by another
-// provider through this gateway (for example a Claude fallback, smarty-dev#3200) carries it, and
-// clients replay output items verbatim.
-func stripCodexReasoningItemStatus(rawJSON []byte) []byte {
-	input := util.GetGJSONBytesNoCopy(rawJSON, "input")
-	if !input.IsArray() {
-		return rawJSON
-	}
-
-	inputItems := input.Array()
-	hasStatus := false
-	for _, item := range inputItems {
-		if item.Get("type").String() == "reasoning" && item.Get("status").Exists() {
-			hasStatus = true
-			break
-		}
-	}
-	if !hasStatus {
-		return rawJSON
-	}
-
-	changed := false
-	rebuiltInput := make([][]byte, 0, len(inputItems))
-	for _, item := range inputItems {
-		itemRaw := []byte(item.Raw)
-		if item.Get("type").String() == "reasoning" && item.Get("status").Exists() {
-			if updatedItem, errDelete := sjson.DeleteBytes(itemRaw, "status"); errDelete == nil {
-				itemRaw = updatedItem
-				changed = true
-			}
-		}
-		rebuiltInput = append(rebuiltInput, itemRaw)
-	}
-	if !changed {
-		return rawJSON
-	}
-
-	updated, errSet := sjson.SetRawBytes(rawJSON, "input", translatorcommon.JoinRawArray(rebuiltInput))
-	if errSet != nil {
-		return rawJSON
-	}
-	return updated
 }
 
 // stripCodexResponsesCacheBreakpoints removes any "prompt_cache_breakpoint" hint
