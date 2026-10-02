@@ -43,7 +43,7 @@ func TestCodexExecutorOptimizeMultiAgentV2(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		namespace := gjson.GetBytes(upstreamBody, "input.0.tools.0.name").String()
-		completed := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":%q,"arguments":"{}","call_id":"call_1"}]}}`+"\n\n", namespace)
+		completed := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":%q,"arguments":"{}","call_id":"call_1"}]}}`+"\n\n", namespace)
 		_, _ = w.Write([]byte(completed))
 	}))
 	defer server.Close()
@@ -112,7 +112,7 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		upstreamBody, _ = io.ReadAll(request.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":%q,\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n", gjson.GetBytes(upstreamBody, "model").String())
 	}))
 	defer server.Close()
 
@@ -305,7 +305,7 @@ func assertCodexSpawnAgentOptimization(t *testing.T, payload []byte, modelID str
 func TestCodexExecutorOptimizeMultiAgentV2RestoresDottedFlatToolName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		completed := `data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"function_call","name":"collaboration-optimize.spawn_agent","namespace":null,"arguments":"{}","call_id":"call_1"}]}}` + "\n\n"
+		completed := `data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","object":"response","status":"completed","output":[{"type":"function_call","name":"collaboration-optimize.spawn_agent","namespace":null,"arguments":"{}","call_id":"call_1"}]}}` + "\n\n"
 		_, _ = w.Write([]byte(completed))
 	}))
 	defer server.Close()

@@ -246,10 +246,13 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				if connection == 2 {
 					return
 				}
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				var request struct {
+					Model string `json:"model"`
+				}
+				if errRead := conn.ReadJSON(&request); errRead != nil {
 					return
 				}
-				completed := []byte(`{"type":"response.completed","response":{"id":"response-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+				completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"response-1","model":%q,"output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, request.Model))
 				if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 					t.Errorf("write websocket completion: %v", errWrite)
 				}
@@ -761,10 +764,13 @@ func TestAuditAccountedCodexXAIReconnectReuseAndTargetChange(t *testing.T) {
 				connections.Add(1)
 				defer func() { _ = conn.Close() }()
 				for {
-					if _, _, errRead := conn.ReadMessage(); errRead != nil {
+					var request struct {
+						Model string `json:"model"`
+					}
+					if errRead := conn.ReadJSON(&request); errRead != nil {
 						return
 					}
-					completed := []byte(`{"type":"response.completed","response":{"id":"response-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+					completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"response-1","model":%q,"output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, request.Model))
 					if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 						return
 					}
@@ -961,7 +967,7 @@ func TestAuditHomeCodex426WebsocketToHTTPFreshSelection(t *testing.T) {
 		}
 		httpFallbackCalls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-5-codex\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
 	}))
 	defer httpFallback.Close()
 

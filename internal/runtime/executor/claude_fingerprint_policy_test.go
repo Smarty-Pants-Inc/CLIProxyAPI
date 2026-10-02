@@ -582,7 +582,7 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintStreamMatchesWirePolicy(t *testi
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(
 			"event: message_start\n" +
-				"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_1\"}}\n\n" +
+				"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_1\",\"model\":\"claude-sonnet-5\"}}\n\n" +
 				"event: message_stop\n" +
 				"data: {\"type\":\"message_stop\"}\n\n",
 		))
@@ -947,7 +947,7 @@ func TestClaudeExecutor_CallerOwnedNeverSendsGoTransportUserAgent(t *testing.T) 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","model":"claude-opus-4-6","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
 	defer server.Close()
 
@@ -975,7 +975,7 @@ func TestClaudeExecutor_CallerOwnedForwardsCallerUserAgent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","model":"claude-opus-4-6","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
 	defer server.Close()
 
