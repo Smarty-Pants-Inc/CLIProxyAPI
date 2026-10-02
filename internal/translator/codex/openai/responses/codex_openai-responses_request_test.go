@@ -13,6 +13,30 @@ import (
 var benchmarkConvertSystemRoleOutput []byte
 var benchmarkConvertNormalizedOutput []byte
 
+// smarty-dev#3200: a reasoning item served by the Claude fallback carries "status", which Codex
+// rejects as an unknown parameter when the client replays it.
+func TestConvertOpenAIResponsesRequestToCodex_StripsReasoningItemStatus(t *testing.T) {
+	inputJSON := []byte(`{"model":"gpt-6.1-sol","input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"reasoning","id":"rs_1","status":"completed","encrypted_content":"sig","summary":[]},
+		{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]},
+		{"type":"reasoning","id":"rs_2","encrypted_content":"sig2","summary":[]}
+	]}`)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-6.1-sol", inputJSON, true)
+	if gjson.GetBytes(output, "input.1.status").Exists() {
+		t.Fatalf("reasoning status kept: %s", gjson.GetBytes(output, "input.1").Raw)
+	}
+	if got := gjson.GetBytes(output, "input.1.encrypted_content").String(); got != "sig" {
+		t.Fatalf("encrypted_content = %q, want sig", got)
+	}
+	if got := gjson.GetBytes(output, "input.2.status").String(); got != "completed" {
+		t.Fatalf("assistant message status = %q, want completed (only reasoning items change)", got)
+	}
+	if got := gjson.GetBytes(output, "input.3.id").String(); got != "rs_2" {
+		t.Fatalf("input.3.id = %q, want rs_2", got)
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_BasicConversion tests the basic system -> developer role conversion
 func TestConvertSystemRoleToDeveloper_BasicConversion(t *testing.T) {
 	inputJSON := []byte(`{
