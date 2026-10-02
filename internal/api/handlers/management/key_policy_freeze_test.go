@@ -70,3 +70,56 @@ func TestKeyPolicyManagementConfigWritesRefused(t *testing.T) {
 		})
 	}
 }
+
+// F24A option (a): management never edits client api-keys, even with no policies
+// configured. The trigger began with no policies: an indexed DELETE mutated the
+// shared APIKeys backing array, then a YAML re-add attached a policy to a key with
+// a live raw relay.
+func TestManagementAPIKeysWritesAlwaysRefused(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("MANAGEMENT_PASSWORD", "pw")
+	const disk = "debug: false\napi-keys: [K, L]\n"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(disk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"K", "L"}
+	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: keys}}
+	cfg.RemoteManagement.AllowRemote = true
+	h := NewHandler(cfg, path, nil)
+	engine := gin.New()
+	mgmt := engine.Group("/v0/management")
+	mgmt.Use(h.Middleware())
+	mgmt.GET("/api-keys", h.GetAPIKeys)
+	mgmt.PUT("/api-keys", h.PutAPIKeys)
+	mgmt.PATCH("/api-keys", h.PatchAPIKeys)
+	mgmt.DELETE("/api-keys", h.DeleteAPIKeys)
+	do := func(method, target, body string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer pw")
+		req.Header.Set("Content-Type", "application/json")
+		engine.ServeHTTP(rr, req)
+		return rr
+	}
+	for _, r := range []struct{ method, target, body string }{
+		{"DELETE", "/v0/management/api-keys?index=0", ""},
+		{"DELETE", "/v0/management/api-keys?value=K", ""},
+		{"PUT", "/v0/management/api-keys", `["X"]`},
+		{"PATCH", "/v0/management/api-keys", `{"index":0,"value":"X"}`},
+		{"PATCH", "/v0/management/api-keys", `{"old":"K","new":"X"}`},
+	} {
+		if rr := do(r.method, r.target, r.body); rr.Code != http.StatusConflict {
+			t.Fatalf("%s %s: status=%d body=%s, want 409", r.method, r.target, rr.Code, rr.Body.String())
+		}
+		if len(cfg.APIKeys) != 2 || keys[0] != "K" || keys[1] != "L" || cfg.APIKeys[0] != "K" {
+			t.Fatalf("%s %s mutated shared keys: cfg=%v backing=%v", r.method, r.target, cfg.APIKeys, keys)
+		}
+	}
+	if got, _ := os.ReadFile(path); string(got) != disk {
+		t.Fatalf("config.yaml rewritten:\n%s", got)
+	}
+	if rr := do("GET", "/v0/management/api-keys", ""); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"K"`) {
+		t.Fatalf("read: %d %s", rr.Code, rr.Body.String())
+	}
+}
