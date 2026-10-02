@@ -129,7 +129,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 		return exec.Execute(ctx, a, req, opts)
 	}
-	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -192,7 +192,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if m.MissingKeyPolicy(ctx) || KeyPolicyFromContext(ctx) != nil {
 		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
 	}
-	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -275,7 +275,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}()
 		return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: chunks}, nil
 	}
-	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
 	req, opts = cliproxysession.Enrich(req, opts)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
@@ -506,6 +506,9 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
+	if retryRound > 0 {
+		ctx = withSelectionRetry(ctx)
+	}
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -719,6 +722,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 }
 
 func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
+	if retryRound > 0 {
+		ctx = withSelectionRetry(ctx)
+	}
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -936,6 +942,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 }
 
 func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, homeRetryLimit *int, retryRound int, defaultRequestRetry int) (*cliproxyexecutor.StreamResult, error) {
+	if retryRound > 0 {
+		ctx = withSelectionRetry(ctx)
+	}
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}

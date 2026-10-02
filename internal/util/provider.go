@@ -177,6 +177,7 @@ func InArray(hystack []string, needle string) bool {
 }
 
 // HideAPIKey obscures an API key for logging purposes, showing only the first and last few characters.
+// One- and two-byte keys are fully masked; empty values remain empty.
 //
 // Parameters:
 //   - apiKey: The API key to hide.
@@ -190,6 +191,8 @@ func HideAPIKey(apiKey string) string {
 		return apiKey[:2] + "..." + apiKey[len(apiKey)-2:]
 	} else if len(apiKey) > 2 {
 		return apiKey[:1] + "..." + apiKey[len(apiKey)-1:]
+	} else if len(apiKey) > 0 {
+		return "..."
 	}
 	return apiKey
 }
@@ -283,7 +286,7 @@ func shouldMaskQueryParam(key string) bool {
 		return false
 	}
 	key = strings.TrimSuffix(key, "[]")
-	if key == "key" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
+	if key == "key" || key == "value" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
 		return true
 	}
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {

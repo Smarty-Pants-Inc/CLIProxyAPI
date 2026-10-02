@@ -141,11 +141,30 @@ func quotaUsageOf(auth *Auth, now time.Time) quotaUsage {
 			}
 		}
 	}
+	exhaustedBefore := usage.exhausted
 	for i, window := range windows {
 		rejected := limitReached && (i == rejectedWindow || (anyAtLimit && window.utilization >= quotaExhaustedUtilization))
 		consider(window.utilization, rejected, window.resetAt, window.resetKnown)
 	}
+	// A Codex account with a usable credit grant keeps serving after its plan windows fill, so
+	// full windows alone do not skip it; an upstream refusal still cools it down (smarty-dev#3200).
+	if codexCreditsUsable(signals) {
+		usage.exhausted = exhaustedBefore
+	}
 	return usage
+}
+
+// codexCreditsUsable reports whether the last Codex response advertised a credit grant that
+// can still pay for requests: unlimited credits, or credits with a positive or unreported balance.
+func codexCreditsUsable(signals map[string]string) bool {
+	if strings.EqualFold(strings.TrimSpace(quotaSignalValue(signals, "X-Codex-Credits-Unlimited")), "true") {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(quotaSignalValue(signals, "X-Codex-Credits-Has-Credits")), "true") {
+		return false
+	}
+	balance, ok := parseQuotaFloat(quotaSignalValue(signals, "X-Codex-Credits-Balance"))
+	return !ok || balance > 0
 }
 
 // quotaExhausted reports whether selection should skip auth right now.
