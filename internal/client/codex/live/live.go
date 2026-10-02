@@ -279,10 +279,11 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	// F24B cut: an SDP-passthrough call connects the client straight to the provider,
-	// so restart cannot end it. While client-key policies exist, accept only calls on
-	// the gateway-owned media relay, for every key, before selection or dialing.
-	// ponytail: refuse instead of building provider-side call termination.
-	if mediaRelay == nil && runtimeConfig != nil && len(runtimeConfig.APIKeyPolicies) > 0 {
+	// so restart cannot end it, and a call admitted before the first policy would
+	// outlive it. Accept only calls on the gateway-owned media relay, always, before
+	// selection or dialing. ponytail: refuse instead of building provider-side call
+	// termination; restoring passthrough is tracked outside #31.
+	if mediaRelay == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_requires_media_relay")
 		return
 	}

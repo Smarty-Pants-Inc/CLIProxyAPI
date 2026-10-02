@@ -50,8 +50,9 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses") {
 		return fail(unavailable)
 	}
+	// F32: bound encoded and decoded bytes before model checks or admission.
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<20)
-	body, err := handlers.ReadRequestBody(c)
+	body, err := handlers.ReadRequestBodyLimit(c, 16<<20)
 	if err != nil {
 		return fail(&auth.Error{HTTPStatus: 400, Message: "invalid policy request body"})
 	}

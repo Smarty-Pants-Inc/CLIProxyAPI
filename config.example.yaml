@@ -376,7 +376,8 @@ codex:
   # Default: false
   model-level-cooling: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
-  # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
+  # This requires inbound UDP reachability. While disabled, Codex Live WebRTC calls are refused
+  # (503 api_key_policy_requires_media_relay): direct provider media cannot be ended by the gateway.
   live-media-relay:
     enabled: false
     # Maximum concurrent media sessions. Zero uses the default of 32.
