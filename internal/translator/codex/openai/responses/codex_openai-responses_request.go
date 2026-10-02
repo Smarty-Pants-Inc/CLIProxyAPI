@@ -3,6 +3,7 @@ package responses
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
@@ -49,6 +50,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options", "prompt_cache_retention")
 	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
+	rawJSON = stripCodexReasoningItemStatus(rawJSON)
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
@@ -98,6 +100,20 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
 		if errDelete == nil {
 			rawJSON = updated
 		}
+	}
+	return rawJSON
+}
+
+// stripCodexReasoningItemStatus removes "status" from replayed reasoning input items. Codex
+// rejects it ("Unknown parameter: 'input[N].status'"), but a reasoning item served by another
+// provider through this gateway (for example a Claude fallback, smarty-dev#3200) carries it, and
+// clients replay output items verbatim.
+func stripCodexReasoningItemStatus(rawJSON []byte) []byte {
+	for i, item := range gjson.GetBytes(rawJSON, "input").Array() {
+		if item.Get("type").String() != "reasoning" || !item.Get("status").Exists() {
+			continue
+		}
+		rawJSON = deleteCodexRequestFields(rawJSON, "input."+strconv.Itoa(i)+".status")
 	}
 	return rawJSON
 }
