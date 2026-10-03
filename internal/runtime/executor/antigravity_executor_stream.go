@@ -86,9 +86,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
 	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Stream: true, ModelInfo: modelInfo}
-	originalTranslated, translated := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq, originalPayload, req.Payload)
+	originalTranslated, translated, updatesChanged := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2AndUpdateIntent(ctx, opts.Headers, e.cfg, from, to, translationReq, originalPayload, req.Payload)
 
-	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
+	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
 	if err != nil {
 		return nil, err
 	}
