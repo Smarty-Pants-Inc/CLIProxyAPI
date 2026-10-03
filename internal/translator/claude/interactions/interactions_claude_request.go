@@ -252,7 +252,7 @@ func interactionsContentToClaude(part gjson.Result, role string) []byte {
 func appendInteractionsFunctionCallToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
 	toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 	toolUse, _ = sjson.SetBytes(toolUse, "id", interactionsClaudeToolID(step))
-	toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(step.Get("name").String()))
+	toolUse, _ = sjson.SetBytes(toolUse, "name", interactionsClaudeToolName(step.Get("name").String()))
 	args := step.Get("arguments")
 	if !args.Exists() {
 		args = step.Get("args")
@@ -340,7 +340,7 @@ func interactionsClaudeTool(tool gjson.Result) []byte {
 		return nil
 	}
 	converted := []byte(`{"name":"","input_schema":{"type":"object","properties":{}}}`)
-	converted, _ = sjson.SetBytes(converted, "name", util.SanitizeClaudeFunctionName(name))
+	converted, _ = sjson.SetBytes(converted, "name", interactionsClaudeToolName(name))
 	if desc := tool.Get("description"); desc.Exists() {
 		converted, _ = sjson.SetBytes(converted, "description", desc.String())
 	} else if desc := tool.Get("function.description"); desc.Exists() {
@@ -379,7 +379,7 @@ func copyInteractionsToolChoiceToClaude(out []byte, toolChoice gjson.Result) []b
 			}
 			if name != "" {
 				choice := []byte(`{"type":"tool","name":""}`)
-				choice, _ = sjson.SetBytes(choice, "name", util.SanitizeClaudeFunctionName(name))
+				choice, _ = sjson.SetBytes(choice, "name", interactionsClaudeToolName(name))
 				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
 			}
 		}
@@ -462,3 +462,10 @@ func firstClaudeInteractionsExisting(root gjson.Result, paths ...string) gjson.R
 	}
 	return gjson.Result{}
 }
+
+// interactionsClaudeToolName keeps the source tool name. Fork guard: upstream
+// sanitizes Interactions names without a collision-safe, reversible mapping,
+// so the response named a different (or ambiguous) function. Passing names
+// unchanged restores the pre-merge behaviour: an invalid name fails upstream
+// visibly instead of being misidentified. Revisit if upstream adds reversal.
+func interactionsClaudeToolName(name string) string { return name }
