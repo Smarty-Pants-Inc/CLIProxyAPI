@@ -690,6 +690,11 @@ func (b *ApplyPatchResponsesBridge) TransformNonStream(response []byte) ([]byte,
 	if !b.active {
 		return response, nil
 	}
+	if errBudget := b.budget.Accept(len(response)); errBudget != nil {
+		b.failed = true
+		b.SetToolInputError(errBudget)
+		return nil, errBudget
+	}
 	out, _, errEnvelope := b.envelope(response, false)
 	if errEnvelope != nil {
 		b.failed = true
