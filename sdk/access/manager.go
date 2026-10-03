@@ -54,18 +54,30 @@ func (m *Manager) Providers() []Provider {
 	return snapshot
 }
 
+// afterAdmissionRead is a test seam: it runs after Authenticate has read the
+// admission state and before it evaluates providers. Nil in production.
+var afterAdmissionRead func()
+
 // Authenticate evaluates providers until one succeeds.
 func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *AuthError) {
 	if m == nil {
 		return nil, nil
 	}
+	// Fork: read denyAll and the provider list under ONE read lock. Two
+	// separate reads could combine an old denyAll=false with a new empty list
+	// (a failed Home activation) and admit the request with nil, nil. The lock
+	// is released before providers run.
 	m.mu.RLock()
 	deny := m.denyAll
+	providers := make([]Provider, len(m.providers))
+	copy(providers, m.providers)
 	m.mu.RUnlock()
+	if afterAdmissionRead != nil {
+		afterAdmissionRead()
+	}
 	if deny {
 		return nil, NewNoCredentialsError()
 	}
-	providers := m.Providers()
 	if len(providers) == 0 {
 		return nil, nil
 	}
