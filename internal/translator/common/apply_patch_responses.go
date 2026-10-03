@@ -113,9 +113,10 @@ func NormalizeApplyPatchResponsesRequest(raw []byte) ([]byte, error) {
 
 type responsesPatchRecord struct {
 	state                                    ApplyPatchCallState
-	kind, qualified, source                  string
+	kind, qualified                          string
+	source                                   strings.Builder
 	patch, named, added, inputDone, itemDone bool
-	snapshot, completedItem                  string
+	snapshot, snapshotInput, completedItem   string
 	hasSnapshot                              bool
 	pending                                  [][]byte
 	evidence                                 error
@@ -126,6 +127,7 @@ type responsesPatchRecord struct {
 // A bridge is local to one response and must not be shared between goroutines.
 type ApplyPatchResponsesBridge struct {
 	ApplyPatchErrorState
+	budget                              ApplyPatchResourceBudget
 	tools                               map[string]util.ResponsesToolDescriptor
 	records                             []*responsesPatchRecord
 	byItemID                            map[string]*responsesPatchRecord
@@ -196,6 +198,9 @@ func (b *ApplyPatchResponsesBridge) resolve(event, item gjson.Result) (*response
 		}
 	}
 	if r == nil {
+		if len(b.records) >= ApplyPatchMaxRecords {
+			return nil, errors.New("apply_patch call record limit exceeded")
+		}
 		r = &responsesPatchRecord{state: ApplyPatchCallState{OutputIndex: -1}}
 		b.records = append(b.records, r)
 	}
@@ -363,15 +368,14 @@ func (b *ApplyPatchResponsesBridge) snapshot(r *responsesPatchRecord, arguments 
 		return errFinish
 	}
 	if r.hasSnapshot {
-		var previous ApplyPatchInputDecoder
-		_, _ = previous.Finish(r.snapshot)
-		if previous.Input() != decoder.Input() {
+		if r.snapshotInput != decoder.Input() {
 			return errors.New("conflicting apply_patch arguments snapshot")
 		}
 	}
 	if !strings.HasPrefix(decoder.Input(), r.state.Decoder.Input()) {
 		return errors.New("apply_patch snapshot conflicts with streamed input")
 	}
+	r.snapshotInput = decoder.Input()
 	r.snapshot = arguments.String()
 	r.hasSnapshot = true
 	return nil
@@ -425,15 +429,14 @@ func (b *ApplyPatchResponsesBridge) patchEvent(raw []byte, r *responsesPatchReco
 			}
 			return out, nil
 		}
-		r.source += fragment
+		r.source.WriteString(fragment)
+		start := len(r.state.Decoder.Input())
 		delta, errPush := r.state.PushArguments(fragment)
 		if errPush != nil {
 			return nil, errPush
 		}
 		if r.hasSnapshot {
-			var snapshot ApplyPatchInputDecoder
-			_, _ = snapshot.Finish(r.snapshot)
-			if !strings.HasPrefix(snapshot.Input(), r.state.Decoder.Input()) {
+			if start > len(r.snapshotInput) || !strings.HasPrefix(r.snapshotInput[start:], delta) {
 				return nil, errors.New("apply_patch stream conflicts with snapshot")
 			}
 		}
@@ -450,7 +453,7 @@ func (b *ApplyPatchResponsesBridge) patchEvent(raw []byte, r *responsesPatchReco
 				return nil, errSnapshot
 			}
 		}
-		final := r.source
+		final := r.source.String()
 		if r.hasSnapshot {
 			final = r.snapshot
 		}
@@ -459,7 +462,7 @@ func (b *ApplyPatchResponsesBridge) patchEvent(raw []byte, r *responsesPatchReco
 			return nil, errFinish
 		}
 		if !r.inputDone {
-			if tail != "" && r.source != "" {
+			if tail != "" && r.source.Len() != 0 {
 				out = append(out, ApplyPatchInputDelta(&r.state, tail, b.next()))
 			}
 			out = append(out, ApplyPatchInputDone(&r.state, input, b.next()))
@@ -639,6 +642,9 @@ func (b *ApplyPatchResponsesBridge) Transform(event []byte) ([][]byte, error) {
 	}
 	if !b.active {
 		return [][]byte{event}, nil
+	}
+	if err := b.budget.Accept(len(event)); err != nil {
+		return b.failure(err)
 	}
 	root := gjson.ParseBytes(event)
 	if id := root.Get("response.id").String(); id != "" {

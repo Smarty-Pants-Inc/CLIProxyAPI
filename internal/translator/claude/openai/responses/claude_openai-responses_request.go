@@ -591,7 +591,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "auto":
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "none":
-				// Leave unset; implies no tools
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
 			case "required":
 				if len(includedToolNames) > 0 {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))

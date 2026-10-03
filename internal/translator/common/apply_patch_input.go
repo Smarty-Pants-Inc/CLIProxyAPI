@@ -236,7 +236,7 @@ func (d *ApplyPatchInputDecoder) Finish(arguments string) (string, error) {
 	if _, errPush := final.Push(arguments); errPush != nil {
 		return "", d.fail(errPush)
 	}
-	if d.finished {
+	if d.finished || d.phase == patchComplete {
 		if input != d.Input() {
 			return "", d.fail(errors.New("conflicting apply_patch arguments completion"))
 		}

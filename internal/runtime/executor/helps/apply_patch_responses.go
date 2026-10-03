@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -33,13 +34,15 @@ type ApplyPatchResponsesState struct {
 	eventLine              []byte
 	active, failed, closed bool
 	transportDone          bool
+	budget                 translatorcommon.ApplyPatchResourceBudget
+	resourceErr            error
 }
 
 type patchDispatcherCall struct {
 	namespace string
 	events    [][]byte
 	snapshots [][]byte
-	source    string
+	source    strings.Builder
 	originals [][]byte
 	completed bool
 	ordinary  bool
@@ -137,6 +140,10 @@ func (s *ApplyPatchResponsesState) dispatcher(root gjson.Result) *patchDispatche
 
 func (s *ApplyPatchResponsesState) newDispatcherCandidate(root gjson.Result) *patchDispatcherCall {
 	call := &patchDispatcherCall{index: -1}
+	if len(s.records) >= translatorcommon.ApplyPatchMaxRecords {
+		s.resourceErr = errors.New("apply_patch dispatcher record limit exceeded")
+		return call
+	}
 	s.records = append(s.records, call)
 	for _, key := range dispatcherKeys(root) {
 		if s.byDispatcherKey[key] == nil {
@@ -152,6 +159,10 @@ func (s *ApplyPatchResponsesState) RememberDispatcherEvent(event []byte) {
 	if s.failed || s.closed || s.transportDone || len(s.dispatchers) == 0 {
 		return
 	}
+	if err := s.budget.Accept(len(event)); err != nil {
+		s.resourceErr = err
+		return
+	}
 	s.upstream = bytes.Clone(event)
 	s.RememberDispatcherArguments(event)
 }
@@ -160,6 +171,10 @@ func (s *ApplyPatchResponsesState) RememberDispatcherEvent(event []byte) {
 // unnamed calls. The common bridge retains all identity/type contradictions until acquisition.
 func (s *ApplyPatchResponsesState) RememberDispatcherArguments(event []byte) {
 	if s.failed || s.closed || s.transportDone || len(s.dispatchers) == 0 || gjson.GetBytes(event, "type").String() != "response.function_call_arguments.done" {
+		return
+	}
+	if err := s.budget.Accept(len(event)); err != nil {
+		s.resourceErr = err
 		return
 	}
 	s.upstream = bytes.Clone(event)
@@ -266,7 +281,7 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 			}
 			return [][]byte{event}, nil
 		}
-		call.source += root.Get("delta").String()
+		call.source.WriteString(root.Get("delta").String())
 	}
 	if call.namespace == "" {
 		if name != "" {
@@ -290,8 +305,8 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 	}
 
 	var wrappers []string
-	if call.source != "" {
-		wrappers = append(wrappers, call.source)
+	if call.source.Len() != 0 {
+		wrappers = append(wrappers, call.source.String())
 	}
 	for _, snapshot := range call.snapshots {
 		arguments := gjson.GetBytes(snapshot, "arguments").String()
@@ -468,6 +483,14 @@ func (s *ApplyPatchResponsesState) fail(err error) ([][]byte, error) {
 func (s *ApplyPatchResponsesState) Transform(event []byte) ([][]byte, error) {
 	if s.failed || s.transportDone {
 		return nil, nil
+	}
+	if s.resourceErr != nil {
+		return s.fail(s.resourceErr)
+	}
+	if s.active {
+		if err := s.budget.Accept(len(event)); err != nil {
+			return s.fail(err)
+		}
 	}
 	if s.active && bytes.Equal(bytes.TrimSpace(event), []byte("[DONE]")) {
 		if errFinish := s.Finish(); errFinish != nil {

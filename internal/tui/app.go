@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -497,6 +498,13 @@ func Run(port int, secretKey string, hook *LogHook, output io.Writer) error {
 // RunWithBaseURL starts the TUI application targeting the specified management base URL.
 // output specifies where bubbletea renders. If nil, defaults to os.Stdout.
 func RunWithBaseURL(baseURL string, secretKey string, hook *LogHook, output io.Writer) error {
+	destination, errParse := url.Parse(NewClientWithBaseURL(baseURL, secretKey).BaseURL())
+	if errParse != nil {
+		return fmt.Errorf("invalid management destination: %w", errParse)
+	}
+	if errValidate := validateHTTPDestination(destination); errValidate != nil {
+		return errValidate
+	}
 	if output == nil {
 		output = os.Stdout
 	}
