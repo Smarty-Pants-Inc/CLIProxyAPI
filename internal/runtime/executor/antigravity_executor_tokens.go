@@ -50,9 +50,9 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	// Prepare payload once (doesn't depend on baseURL)
 	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
 	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Body: req.Payload, ModelInfo: modelInfo}
-	payload := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq).Body
+	translated := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq)
 
-	payload, err := helps.ApplyRequestThinking(payload, req, opts, from.String(), to.String(), e.Identifier())
+	payload, err := helps.ApplyRequestThinking(translated.Body, req, opts, from.String(), to.String(), e.Identifier(), translated.ConfigurationUpdatesChanged)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

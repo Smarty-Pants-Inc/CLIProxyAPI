@@ -182,7 +182,9 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 // that only changes what is shown does not own the reasoning amount.
 var requestThinkingAmountPaths = func() []string {
 	paths := []string{"reasoning.effort", "reasoning_effort", "thinking.type", "thinking.budget_tokens", "output_config.effort"}
-	for _, prefix := range []string{"generationConfig.thinkingConfig.", "request.generationConfig.thinkingConfig.", "generation_config.thinking_config.", "request.generation_config.thinking_config."} {
+	// The bare generation_config./generationConfig. prefixes are the native
+	// Interactions direct amount fields (thinking_level, thinking_budget).
+	for _, prefix := range []string{"generationConfig.thinkingConfig.", "request.generationConfig.thinkingConfig.", "generation_config.thinking_config.", "request.generation_config.thinking_config.", "generation_config.thinkingConfig.", "generationConfig.thinking_config.", "generation_config.", "generationConfig."} {
 		for _, field := range []string{"thinkingBudget", "thinking_budget", "thinkingLevel", "thinking_level"} {
 			paths = append(paths, prefix+field)
 		}

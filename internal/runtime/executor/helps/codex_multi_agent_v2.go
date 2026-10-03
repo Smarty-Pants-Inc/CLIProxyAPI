@@ -42,6 +42,16 @@ func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Hea
 	return TranslateRequestWithCodexMultiAgentV2ForExecutor(ctx, headers, cfg, "", from, to, model, payload, stream)
 }
 
+// TranslateRequestWithCodexMultiAgentV2AndUpdateIntent is the byte translation
+// plus the normalizer's thinking ownership for ApplyRequestThinking.
+func TranslateRequestWithCodexMultiAgentV2AndUpdateIntent(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) ([]byte, bool) {
+	if IsCodexUserAgent(headers) {
+		payload = NormalizeCodexToolIntegerTypes(payload, headers)
+	}
+	translated := multiagentv2.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: payload})
+	return translated.Body, translated.ConfigurationUpdatesChanged
+}
+
 // TranslateRequestWithCodexMultiAgentV2ForExecutor applies Codex client
 // compatibility while respecting the actual target executor identity.
 func TranslateRequestWithCodexMultiAgentV2ForExecutor(ctx context.Context, headers http.Header, cfg *config.Config, targetExecutor string, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
@@ -71,16 +81,26 @@ func TranslateRequestPairWithCodexMultiAgentV2(ctx context.Context, headers http
 // TranslateRequestEnvelopePairWithCodexMultiAgentV2 translates the baseline and
 // working payload while preserving request-scoped metadata in req.
 func TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, req sdktranslator.RequestEnvelope, originalPayload, requestPayload []byte) (original, working []byte) {
+	original, working, _ = TranslateRequestEnvelopePairWithCodexMultiAgentV2AndUpdateIntent(ctx, headers, cfg, from, to, req, originalPayload, requestPayload)
+	return original, working
+}
+
+// TranslateRequestEnvelopePairWithCodexMultiAgentV2AndUpdateIntent also returns
+// the working envelope's normalizer ownership, which ApplyRequestThinking needs
+// so source configuration updates are not replayed over a normalizer's edit.
+func TranslateRequestEnvelopePairWithCodexMultiAgentV2AndUpdateIntent(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, req sdktranslator.RequestEnvelope, originalPayload, requestPayload []byte) (original, working []byte, updatesChanged bool) {
 	originalReq := req
 	originalReq.Body = originalPayload
-	original = TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, originalReq).Body
+	translated := TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, originalReq)
+	original = translated.Body
 	if sameByteSlice(originalPayload, requestPayload) {
 		// The caller mutates the working copy, so it must not share the baseline array.
-		return original, append([]byte(nil), original...)
+		return original, append([]byte(nil), original...), translated.ConfigurationUpdatesChanged
 	}
 	workingReq := req
 	workingReq.Body = requestPayload
-	return original, TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, workingReq).Body
+	translated = TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, workingReq)
+	return original, translated.Body, translated.ConfigurationUpdatesChanged
 }
 
 // sameByteSlice reports whether both slices describe the same bytes of the same

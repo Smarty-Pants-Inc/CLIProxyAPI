@@ -428,11 +428,11 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	defer reporter.TrackFailure(ctx, &err)
 
 	isCompat := helps.APIKeyModelIsCompat(req)
-	originalTranslated, body := translateGeminiInteractionsRequestPair(ctx, e.cfg, targetName, req.Payload, opts, false, isCompat)
+	originalTranslated, body, updatesChanged := translateGeminiInteractionsRequestPairAndUpdateIntent(ctx, e.cfg, targetName, req.Payload, opts, false, isCompat)
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req, opts)
+	body, err = applyGeminiInteractionsThinking(body, req, opts, updatesChanged)
 	if err != nil {
 		return resp, err
 	}
@@ -513,11 +513,11 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	defer reporter.TrackFailure(ctx, &err)
 
 	isCompat := helps.APIKeyModelIsCompat(req)
-	originalTranslated, body := translateGeminiInteractionsRequestPair(ctx, e.cfg, targetName, req.Payload, opts, true, isCompat)
+	originalTranslated, body, updatesChanged := translateGeminiInteractionsRequestPairAndUpdateIntent(ctx, e.cfg, targetName, req.Payload, opts, true, isCompat)
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req, opts)
+	body, err = applyGeminiInteractionsThinking(body, req, opts, updatesChanged)
 	if err != nil {
 		return nil, err
 	}
@@ -681,9 +681,9 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
-	translatedReq := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
+	translatedReq, updatesChanged := helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
 
-	translatedReq, err := helps.ApplyRequestThinking(translatedReq, req, opts, from.String(), to.String(), e.Identifier())
+	translatedReq, err := helps.ApplyRequestThinking(translatedReq, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -882,10 +882,17 @@ func sanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
 }
 
 func translateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) []byte {
+	body, _ := translateGeminiInteractionsRequestBodyAndUpdateIntent(ctx, cfg, model, payload, opts, stream, isCompat)
+	return body
+}
+
+// translateGeminiInteractionsRequestBodyAndUpdateIntent also returns the
+// normalizer's thinking ownership for applyGeminiInteractionsThinking.
+func translateGeminiInteractionsRequestBodyAndUpdateIntent(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) ([]byte, bool) {
 	if opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions {
-		return bytes.Clone(payload)
+		return bytes.Clone(payload), false
 	}
-	return helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, cfg, opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream, isCompat)
+	return helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, opts.Headers, cfg, opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream, isCompat)
 }
 
 // translateGeminiInteractionsRequestPair translates the working payload and the
@@ -895,14 +902,21 @@ func translateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Con
 // inputs keep the existing order: working payload first, then the payload-config
 // source.
 func translateGeminiInteractionsRequestPair(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) (original, working []byte) {
+	original, working, _ = translateGeminiInteractionsRequestPairAndUpdateIntent(ctx, cfg, model, payload, opts, stream, isCompat)
+	return original, working
+}
+
+// translateGeminiInteractionsRequestPairAndUpdateIntent also returns the working
+// payload's normalizer thinking ownership.
+func translateGeminiInteractionsRequestPairAndUpdateIntent(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) (original, working []byte, updatesChanged bool) {
 	source := geminiInteractionsPayloadConfigInput(opts, payload)
 	if geminiInteractionsSameByteSlice(payload, source) {
-		original = translateGeminiInteractionsRequestBody(ctx, cfg, model, payload, opts, stream, isCompat)
-		return original, bytes.Clone(original)
+		original, updatesChanged = translateGeminiInteractionsRequestBodyAndUpdateIntent(ctx, cfg, model, payload, opts, stream, isCompat)
+		return original, bytes.Clone(original), updatesChanged
 	}
-	working = translateGeminiInteractionsRequestBody(ctx, cfg, model, payload, opts, stream, isCompat)
+	working, updatesChanged = translateGeminiInteractionsRequestBodyAndUpdateIntent(ctx, cfg, model, payload, opts, stream, isCompat)
 	original = geminiInteractionsPayloadConfigSource(ctx, cfg, model, payload, opts, stream, isCompat)
-	return original, working
+	return original, working, updatesChanged
 }
 
 func geminiInteractionsPayloadConfigSource(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) []byte {
@@ -936,12 +950,12 @@ func isNativeInteractionsAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "gemini-interactions")
 }
 
-func applyGeminiInteractionsThinking(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
+func applyGeminiInteractionsThinking(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, updatesChanged bool) ([]byte, error) {
 	fromFormat := opts.SourceFormat.String()
 	if strings.TrimSpace(fromFormat) == "" {
 		fromFormat = sdktranslator.FormatInteractions.String()
 	}
-	return helps.ApplyRequestThinking(body, req, opts, fromFormat, sdktranslator.FormatInteractions.String(), "gemini")
+	return helps.ApplyRequestThinking(body, req, opts, fromFormat, sdktranslator.FormatInteractions.String(), "gemini", updatesChanged)
 }
 
 func applyGeminiInteractionsRevisionHeader(req *http.Request) {
