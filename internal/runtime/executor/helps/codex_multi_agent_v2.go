@@ -132,7 +132,9 @@ func TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntentForExecutor(ctx 
 		translated = multiagentv2.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, translated)
 		return translated.Body, translated.ConfigurationUpdatesChanged
 	}
-	return TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx, headers, cfg, targetExecutor, from, to, model, payload, stream, isCompat), false
+	var changed bool
+	body := TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx, headers, cfg, targetExecutor, from, to, model, payload, stream, isCompat, &changed)
+	return body, changed
 }
 
 // TranslateRequestWithAPIKeyModelCompatibility applies compatibility-aware
@@ -143,7 +145,7 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 
 // TranslateRequestWithAPIKeyModelCompatibilityForExecutor applies compatibility-aware
 // request translation while preserving the actual target executor's schema policy.
-func TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context, headers http.Header, cfg *config.Config, targetExecutor string, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool) []byte {
+func TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context, headers http.Header, cfg *config.Config, targetExecutor string, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool, normalizedChanged ...*bool) []byte {
 	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
 		payload = NormalizeCodexToolIntegerTypes(payload, headers)
 	}
@@ -177,7 +179,12 @@ func TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context
 
 	summaryConfig := thinking.ExtractTranslatedSummaryConfig(payload, from.String(), to.String())
 	translated = thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
-	return sdktranslator.NormalizeRequest(ctx, from, to, model, translated, stream)
+	before := append([]byte(nil), translated...)
+	translated = sdktranslator.NormalizeRequest(ctx, from, to, model, translated, stream)
+	if len(normalizedChanged) > 0 && normalizedChanged[0] != nil {
+		*normalizedChanged[0] = sdktranslator.RequestThinkingChanged(before, translated)
+	}
+	return translated
 }
 
 // HasCodexMultiAgentV2NamespaceConflict reports whether the request defines

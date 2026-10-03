@@ -31,7 +31,7 @@ func TestNewClientWithBaseURL(t *testing.T) {
 		{
 			name:        "url without scheme",
 			inputURL:    "proxy.example.com:9000",
-			expectedURL: "http://proxy.example.com:9000",
+			expectedURL: "https://proxy.example.com:9000",
 		},
 		{
 			name:        "url with subpath and trailing slash",

@@ -10,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	responsesnames "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
@@ -53,6 +54,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
 
 	root := gjson.ParseBytes(rawJSON)
+	names := responsesnames.BuildClaudeCompatToolNames(rawJSON)
 
 	// Convert OpenAI reasoning_effort to Claude thinking config.
 	if v := root.Get("reasoning_effort"); v.Exists() {
@@ -229,7 +231,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 							function := toolCall.Get("function")
 							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 							toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(function.Get("name").String()))
+							toolUse, _ = sjson.SetBytes(toolUse, "name", names.ClaudeName(function.Get("name").String()))
 
 							// Parse arguments for the tool call
 							if args := function.Get("arguments"); args.Exists() {
@@ -335,7 +337,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			}
 			if fnName != "" {
 				allowedToolNames[fnName] = struct{}{}
-				allowedToolNames[util.SanitizeClaudeFunctionName(fnName)] = struct{}{}
+				allowedToolNames[names.ClaudeName(fnName)] = struct{}{}
 			}
 		}
 		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
@@ -353,7 +355,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
 				fnName := function.Get("name").String()
-				sanitizedFnName := util.SanitizeClaudeFunctionName(fnName)
+				sanitizedFnName := names.ClaudeName(fnName)
 				if isAllowedTools {
 					if _, ok := allowedToolNames[fnName]; !ok {
 						if _, okSanitized := allowedToolNames[sanitizedFnName]; !okSanitized {
@@ -438,7 +440,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				}
 				if functionName != "" {
 					toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(functionName))
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", names.ClaudeName(functionName))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				} else {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))

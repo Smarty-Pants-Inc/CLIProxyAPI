@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	responsesnames "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -153,7 +154,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			if blockType == "tool_use" {
 				// Start of tool call - initialize accumulator to track arguments
 				toolCallID := contentBlock.Get("id").String()
-				toolName := contentBlock.Get("name").String()
+				toolName := responsesnames.BuildClaudeCompatToolNames(originalRequestRawJSON).Identity(contentBlock.Get("name").String())
 				index := int(root.Get("index").Int())
 
 				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
@@ -386,7 +387,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 					index := int(root.Get("index").Int())
 					toolCallsAccumulator[index] = &ToolCallAccumulator{
 						ID:   contentBlock.Get("id").String(),
-						Name: contentBlock.Get("name").String(),
+						Name: responsesnames.BuildClaudeCompatToolNames(originalRequestRawJSON).Identity(contentBlock.Get("name").String()),
 					}
 				}
 			}

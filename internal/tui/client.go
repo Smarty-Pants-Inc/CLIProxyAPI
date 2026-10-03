@@ -31,7 +31,11 @@ func NewClientWithBaseURL(baseURL string, secretKey string) *Client {
 	} else {
 		lower := strings.ToLower(baseURL)
 		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-			baseURL = "http://" + baseURL
+			scheme := "https://"
+			if parsed, err := url.Parse("http://" + baseURL); err == nil && isLoopbackHost(parsed.Hostname()) {
+				scheme = "http://"
+			}
+			baseURL = scheme + baseURL
 		}
 		baseURL = strings.TrimRight(baseURL, "/")
 	}
@@ -39,7 +43,8 @@ func NewClientWithBaseURL(baseURL string, secretKey string) *Client {
 		baseURL:   baseURL,
 		secretKey: strings.TrimSpace(secretKey),
 		http: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:       10 * time.Second,
+			CheckRedirect: validateManagementRedirect,
 		},
 	}
 }
@@ -58,6 +63,9 @@ func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, er
 	url := c.baseURL + path
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
+		return nil, 0, err
+	}
+	if err := validateHTTPDestination(req.URL); err != nil {
 		return nil, 0, err
 	}
 	if c.secretKey != "" {

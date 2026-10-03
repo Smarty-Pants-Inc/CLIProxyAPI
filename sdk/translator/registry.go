@@ -140,9 +140,9 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 		if hooks != nil {
 			// Request normalizers run after native translation and own the final
 			// provider payload, including any summary field they remove.
-			before := configurationUpdates(req.Body)
+			before := append([]byte(nil), req.Body...)
 			req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
-			req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || updatesChanged(before, configurationUpdates(req.Body))
+			req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || RequestThinkingChanged(before, req.Body)
 		}
 		req.Format = to
 		return req
@@ -165,15 +165,29 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	// Plugin request normalizers canonicalize the source before a plugin request
 	// translator gets a chance to handle a missing native route. Extract summary
 	// intent from that normalized source so a normalizer can remove or rewrite it.
-	before := configurationUpdates(req.Body)
+	before := append([]byte(nil), req.Body...)
 	req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
-	req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || updatesChanged(before, configurationUpdates(req.Body))
+	req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || RequestThinkingChanged(before, req.Body)
 	summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 	if translated, ok := hooks.TranslateRequest(ctx, from, to, req.Model, req.Body, req.Stream); ok {
 		req.Body = thinking.ApplySummaryConfigForModel(translated, to.String(), req.Model, summaryConfig)
 	}
 	req.Format = to
 	return req
+}
+
+// RequestThinkingChanged records normalizer ownership of effort as well as explicit updates.
+// Native translation itself is never considered a normalizer change.
+func RequestThinkingChanged(before, after []byte) bool {
+	if updatesChanged(configurationUpdates(before), configurationUpdates(after)) {
+		return true
+	}
+	for _, path := range []string{"reasoning", "reasoning_effort", "thinking", "output_config.effort"} {
+		if gjson.GetBytes(before, path).Raw != gjson.GetBytes(after, path).Raw {
+			return true
+		}
+	}
+	return false
 }
 
 // configurationUpdates captures only Responses update items before and after a plugin

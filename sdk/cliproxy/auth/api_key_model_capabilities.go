@@ -16,6 +16,7 @@ const (
 	resolvedAPIKeyModelInfoMetadataKey     = "cliproxy.resolved_api_key_model_info"
 	resolvedCodexOAuthModelInfoMetadataKey = "cliproxy.resolved_codex_oauth_model_info"
 	resolvedHomeModelInfoMetadataKey       = "cliproxy.resolved_home_model_info"
+	resolvedHomeLegacyUpdateMetadataKey    = "cliproxy.home_configuration_update_legacy"
 	resolvedHomeModelOptionsMetadataKey    = "cliproxy.resolved_home_model_options"
 )
 
@@ -201,7 +202,13 @@ func attachResolvedExecutionModelInfo(routing *apiKeyModelRoutingSnapshot, req c
 		}
 		routeModel, upstreamModel = req.Model, req.Model
 	}
-	return attachResolvedAPIKeyModelInfo(routing, req, auth, routeModel, upstreamModel)
+	req = attachResolvedAPIKeyModelInfo(routing, req, auth, routeModel, upstreamModel)
+	if legacy, _ := req.Metadata[resolvedHomeLegacyUpdateMetadataKey].(bool); legacy {
+		if home, ok := req.Metadata[resolvedHomeModelInfoMetadataKey].(*registry.ModelInfo); ok && home != nil {
+			req = attachResolvedHomeModelInfo(req, auth, routeModel, home, nil)
+		}
+	}
+	return req
 }
 
 func attachResolvedAPIKeyModelInfo(routing *apiKeyModelRoutingSnapshot, req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string) cliproxyexecutor.Request {
@@ -323,6 +330,7 @@ func attachResolvedHomeModelInfo(req cliproxyexecutor.Request, auth *Auth, route
 		selected.IsCompat = options.IsCompat
 	}
 
+	metadata[resolvedHomeLegacyUpdateMetadataKey] = support == nil
 	metadata[resolvedHomeModelInfoMetadataKey] = &selected
 	return req
 }

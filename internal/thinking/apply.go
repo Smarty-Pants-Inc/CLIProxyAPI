@@ -237,7 +237,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 			sourceRequest = sourceBody
 		}
 		if !updatesChanged || providerFormat == "codex" || providerFormat == "xai" {
-			sourceConfig = extractCodexUsageConfig(sourceRequest)
+			sourceConfig = extractConfigurationUpdateConfig(sourceRequest)
 		}
 	}
 	responseTarget := providerFormat == "codex" || providerFormat == "xai"

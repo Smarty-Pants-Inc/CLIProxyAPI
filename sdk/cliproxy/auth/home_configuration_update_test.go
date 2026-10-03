@@ -80,6 +80,23 @@ func TestHomeDispatchConfigurationUpdateCapabilityAndLegacyFallback(t *testing.T
 			if tc.localSupport {
 				requestModel = "tenant/" + model
 			}
+			stream, errStream := manager.ExecuteStream(t.Context(), []string{"codex"}, cliproxyexecutor.Request{Model: requestModel, Payload: []byte(`{"input":[{"type":"configuration_update","reasoning":{"effort":"high"}}]}`)}, cliproxyexecutor.Options{})
+			if errStream != nil {
+				t.Fatal(errStream)
+			}
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+			}
+			if len(exec.requests) != 1 {
+				t.Fatalf("stream dispatches = %d", len(exec.requests))
+			}
+			streamInfo, streamOK := ResolvedModelInfo(exec.requests[0])
+			if !streamOK || streamInfo.SupportConfigurationUpdate != tc.wantSupport {
+				t.Errorf("stream capability=%+v, want support=%v", streamInfo, tc.wantSupport)
+			}
+			exec.requests = nil
 			response, errExecute := manager.Execute(t.Context(), []string{"codex"}, cliproxyexecutor.Request{Model: requestModel}, cliproxyexecutor.Options{})
 			if errExecute != nil {
 				t.Fatalf("Execute() error = %v; response=%+v", errExecute, response)
