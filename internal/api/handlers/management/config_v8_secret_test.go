@@ -57,3 +57,54 @@ func TestConfigV8ManagementSecretPersistedHashed(t *testing.T) {
 		})
 	}
 }
+
+// Clearing the management password with null/~/"" must leave no verifier:
+// hashing the null spelling would enable remote management with the
+// predictable password "null" (round-4 Astra finding 2).
+func TestConfigV8ManagementSecretNullClears(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("old-admin-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, url, body string }{
+		{"json scalar null", "/v8/management/config/management/secret-key", `null`},
+		{"json scalar empty", "/v8/management/config/management/secret-key", `""`},
+		{"json parent null", "/v8/management/config/management", `{"allow-remote":true,"secret-key":null}`},
+		{"yaml null", "/v8/management/config.yaml", "management:\n  allow-remote: true\n  secret-key: null\n"},
+		{"yaml tilde", "/v8/management/config.yaml", "management:\n  allow-remote: true\n  secret-key: ~\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("management:\n  allow-remote: true\n  secret-key: "+string(hash)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &Handler{cfg: cfg, configFilePath: path, failedAttempts: map[string]*attemptInfo{}}
+			r := gin.New()
+			r.PUT("/v8/management/config.yaml", h.ConfigV8)
+			r.PUT("/v8/management/config/*path", h.ConfigV8)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodPut, tc.url, strings.NewReader(tc.body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("PUT status=%d body=%s", w.Code, w.Body.String())
+			}
+			loaded, err := config.LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, got := range []string{loaded.RemoteManagement.SecretKey, h.cfg.RemoteManagement.SecretKey} {
+				if got != "" {
+					t.Fatalf("cleared secret left verifier %q", got)
+				}
+			}
+			for _, guess := range []string{"null", "~", "old-admin-pass"} {
+				if ok, _, _ := h.AuthenticateManagementKey("203.0.113.9", false, guess); ok {
+					t.Fatalf("management accepted %q after the secret was cleared", guess)
+				}
+			}
+		})
+	}
+}
