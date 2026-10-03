@@ -161,8 +161,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	stripAPIKeysAuthIndexesFromRoot(root)
 	// Fork: persist only the bcrypt verifier of a new management password,
 	// never the plaintext (v0 wrote the hash back synchronously on save).
-	if secret := configV8Node(root, []string{"management", "secret-key"}); secret != nil && secret.Kind == yaml.ScalarNode && secret.Value != "" && !looksLikeBcryptV8(secret.Value) {
-		hashed, errHash := bcrypt.GenerateFromPassword([]byte(secret.Value), bcrypt.DefaultCost)
+	// Hash the decoded value: null/~ decode to "" and keep their clear meaning.
+	var plain string
+	if secret := configV8Node(root, []string{"management", "secret-key"}); secret != nil && secret.Kind == yaml.ScalarNode && secret.Decode(&plain) == nil && plain != "" && !looksLikeBcryptV8(plain) {
+		hashed, errHash := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
 		if errHash != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "hash_failed"})
 			return
