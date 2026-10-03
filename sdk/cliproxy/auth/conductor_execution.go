@@ -126,11 +126,19 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
 	}
 	if op := KeyPolicyFromContext(ctx); op != nil {
-		a, exec, err := op.selectExecutor(req, opts)
+		a, exec, opts, err := op.selectWithCompaction(ctx, req, opts)
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
 		}
-		return exec.Execute(ctx, a, req, opts)
+		resp, err := exec.Execute(ctx, a, req, opts)
+		if err != nil {
+			return resp, err
+		}
+		// Publish signer evidence before delivery; withhold output on failure.
+		if errSave := m.RecordCompactionOutput(a.ID, opts, resp.Payload); errSave != nil {
+			return cliproxyexecutor.Response{}, wrapRequestStopError(errSave)
+		}
+		return resp, nil
 	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
 	if len(opts.OriginalRequest) == 0 {
@@ -268,16 +276,27 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, policyError("api_key_policy_unavailable", 503)
 	}
 	if op := KeyPolicyFromContext(ctx); op != nil {
-		a, exec, err := op.selectExecutor(req, opts)
+		a, exec, opts, err := op.selectWithCompaction(ctx, req, opts)
 		if err != nil {
 			return nil, err
 		}
-		result, err := exec.ExecuteStream(ctx, a, req, opts)
+		producerCtx, cancelProducer := context.WithCancel(ctx)
+		result, err := exec.ExecuteStream(producerCtx, a, req, opts)
 		if err != nil {
+			cancelProducer()
 			return nil, err
 		}
 		if result == nil || result.Chunks == nil {
+			cancelProducer()
 			return nil, policyError("api_key_policy_unavailable", 503)
+		}
+		// Same signer publication as unrestricted streams: save before release.
+		var observer *compactionOutputStream
+		format := cliproxyexecutor.ResponseFormatOrSource(opts)
+		if format == sdktranslator.FormatOpenAIResponse || format == sdktranslator.FormatCodex || format == sdktranslator.FormatClaude {
+			if record := m.newCompactionOutputRecorder(ctx, a.ID, opts); record != nil {
+				observer = &compactionOutputStream{native: format == sdktranslator.FormatClaude, ctx: ctx, record: record}
+			}
 		}
 		chunks := make(chan cliproxyexecutor.StreamChunk)
 		done := make(chan struct{})
@@ -285,11 +304,47 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		go func() {
 			defer close(done)
 			defer close(chunks)
-			for chunk := range result.Chunks {
+			defer cancelProducer()
+			stopped := false
+			send := func(chunk cliproxyexecutor.StreamChunk) {
 				select {
 				case chunks <- chunk:
 				case <-ctx.Done():
 				}
+			}
+			// flush releases observer-approved bytes; a save failure withholds
+			// them, stops the producer and drains it without further delivery.
+			flush := func(payloads [][]byte, errSave error) {
+				if errSave != nil {
+					stopped = true
+					cancelProducer()
+					send(cliproxyexecutor.StreamChunk{Err: wrapRequestStopError(errSave)})
+					return
+				}
+				for _, payload := range payloads {
+					if len(payload) > 0 {
+						send(cliproxyexecutor.StreamChunk{Payload: payload})
+					}
+				}
+			}
+			for chunk := range result.Chunks {
+				if stopped {
+					continue
+				}
+				if observer != nil && len(chunk.Payload) > 0 {
+					flush(observer.pushChunks(chunk.Payload))
+					chunk.Payload = nil
+				}
+				if observer != nil && chunk.Err != nil && !stopped {
+					flush(observer.finishChunks())
+				}
+				if !stopped && (len(chunk.Payload) > 0 || chunk.Err != nil) {
+					send(chunk)
+					stopped = chunk.Err != nil
+				}
+			}
+			if observer != nil && !stopped {
+				flush(observer.finishChunks())
 			}
 		}()
 		return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: chunks}, nil
