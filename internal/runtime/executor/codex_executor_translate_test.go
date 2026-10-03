@@ -2,10 +2,12 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"sync/atomic"
 	"testing"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestTranslateCodexRequestPairReusesEqualPayload(t *testing.T) {
@@ -55,5 +57,29 @@ func TestTranslateCodexRequestPairTranslatesDifferentPayloads(t *testing.T) {
 	}
 	if !bytes.Equal(body, payload) {
 		t.Fatalf("body = %s, want %s", body, payload)
+	}
+}
+
+func TestTranslateCodexRequestPairPreservesPolicyAndUpdateIntent(t *testing.T) {
+	from := sdktranslator.Format("codex-test-policy-update-from")
+	to := sdktranslator.Format("codex-test-policy-update-to")
+	op := &cliproxyauth.KeyPolicyOperation{}
+	ctx := cliproxyauth.WithKeyPolicy(context.Background(), op)
+	sdktranslator.RegisterRequestEnvelope(from, to, func(transformCtx context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+		if cliproxyauth.KeyPolicyFromContext(transformCtx) != op {
+			t.Error("restricted translation lost its policy admission context")
+		}
+		req.ConfigurationUpdatesChanged = bytes.Contains(req.Body, []byte("changed"))
+		return req
+	})
+	original := []byte(`{"model":"test-model","input":"original"}`)
+	payload := []byte(`{"model":"test-model","input":"changed"}`)
+	translatedOriginal, body, changed := translateCodexRequestPairWithUpdateIntentContext(ctx, from, to, "test-model", original, payload, false)
+	if !bytes.Equal(translatedOriginal, original) || !bytes.Equal(body, payload) || !changed {
+		t.Fatal("policy-aware translation lost body or configuration update intent")
+	}
+	_, _, changed = translateCodexRequestPairWithUpdateIntentContext(ctx, from, to, "test-model", payload, original, true)
+	if changed {
+		t.Fatal("original request update intent leaked into the actual request")
 	}
 }
