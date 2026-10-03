@@ -176,13 +176,28 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	return req
 }
 
-// RequestThinkingChanged records normalizer ownership of effort as well as explicit updates.
+// requestThinkingAmountPaths are the reasoning amount and mode controls of
+// every supported target. Visibility fields (reasoning.summary,
+// thinking.display, includeThoughts) are deliberately absent: a normalizer
+// that only changes what is shown does not own the reasoning amount.
+var requestThinkingAmountPaths = func() []string {
+	paths := []string{"reasoning.effort", "reasoning_effort", "thinking.type", "thinking.budget_tokens", "output_config.effort"}
+	for _, prefix := range []string{"generationConfig.thinkingConfig.", "request.generationConfig.thinkingConfig.", "generation_config.thinking_config.", "request.generation_config.thinking_config."} {
+		for _, field := range []string{"thinkingBudget", "thinking_budget", "thinkingLevel", "thinking_level"} {
+			paths = append(paths, prefix+field)
+		}
+	}
+	return paths
+}()
+
+// RequestThinkingChanged records normalizer ownership of the reasoning amount
+// (lowering, deletion, disablement) as well as explicit updates.
 // Native translation itself is never considered a normalizer change.
 func RequestThinkingChanged(before, after []byte) bool {
 	if updatesChanged(configurationUpdates(before), configurationUpdates(after)) {
 		return true
 	}
-	for _, path := range []string{"reasoning", "reasoning_effort", "thinking", "output_config.effort"} {
+	for _, path := range requestThinkingAmountPaths {
 		if gjson.GetBytes(before, path).Raw != gjson.GetBytes(after, path).Raw {
 			return true
 		}
