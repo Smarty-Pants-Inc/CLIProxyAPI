@@ -1,7 +1,6 @@
 package toolschema
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -150,21 +149,38 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 		}
 	}
 
-	// 2. Process input[].additional_tools
+	// 2. Process input[].additional_tools. Fork: rebuild the input array once
+	// and replace it once; a whole-body rewrite per group is O(groups x body).
 	inputResult := gjson.GetBytes(body, "input")
 	if inputResult.IsArray() {
-		for idx, item := range inputResult.Array() {
-			if item.Get("type").String() == "additional_tools" {
-				addTools := item.Get("tools")
-				if addTools.IsArray() {
-					if updated, ok := normalizeToolIntegerTypesInArray(addTools, 0); ok {
-						path := fmt.Sprintf("input.%d.tools", idx)
-						if out, errSet := sjson.SetRawBytes(body, path, updated); errSet == nil {
-							body = out
-							changed = true
-						}
-					}
-				}
+		var out []byte
+		offset := 0
+		inputResult.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() != "additional_tools" {
+				return true
+			}
+			updated, ok := normalizeToolIntegerTypesInArray(item.Get("tools"), 0)
+			if !ok {
+				return true
+			}
+			newItem, errSet := sjson.SetRawBytes([]byte(item.Raw), "tools", updated)
+			if errSet != nil {
+				return true
+			}
+			if out == nil {
+				out = make([]byte, 0, len(inputResult.Raw)+len(inputResult.Raw)/8)
+			}
+			start := item.Index - inputResult.Index
+			out = append(out, inputResult.Raw[offset:start]...)
+			out = append(out, newItem...)
+			offset = start + len(item.Raw)
+			return true
+		})
+		if out != nil {
+			out = append(out, inputResult.Raw[offset:]...)
+			if replaced, errSet := sjson.SetRawBytes(body, "input", out); errSet == nil {
+				body = replaced
+				changed = true
 			}
 		}
 	}
