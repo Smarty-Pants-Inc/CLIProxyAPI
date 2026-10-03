@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -134,13 +134,15 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	}
 
 	if fn != nil {
-		summaryConfig := thinking.ExtractSummaryConfig(req.Body, from.String())
+		summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 		req = fn(ctx, req)
 		req.Body = thinking.ApplySummaryConfigForModel(req.Body, to.String(), req.Model, summaryConfig)
 		if hooks != nil {
 			// Request normalizers run after native translation and own the final
 			// provider payload, including any summary field they remove.
+			before := append([]byte(nil), req.Body...)
 			req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
+			req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || RequestThinkingChanged(before, req.Body)
 		}
 		req.Format = to
 		return req
@@ -163,13 +165,75 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	// Plugin request normalizers canonicalize the source before a plugin request
 	// translator gets a chance to handle a missing native route. Extract summary
 	// intent from that normalized source so a normalizer can remove or rewrite it.
+	before := append([]byte(nil), req.Body...)
 	req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
-	summaryConfig := thinking.ExtractSummaryConfig(req.Body, from.String())
+	req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || RequestThinkingChanged(before, req.Body)
+	summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 	if translated, ok := hooks.TranslateRequest(ctx, from, to, req.Model, req.Body, req.Stream); ok {
 		req.Body = thinking.ApplySummaryConfigForModel(translated, to.String(), req.Model, summaryConfig)
 	}
 	req.Format = to
 	return req
+}
+
+// requestThinkingAmountPaths are the reasoning amount and mode controls of
+// every supported target. Visibility fields (reasoning.summary,
+// thinking.display, includeThoughts) are deliberately absent: a normalizer
+// that only changes what is shown does not own the reasoning amount.
+var requestThinkingAmountPaths = func() []string {
+	paths := []string{"reasoning.effort", "reasoning_effort", "thinking.type", "thinking.budget_tokens", "output_config.effort"}
+	// The bare generation_config./generationConfig. prefixes are the native
+	// Interactions direct amount fields (thinking_level, thinking_budget).
+	for _, prefix := range []string{"generationConfig.thinkingConfig.", "request.generationConfig.thinkingConfig.", "generation_config.thinking_config.", "request.generation_config.thinking_config.", "generation_config.thinkingConfig.", "generationConfig.thinking_config.", "generation_config.", "generationConfig."} {
+		for _, field := range []string{"thinkingBudget", "thinking_budget", "thinkingLevel", "thinking_level"} {
+			paths = append(paths, prefix+field)
+		}
+	}
+	return paths
+}()
+
+// RequestThinkingChanged records normalizer ownership of the reasoning amount
+// (lowering, deletion, disablement) as well as explicit updates.
+// Native translation itself is never considered a normalizer change.
+func RequestThinkingChanged(before, after []byte) bool {
+	if updatesChanged(configurationUpdates(before), configurationUpdates(after)) {
+		return true
+	}
+	for _, path := range requestThinkingAmountPaths {
+		if gjson.GetBytes(before, path).Raw != gjson.GetBytes(after, path).Raw {
+			return true
+		}
+	}
+	return false
+}
+
+// configurationUpdates captures only Responses update items before and after a plugin
+// normalizer. A native cross-protocol translation removing updates is not a plugin edit.
+func configurationUpdates(body []byte) []string {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return nil
+	}
+	var updates []string
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "configuration_update" {
+			updates = append(updates, item.Raw)
+		}
+		return true
+	})
+	return updates
+}
+
+func updatesChanged(before, after []string) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for i, item := range before {
+		if item != after[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // HasRequestTransformer indicates whether a request translator exists.
@@ -252,6 +316,10 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 			outputs = [][]byte{translated}
 		}
 	}
+	// Retained tool failures are never recovered by raw fallback or plugin normalization.
+	if translationToolInputFailed(param) {
+		return outputs
+	}
 	if outputs == nil && !usedNativeTransform {
 		outputs = [][]byte{body}
 	}
@@ -287,10 +355,22 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 			body = translated
 		}
 	}
+	if translationToolInputFailed(param) || (fn.NonStream != nil && body == nil) {
+		return nil
+	}
 	if hooks != nil {
 		body = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
 	}
 	return body
+}
+
+// translationToolInputFailed consumes only the optional, request-local error contract.
+func translationToolInputFailed(param *any) bool {
+	if param == nil {
+		return false
+	}
+	state, okState := (*param).(interface{ ToolInputError() error })
+	return okState && state.ToolInputError() != nil
 }
 
 // TranslateTokenCount applies the registered token count response translator.

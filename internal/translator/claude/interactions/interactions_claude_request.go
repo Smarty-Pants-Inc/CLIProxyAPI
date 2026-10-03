@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -252,7 +252,7 @@ func interactionsContentToClaude(part gjson.Result, role string) []byte {
 func appendInteractionsFunctionCallToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
 	toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 	toolUse, _ = sjson.SetBytes(toolUse, "id", interactionsClaudeToolID(step))
-	toolUse, _ = sjson.SetBytes(toolUse, "name", step.Get("name").String())
+	toolUse, _ = sjson.SetBytes(toolUse, "name", interactionsClaudeToolName(step.Get("name").String()))
 	args := step.Get("arguments")
 	if !args.Exists() {
 		args = step.Get("args")
@@ -339,8 +339,8 @@ func interactionsClaudeTool(tool gjson.Result) []byte {
 	if name == "" {
 		return nil
 	}
-	converted := []byte(`{"name":"","input_schema":{}}`)
-	converted, _ = sjson.SetBytes(converted, "name", name)
+	converted := []byte(`{"name":"","input_schema":{"type":"object","properties":{}}}`)
+	converted, _ = sjson.SetBytes(converted, "name", interactionsClaudeToolName(name))
 	if desc := tool.Get("description"); desc.Exists() {
 		converted, _ = sjson.SetBytes(converted, "description", desc.String())
 	} else if desc := tool.Get("function.description"); desc.Exists() {
@@ -348,7 +348,7 @@ func interactionsClaudeTool(tool gjson.Result) []byte {
 	}
 	params := firstClaudeInteractionsExisting(tool, "parameters", "parametersJsonSchema", "parameters_json_schema", "input_schema")
 	if params.Exists() && params.IsObject() {
-		converted, _ = sjson.SetRawBytes(converted, "input_schema", []byte(params.Raw))
+		converted, _ = sjson.SetRawBytes(converted, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(params.Raw)))
 	}
 	return converted
 }
@@ -379,7 +379,7 @@ func copyInteractionsToolChoiceToClaude(out []byte, toolChoice gjson.Result) []b
 			}
 			if name != "" {
 				choice := []byte(`{"type":"tool","name":""}`)
-				choice, _ = sjson.SetBytes(choice, "name", name)
+				choice, _ = sjson.SetBytes(choice, "name", interactionsClaudeToolName(name))
 				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
 			}
 		}
@@ -462,3 +462,10 @@ func firstClaudeInteractionsExisting(root gjson.Result, paths ...string) gjson.R
 	}
 	return gjson.Result{}
 }
+
+// interactionsClaudeToolName keeps the source tool name. Fork guard: upstream
+// sanitizes Interactions names without a collision-safe, reversible mapping,
+// so the response named a different (or ambiguous) function. Passing names
+// unchanged restores the pre-merge behaviour: an invalid name fails upstream
+// visibly instead of being misidentified. Revisit if upstream adds reversal.
+func interactionsClaudeToolName(name string) string { return name }

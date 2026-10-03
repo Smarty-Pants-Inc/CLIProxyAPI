@@ -9,16 +9,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -101,6 +100,23 @@ func (q *homeConfigWorkQueue) dequeue(ctx context.Context) ([]byte, bool) {
 	}
 }
 
+func (q *homeConfigWorkQueue) tryDequeueLatest() ([]byte, bool) {
+	if q == nil {
+		return nil, false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil, false
+	}
+	item := q.items[len(q.items)-1]
+	for index := range q.items {
+		q.items[index] = nil
+	}
+	q.items = nil
+	return item, true
+}
+
 type homeLogForwarder interface {
 	Bind(*home.Client)
 	Deactivate(*home.Client)
@@ -180,16 +196,15 @@ func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, errContext
 	}
-	if didSync {
-		if errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost); errLoad != nil {
-			return nil, fmt.Errorf("load home plugins: %w", errLoad)
-		}
-	}
 	if strings.TrimSpace(report.Task) != "" {
 		work.syncKey = syncKey
 		work.markSynced = true
 		if strings.TrimSpace(merged.Home.NodeID) != "" {
-			work.statusWork = append(work.statusWork, homePluginStatusWork{cfg: &merged, report: report})
+			work.statusWork = append(work.statusWork, homePluginStatusWork{
+				cfg:              &merged,
+				report:           report,
+				needsLoadMarking: didSync,
+			})
 		}
 	}
 	taskWork, errTasks := s.stageHomePluginTasksWithClient(ctx, &merged, client)
@@ -261,6 +276,9 @@ func (s *Service) finalizeHomePluginWorkUntilDone(ctx, homeCtx context.Context, 
 		s.homeOwnershipMu.Unlock()
 		if errFinalize == nil {
 			return context.Canceled
+		}
+		if errors.Is(errFinalize, errHomePluginActivationFailed) {
+			return errFinalize
 		}
 
 		log.WithError(errFinalize).Warn("failed to finalize home plugins; retrying")
@@ -650,11 +668,20 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 	case <-ready:
 	}
 
+	var retryRaw []byte
 	for {
 		if lifetimeCtx.Err() != nil {
 			return
 		}
-		raw, ok := queue.dequeue(lifetimeCtx)
+		raw, ok := retryRaw, retryRaw != nil
+		retryRaw = nil
+		if ok {
+			if latest, okLatest := queue.tryDequeueLatest(); okLatest {
+				raw = latest
+			}
+		} else {
+			raw, ok = queue.dequeue(lifetimeCtx)
+		}
 		if !ok {
 			return
 		}
@@ -680,6 +707,9 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 			log.WithError(errParse).Warn("failed to stage home config; retrying")
 			if !waitForHomeSubscriberRetry(lifetimeCtx, homeSubscriberPreAckRetryBackoff) {
 				return
+			}
+			if latest, okLatest := queue.tryDequeueLatest(); okLatest {
+				raw = latest
 			}
 		}
 
@@ -720,6 +750,16 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 			return
 		}
 		if errFinalize := s.finalizeHomePluginWorkUntilDone(lifetimeCtx, homeCtx, generation, client, work, publish); errFinalize != nil {
+			if errors.Is(errFinalize, errHomePluginActivationFailed) {
+				// Fail closed: stay unpublished (the frontend keeps its deny gate)
+				// and retry this config, or a newer one, after a backoff.
+				log.WithError(errFinalize).Warn("home plugin activation failed; retrying")
+				if !waitForHomeSubscriberRetry(lifetimeCtx, homePluginActivationRetryBackoff) {
+					return
+				}
+				retryRaw = raw
+				continue
+			}
 			if !errors.Is(errFinalize, context.Canceled) {
 				log.WithError(errFinalize).Warn("home plugin finalization ended")
 			}

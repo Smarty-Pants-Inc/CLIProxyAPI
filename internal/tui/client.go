@@ -18,15 +18,40 @@ type Client struct {
 	http      *http.Client
 }
 
-// NewClient creates a new management API client.
+// NewClient creates a new management API client targeting localhost on the given port.
 func NewClient(port int, secretKey string) *Client {
+	return NewClientWithBaseURL(fmt.Sprintf("http://127.0.0.1:%d", port), secretKey)
+}
+
+// NewClientWithBaseURL creates a new management API client targeting the specified base URL.
+func NewClientWithBaseURL(baseURL string, secretKey string) *Client {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:8317"
+	} else {
+		lower := strings.ToLower(baseURL)
+		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+			scheme := "https://"
+			if parsed, err := url.Parse("http://" + baseURL); err == nil && isLoopbackHost(parsed.Hostname()) {
+				scheme = "http://"
+			}
+			baseURL = scheme + baseURL
+		}
+		baseURL = strings.TrimRight(baseURL, "/")
+	}
 	return &Client{
-		baseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+		baseURL:   baseURL,
 		secretKey: strings.TrimSpace(secretKey),
 		http: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:       10 * time.Second,
+			CheckRedirect: validateManagementRedirect,
 		},
 	}
+}
+
+// BaseURL returns the client's configured management API base URL.
+func (c *Client) BaseURL() string {
+	return c.baseURL
 }
 
 // SetSecretKey updates management API bearer token used by this client.
@@ -38,6 +63,9 @@ func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, er
 	url := c.baseURL + path
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
+		return nil, 0, err
+	}
+	if err := validateHTTPDestination(req.URL); err != nil {
 		return nil, 0, err
 	}
 	if c.secretKey != "" {

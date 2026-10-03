@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	responsesnames "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -109,7 +110,7 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames = map[int]string{}
 				}
 				if name := cb.Get("name"); name.Exists() {
-					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames[idx] = name.String()
+					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames[idx] = responsesnames.BuildClaudeCompatToolNames(originalRequestRawJSON).Identity(name.String())
 				}
 				if toolID := cb.Get("id").String(); toolID != "" {
 					if (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs == nil {
@@ -382,7 +383,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 						newParam.ToolUseNames = map[int]string{}
 					}
 					if name := cb.Get("name"); name.Exists() {
-						newParam.ToolUseNames[idx] = name.String()
+						newParam.ToolUseNames[idx] = responsesnames.BuildClaudeCompatToolNames(originalRequestRawJSON).Identity(name.String())
 					}
 					if toolID := cb.Get("id").String(); toolID != "" {
 						if newParam.ToolUseIDs == nil {

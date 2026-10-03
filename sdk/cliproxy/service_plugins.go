@@ -2,18 +2,19 @@ package cliproxy
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -122,7 +123,19 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		return false
 	}
 	if s.accessManager != nil {
+		// Fork: the missing plugin may be the exclusive frontend-auth gate.
+		// An empty provider list admits every request, so deny instead. The
+		// manager gate survives server reconciliation on retries; only a
+		// complete activation clears it.
+		missing := homePluginNotActivated(cfg, s.pluginHost)
+		if missing != "" {
+			log.Warnf("home plugin %s is enabled but not loaded; denying frontend requests", missing)
+			s.accessManager.SetDenyAll(true) // before the list loses the old gate
+		}
 		s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+		if missing == "" {
+			s.accessManager.SetDenyAll(false)
+		}
 	}
 	s.pluginHost.RegisterUsagePlugins()
 	sdktranslator.SetPluginHooks(s.pluginHost)
@@ -130,6 +143,27 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		s.server.RefreshPluginManagementRoutes()
 	}
 	return ctx.Err() == nil
+}
+
+// homePluginNotActivated returns the first Home-enabled plugin that the host
+// did not register, or "" when every enabled plugin is active.
+func homePluginNotActivated(cfg *config.Config, host *pluginhost.Host) string {
+	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
+		return ""
+	}
+	ids := make([]string, 0, len(cfg.Plugins.Configs))
+	for id, item := range cfg.Plugins.Configs {
+		if item.Enabled != nil && *item.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if !host.PluginRegistered(id) {
+			return id
+		}
+	}
+	return ""
 }
 
 func (s *Service) syncPluginModelRuntime(ctx context.Context) {

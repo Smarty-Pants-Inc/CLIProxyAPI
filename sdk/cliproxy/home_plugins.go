@@ -11,19 +11,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
 const homePluginStatusReportTimeout = 10 * time.Second
 
+// errHomePluginActivationFailed stops Home publication after a configured
+// plugin failed to install or load.
+var errHomePluginActivationFailed = errors.New("home plugin activation failed")
+
+// homePluginActivationRetryBackoff spaces retries of a config whose plugins
+// failed to activate; each retry re-syncs plugins and reports status to Home.
+var homePluginActivationRetryBackoff = 5 * time.Second
+
 type homePluginStatusWork struct {
-	cfg    *config.Config
-	report homeplugins.SyncReport
+	cfg              *config.Config
+	report           homeplugins.SyncReport
+	needsLoadMarking bool
 }
 
 type homePluginTaskWork struct {
@@ -42,6 +51,10 @@ type homePluginFinalization struct {
 	nextTask     int
 	syncKey      string
 	markSynced   bool
+	// loadFailed records a failed Home plugin activation. Finalization then
+	// fails closed: statuses are still reported, but the config is not marked
+	// synced and the Home instance is not published.
+	loadFailed bool
 }
 
 func (s *Service) syncHomePlugins(ctx context.Context, cfg *config.Config) (homeplugins.SyncReport, string, bool, error) {
@@ -212,7 +225,14 @@ func (s *Service) finalizeHomePluginWork(ctx context.Context, client *home.Clien
 		}
 	}
 	for work.nextStatus < len(work.statusWork) {
-		status := work.statusWork[work.nextStatus]
+		status := &work.statusWork[work.nextStatus]
+		if status.needsLoadMarking {
+			if errLoad := homeplugins.MarkLoadResults(&status.report, s.pluginHost); errLoad != nil {
+				log.Warnf("failed to load home plugins: %v", errLoad)
+				work.loadFailed = true
+			}
+			status.needsLoadMarking = false
+		}
 		if errReport := s.pushHomePluginStatusWithClient(ctx, status.cfg, status.report, client); errReport != nil {
 			return errReport
 		}
@@ -231,6 +251,11 @@ func (s *Service) finalizeHomePluginWork(ctx context.Context, client *home.Clien
 			return errReport
 		}
 		work.nextTask++
+	}
+	if work.loadFailed {
+		// Fork: a failed plugin may be the exclusive frontend-auth gate, and its
+		// capability is unknown before it loads. Never publish or mark synced.
+		return errHomePluginActivationFailed
 	}
 	if work.markSynced {
 		if ctx != nil {
