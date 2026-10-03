@@ -192,7 +192,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				execOpts.Metadata = meta
 			}
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel), preparedAuth.ID)
 			if errIntercept != nil {
 				releaseAttempt()
 				selection.End("request_intercepted")
@@ -255,6 +255,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil {
+				if !countTokens {
+					if errSave := m.RecordCompactionOutput(preparedAuth.ID, execOpts, response.Payload); errSave != nil {
+						releaseAttempt()
+						selection.End("compaction_output_refused")
+						return cliproxyexecutor.Response{}, wrapRequestStopError(errSave)
+					}
+				}
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
 				attemptAliasResult := resolveAttemptAliasResult(routing, preparedAuth, routeModel, upstreamModel, aliasResult)

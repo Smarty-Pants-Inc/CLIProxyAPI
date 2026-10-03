@@ -251,8 +251,28 @@ func (op *KeyPolicyOperation) allows(a *Auth) bool {
 	return true
 }
 
+// selectWithCompaction applies unrestricted execution's signer preparation and
+// final selected-account check. A policy allow-list is not signer authority.
+func (op *KeyPolicyOperation) selectWithCompaction(ctx context.Context, req ex.Request, opts ex.Options) (*Auth, ProviderExecutor, ex.Options, error) {
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = req.Payload
+	}
+	opts, err := op.manager.PrepareCompactionRequest(req.Model, opts, ctx)
+	if err != nil {
+		return nil, nil, opts, err
+	}
+	a, exec, err := op.selectExecutor(req, opts)
+	if err != nil {
+		return nil, nil, opts, err
+	}
+	if err = validateCompactionSelectedAuth(ctx, a.ID, opts); err != nil {
+		return nil, nil, opts, err
+	}
+	return a, exec, opts, nil
+}
+
 // The cut deliberately supports only native Codex HTTP generation. It does not
-// enter aliases, plugins, Home, preparation, refresh/retry or MarkResult paths.
+// enter aliases, plugins, Home, refresh/retry or MarkResult paths.
 func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*Auth, ProviderExecutor, error) {
 	op.mu.Lock()
 	defer op.mu.Unlock()
@@ -265,11 +285,13 @@ func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*
 	if cfg.Home.Enabled || cfg.Plugins.Enabled {
 		return nil, nil, policyError("api_key_policy_unavailable", 503)
 	}
+	// Signed compaction input may execute only on its signer; never fail over.
+	pinned := pinnedAuthIDFromMetadata(opts.Metadata)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, id := range op.policies[0].AllowedAuths {
 		a := m.auths[id]
-		if a == nil || a.Provider != "codex" || !op.allows(a) || !registry.GetGlobalRegistry().ClientSupportsModel(id, req.Model) {
+		if (pinned != "" && id != pinned) || a == nil || a.Provider != "codex" || !op.allows(a) || !registry.GetGlobalRegistry().ClientSupportsModel(id, req.Model) {
 			continue
 		}
 		if blocked, _, _ := isAuthBlockedForModel(a, req.Model, time.Now()); blocked {
@@ -288,6 +310,9 @@ func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*
 			}
 			return op.selected, exec, nil
 		}
+	}
+	if pinned != "" {
+		return nil, nil, wrapRequestStopError(compactedAuthUnavailableError())
 	}
 	return nil, nil, policyError("api_key_policy_unavailable", 503)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -290,6 +291,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				if sess != nil {
+					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "context_done", ctx.Err())
 					sess.clearActive(conn, readCh)
 					unlockStreamSession()
 					if isEphemeralSession {
@@ -420,13 +422,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 				}
 				if sess != nil {
-					unlockStreamSession()
 					if failoverPending {
 						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "terminal_failure", streamErr)
 					} else {
 						e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
 					}
 					sess.clearActive(conn, readCh)
+					unlockStreamSession()
 				} else {
 					logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "terminal_failure", streamErr)
 					_ = closer.Close()
@@ -563,42 +565,67 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		close(out)
 		return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
 	}
-	if immediateTerminal {
+	// Keep cached reuse locked through consumer validation, including terminal
+	// frames queued during bootstrap. Normal Manager child cancellation alone
+	// cannot distinguish an accepted terminal from a locally refused terminal.
+	var complete func(bool)
+	var disposition chan bool
+	if opts.StreamResultValidation && sess != nil && !isEphemeralSession {
+		disposition = make(chan bool, 1)
+		var once sync.Once
+		complete = func(accepted bool) {
+			once.Do(func() {
+				if !accepted {
+					// Do not let UpstreamDisconnectChan close the live downstream
+					// before the Manager delivers its typed local refusal.
+					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "consumer_rejected", nil)
+				}
+				disposition <- accepted
+			})
+		}
+	}
+	finishStream := func(validTerminal bool, reason string, terminalErr error) {
+		// EOF permits the consumer to validate buffered tails without deadlocking.
+		close(out)
+		if validTerminal && disposition != nil {
+			select {
+			case validTerminal = <-disposition:
+			case <-ctx.Done():
+				// Acceptance precedes normal Manager cancel. Prefer it when
+				// both cases became ready together.
+				select {
+				case validTerminal = <-disposition:
+				default:
+					validTerminal = false
+				}
+			}
+		}
 		if sess != nil {
+			if !validTerminal {
+				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, reason, terminalErr)
+			}
 			sess.clearActive(conn, readCh)
 			unlockStreamSession()
 			if isEphemeralSession {
-				closeCodexWebsocketSession(sess, "completed")
+				closeCodexWebsocketSession(sess, reason)
 			}
-		} else {
-			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "completed", nil)
-			if errClose := closer.Close(); errClose != nil {
-				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
-			}
+			return
 		}
-		close(out)
-		return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
+		logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, reason, terminalErr)
+		if errClose := closer.Close(); errClose != nil {
+			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+		}
+	}
+	if immediateTerminal {
+		go finishStream(true, "completed", nil)
+		return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out, Complete: complete}, nil
 	}
 
 	go func() {
-		terminateReason := "completed"
+		terminateReason := "response_abandoned"
 		var terminateErr error
-
-		defer close(out)
-		defer func() {
-			if sess != nil {
-				sess.clearActive(conn, readCh)
-				unlockStreamSession()
-				if isEphemeralSession {
-					closeCodexWebsocketSession(sess, terminateReason)
-				}
-				return
-			}
-			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, terminateReason, terminateErr)
-			if errClose := closer.Close(); errClose != nil {
-				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
-			}
-		}()
+		validTerminal := false
+		defer func() { finishStream(validTerminal, terminateReason, terminateErr) }()
 
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if ctx == nil {
@@ -661,6 +688,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			if modelErr := modelGuard.Observe(payload); modelErr != nil {
+				terminateReason = "model_integrity"
+				terminateErr = modelErr
 				_ = send(cliproxyexecutor.StreamChunk{Err: modelErr})
 				return
 			}
@@ -687,7 +716,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				if sess != nil {
-					unlockStreamSession()
 					e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
 				}
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -714,7 +742,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				reporter.PublishFailure(ctx, streamErr)
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "terminal_empty_incomplete", streamErr)
-					unlockStreamSession()
 				}
 				_ = send(cliproxyexecutor.StreamChunk{Err: streamErr})
 				terminateReason = "terminal_empty_incomplete"
@@ -752,6 +779,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 				if isTerminalEvent {
+					validTerminal = eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete"
+					terminateReason = "completed"
 					return
 				}
 				continue
@@ -773,12 +802,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 			}
 			if isTerminalEvent || eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+				validTerminal = eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete"
+				terminateReason = "completed"
 				return
 			}
 		}
 	}()
 
-	return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out, Complete: complete}, nil
 }
 
 // codexWebsocketPrepared contains the request pipeline output shared by the
