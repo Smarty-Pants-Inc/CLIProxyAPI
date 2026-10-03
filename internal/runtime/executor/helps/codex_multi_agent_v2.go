@@ -149,8 +149,17 @@ func TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context
 	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
 		payload = NormalizeCodexToolIntegerTypes(payload, headers)
 	}
+	// fallback keeps the request envelope so the normalizer's thinking
+	// ownership reaches the executor (the byte-only wrapper dropped it).
+	fallback := func() []byte {
+		translated := multiagentv2.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: payload})
+		if len(normalizedChanged) > 0 && normalizedChanged[0] != nil {
+			*normalizedChanged[0] = translated.ConfigurationUpdatesChanged
+		}
+		return translated.Body
+	}
 	if !isCompat {
-		return TranslateRequestWithCodexMultiAgentV2ForExecutor(ctx, headers, cfg, targetExecutor, from, to, model, payload, stream)
+		return fallback()
 	}
 	if from == sdktranslator.FormatOpenAIResponse {
 		payload = RewriteCodexOrphanDelegationInput(ctx, headers, payload, cfg)
@@ -174,7 +183,7 @@ func TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context
 	case from == sdktranslator.FormatOpenAIResponse && to == sdktranslator.FormatClaude:
 		translated = responsesclaude.ConvertOpenAIResponsesRequestToClaudeWithCompat(model, payload, stream)
 	default:
-		return TranslateRequestWithCodexMultiAgentV2ForExecutor(ctx, headers, cfg, targetExecutor, from, to, model, payload, stream)
+		return fallback()
 	}
 
 	summaryConfig := thinking.ExtractTranslatedSummaryConfig(payload, from.String(), to.String())
