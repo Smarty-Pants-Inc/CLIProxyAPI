@@ -277,6 +277,9 @@ func (s *Service) finalizeHomePluginWorkUntilDone(ctx, homeCtx context.Context, 
 		if errFinalize == nil {
 			return context.Canceled
 		}
+		if errors.Is(errFinalize, errHomePluginActivationFailed) {
+			return errFinalize
+		}
 
 		log.WithError(errFinalize).Warn("failed to finalize home plugins; retrying")
 		timer := time.NewTimer(homeSubscriberPreAckRetryBackoff)
@@ -665,11 +668,20 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 	case <-ready:
 	}
 
+	var retryRaw []byte
 	for {
 		if lifetimeCtx.Err() != nil {
 			return
 		}
-		raw, ok := queue.dequeue(lifetimeCtx)
+		raw, ok := retryRaw, retryRaw != nil
+		retryRaw = nil
+		if ok {
+			if latest, okLatest := queue.tryDequeueLatest(); okLatest {
+				raw = latest
+			}
+		} else {
+			raw, ok = queue.dequeue(lifetimeCtx)
+		}
 		if !ok {
 			return
 		}
@@ -738,6 +750,16 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 			return
 		}
 		if errFinalize := s.finalizeHomePluginWorkUntilDone(lifetimeCtx, homeCtx, generation, client, work, publish); errFinalize != nil {
+			if errors.Is(errFinalize, errHomePluginActivationFailed) {
+				// Fail closed: stay unpublished (the frontend keeps its deny gate)
+				// and retry this config, or a newer one, after a backoff.
+				log.WithError(errFinalize).Warn("home plugin activation failed; retrying")
+				if !waitForHomeSubscriberRetry(lifetimeCtx, homePluginActivationRetryBackoff) {
+					return
+				}
+				retryRaw = raw
+				continue
+			}
 			if !errors.Is(errFinalize, context.Canceled) {
 				log.WithError(errFinalize).Warn("home plugin finalization ended")
 			}

@@ -2,6 +2,8 @@ package cliproxy
 
 import (
 	"context"
+	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -122,7 +124,14 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		return false
 	}
 	if s.accessManager != nil {
-		s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+		if missing := homePluginNotActivated(cfg, s.pluginHost); missing != "" {
+			// Fork: the missing plugin may be the exclusive frontend-auth gate.
+			// An empty provider list admits every request, so deny instead.
+			log.Warnf("home plugin %s is enabled but not loaded; denying frontend requests", missing)
+			s.accessManager.SetProviders([]sdkaccess.Provider{homeActivationDenyProvider{}})
+		} else {
+			s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+		}
 	}
 	s.pluginHost.RegisterUsagePlugins()
 	sdktranslator.SetPluginHooks(s.pluginHost)
@@ -130,6 +139,37 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		s.server.RefreshPluginManagementRoutes()
 	}
 	return ctx.Err() == nil
+}
+
+// homePluginNotActivated returns the first Home-enabled plugin that the host
+// did not register, or "" when every enabled plugin is active.
+func homePluginNotActivated(cfg *config.Config, host *pluginhost.Host) string {
+	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
+		return ""
+	}
+	ids := make([]string, 0, len(cfg.Plugins.Configs))
+	for id, item := range cfg.Plugins.Configs {
+		if item.Enabled != nil && *item.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if !host.PluginRegistered(id) {
+			return id
+		}
+	}
+	return ""
+}
+
+// homeActivationDenyProvider rejects every frontend request while a Home
+// plugin activation is incomplete.
+type homeActivationDenyProvider struct{}
+
+func (homeActivationDenyProvider) Identifier() string { return "home-plugin-activation-deny" }
+
+func (homeActivationDenyProvider) Authenticate(context.Context, *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+	return nil, sdkaccess.NewNoCredentialsError()
 }
 
 func (s *Service) syncPluginModelRuntime(ctx context.Context) {

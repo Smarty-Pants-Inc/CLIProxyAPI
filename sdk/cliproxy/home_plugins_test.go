@@ -753,8 +753,12 @@ func TestStageHomeOverlay_InstalledPluginAtRuntime_Issue6225(t *testing.T) {
 		t.Fatal("statusWork[0].needsLoadMarking = false, want true")
 	}
 
-	if errFinalize := service.finalizeHomePluginWork(context.Background(), client, work); errFinalize != nil {
-		t.Fatalf("finalizeHomePluginWork() error = %v", errFinalize)
+	// Fork: a failed activation fails closed; the status is still reported.
+	if errFinalize := service.finalizeHomePluginWork(context.Background(), client, work); !errors.Is(errFinalize, errHomePluginActivationFailed) {
+		t.Fatalf("finalizeHomePluginWork() error = %v, want errHomePluginActivationFailed", errFinalize)
+	}
+	if service.homePluginSyncKey != "" {
+		t.Fatalf("homePluginSyncKey = %q after failed activation, want unsynced", service.homePluginSyncKey)
 	}
 	if writes.Load() != 1 {
 		t.Fatalf("plugin status writes = %d, want 1", writes.Load())
