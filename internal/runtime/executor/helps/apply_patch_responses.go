@@ -243,7 +243,13 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 		// Fork: completed patch input is cached in call.name/call.arguments. A
 		// later empty delta or argument-free added event adds no evidence, so
 		// drop it instead of re-validating and retaining an expanded copy.
-		if child := s.tools[util.QualifyResponsesNamespaceToolName(call.namespace, call.name)]; applypatch.IsCustomTool(child.Tool) {
+		// Events naming another child or namespace still take the full
+		// contradiction checks below.
+		child := s.tools[util.QualifyResponsesNamespaceToolName(call.namespace, call.name)]
+		sameIdentity := (name == "" || declared || util.QualifyResponsesNamespaceToolName(call.namespace, name) == child.Name) &&
+			(raw.Get("namespace").String() == "" || raw.Get("namespace").String() == call.namespace) &&
+			(raw.Get("item.namespace").String() == "" || raw.Get("item.namespace").String() == call.namespace)
+		if applypatch.IsCustomTool(child.Tool) && sameIdentity {
 			switch kind {
 			case "response.function_call_arguments.delta":
 				if root.Get("delta").String() != "" {
@@ -251,7 +257,7 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 				}
 				return nil, nil
 			case "response.output_item.added":
-				if raw.Get("item.arguments").String() == "" && (name == "" || declared || util.QualifyResponsesNamespaceToolName(call.namespace, name) == child.Name) {
+				if raw.Get("item.arguments").String() == "" {
 					return nil, nil
 				}
 			}
