@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *t
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"weather","arguments":"{}"},"output_index":0}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"fc_done_existing","type":"function_call","call_id":"call_existing","name":"other","arguments":"{}"},"output_index":1}` + "\n\n"))
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"id":null,"type":"function_call","call_id":"call_123","name":"weather-terminal","arguments":"{}"},{"id":"fc_existing","type":"function_call","call_id":"call_existing","name":"preserved","arguments":"{}"}]}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","object":"response","status":"completed","output":[{"id":null,"type":"function_call","call_id":"call_123","name":"weather-terminal","arguments":"{}"},{"id":"fc_existing","type":"function_call","call_id":"call_existing","name":"preserved","arguments":"{}"}]}}` + "\n\n"))
 	}))
 	defer server.Close()
 
@@ -59,7 +60,7 @@ func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *t
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1775555723,\"status\":\"completed\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"output\":[],\"usage\":{\"input_tokens\":8,\"output_tokens\":28,\"total_tokens\":36}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1775555723,\"status\":\"completed\",\"model\":\"gpt-5.4-mini\",\"output\":[],\"usage\":{\"input_tokens\":8,\"output_tokens\":28,\"total_tokens\":36}}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -222,25 +223,15 @@ func TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped(t *testing.T
 		"api_key":  "test",
 	}}
 
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+	result, streamErr := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
 		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
 		Stream:       true,
 	})
-	if err != nil {
-		t.Fatalf("ExecuteStream error: %v", err)
-	}
-
-	var streamErr error
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			streamErr = chunk.Err
-		}
-	}
-	if streamErr == nil {
-		t.Fatal("expected missing-completion stream error, got nil")
+	if streamErr == nil || result != nil {
+		t.Fatalf("expected call-time missing-completion error without a stream, got result=%v err=%v", result, streamErr)
 	}
 	if got := statusCodeFromTestError(t, streamErr); got != http.StatusRequestTimeout {
 		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, streamErr)
@@ -300,6 +291,7 @@ func TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDe
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}` + "\n\n"))
 		if delivery := gjson.GetBytes(body, "stream_options.reasoning_summary_delivery").String(); delivery == "sequential_cutoff" {
 			_, _ = w.Write([]byte(`data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","summary_index":0,"text":"Checking"}` + "\n\n"))
 		} else {
@@ -350,6 +342,11 @@ func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			created := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n")
+			if tc.stream {
+				// Exercise a transport failure after verified output starts the stream,
+				// not a replay-safe bootstrap disconnect before any output is delivered.
+				created = append(created, []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")...)
+			}
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -373,10 +370,18 @@ func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T
 				if errStream != nil {
 					t.Fatalf("ExecuteStream error: %v", errStream)
 				}
+				sawOutput := false
 				for chunk := range result.Chunks {
+					if strings.Contains(string(chunk.Payload), "response.output_text.delta") {
+						sawOutput = true
+					}
 					if chunk.Err != nil {
 						terminalErr = chunk.Err
 					}
+				}
+				var stop interface{ IsRequestStop() bool }
+				if !sawOutput || !errors.As(terminalErr, &stop) || !stop.IsRequestStop() {
+					t.Fatalf("post-output transport failure must prohibit replay: output=%t err=%v", sawOutput, terminalErr)
 				}
 			} else {
 				_, terminalErr = executor.Execute(ctx, auth, req, opts)
@@ -636,8 +641,8 @@ func TestCodexTerminalStreamErrHandlesUsageLimitResponseFailed(t *testing.T) {
 func statusCodeFromTestError(t *testing.T, err error) int {
 	t.Helper()
 
-	statusErr, ok := err.(interface{ StatusCode() int })
-	if !ok {
+	var statusErr interface{ StatusCode() int }
+	if !errors.As(err, &statusErr) {
 		t.Fatalf("error %T does not expose StatusCode(): %v", err, err)
 	}
 	return statusErr.StatusCode()
@@ -646,8 +651,8 @@ func statusCodeFromTestError(t *testing.T, err error) int {
 func assertRequestScopedTestError(t *testing.T, err error) {
 	t.Helper()
 
-	requestErr, ok := err.(interface{ IsRequestScoped() bool })
-	if !ok {
+	var requestErr interface{ IsRequestScoped() bool }
+	if !errors.As(err, &requestErr) {
 		t.Fatalf("error %T does not expose IsRequestScoped(): %v", err, err)
 	}
 	if !requestErr.IsRequestScoped() {
@@ -674,7 +679,7 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1775555723,\"status\":\"completed\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"output\":[],\"usage\":{\"input_tokens\":8,\"output_tokens\":28,\"total_tokens\":36}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1775555723,\"status\":\"completed\",\"model\":\"gpt-5.4-mini\",\"output\":[],\"usage\":{\"input_tokens\":8,\"output_tokens\":28,\"total_tokens\":36}}}\n\n"))
 	}))
 	defer server.Close()
 

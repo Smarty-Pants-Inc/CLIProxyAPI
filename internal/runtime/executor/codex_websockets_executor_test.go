@@ -126,7 +126,7 @@ func TestCodexWebsocketsExecuteRestoresClaudeAgentReasoningReplay(t *testing.T) 
 			t.Fatalf("read upstream websocket message: %v", errRead)
 		}
 		capturedPayload <- bytes.Clone(payload)
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-ws-replay","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"next answer"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-ws-replay","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"next answer"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -206,7 +206,7 @@ func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *
 		}
 		capturedPayload <- bytes.Clone(payload)
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -273,7 +273,7 @@ func TestCodexWebsocketsExecuteStreamResponsesLiteForcesParallelToolCallsFalse(t
 		}
 		capturedPayload <- bytes.Clone(payload)
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-luna","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Errorf("write completed websocket message: %v", errWrite)
 		}
@@ -348,7 +348,7 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 		}
 		capturedPayload <- bytes.Clone(payload)
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","model":"gpt-5-codex","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -652,7 +652,7 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
 	delta := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
-	completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5-codex","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -764,30 +764,15 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
 
 	result, err := exec.ExecuteStream(ctx, auth, req, opts)
-	if err != nil {
-		t.Fatalf("ExecuteStream() error = %v", err)
+	if err == nil || result != nil {
+		t.Fatalf("expected call-time upstream error without a stream, got result=%v err=%v", result, err)
 	}
-
-	select {
-	case chunk, ok := <-result.Chunks:
-		if !ok {
-			t.Fatal("stream closed before error chunk")
-		}
-		if len(bytes.TrimSpace(chunk.Payload)) != 0 {
-			t.Fatalf("error chunk payload = %q, want empty", chunk.Payload)
-		}
-		if chunk.Err == nil {
-			t.Fatal("error chunk Err = nil, want upstream error")
-		}
-		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
-		if !ok {
-			t.Fatalf("error type %T does not expose StatusCode", chunk.Err)
-		}
-		if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
-			t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for error stream chunk")
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error type %T does not expose StatusCode", err)
+	}
+	if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
 
@@ -993,34 +978,22 @@ func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 	}
 
 	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
-	if err != nil {
-		t.Fatalf("ExecuteStream() error = %v", err)
+	if err == nil || result != nil {
+		t.Fatalf("expected call-time message-too-big error without a stream, got result=%v err=%v", result, err)
 	}
-
-	select {
-	case chunk, ok := <-result.Chunks:
-		if !ok {
-			t.Fatal("stream closed before error chunk")
-		}
-		if chunk.Err == nil {
-			t.Fatal("error chunk Err = nil, want message-too-big error")
-		}
-		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
-		if !ok {
-			t.Fatalf("error type %T does not expose StatusCode", chunk.Err)
-		}
-		if got := statusErr.StatusCode(); got != http.StatusRequestEntityTooLarge {
-			t.Fatalf("status = %d, want %d", got, http.StatusRequestEntityTooLarge)
-		}
-		if got := gjson.Get(chunk.Err.Error(), "error.code").String(); got != "message_too_big" {
-			t.Fatalf("error code = %q, want message_too_big; err=%v", got, chunk.Err)
-		}
-		requestErr, ok := chunk.Err.(interface{ IsRequestScoped() bool })
-		if !ok || !requestErr.IsRequestScoped() {
-			t.Fatalf("message-too-big error should be request scoped, got %T", chunk.Err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for error stream chunk")
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error type %T does not expose StatusCode", err)
+	}
+	if got := statusErr.StatusCode(); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", got, http.StatusRequestEntityTooLarge)
+	}
+	if got := gjson.Get(err.Error(), "error.code").String(); got != "message_too_big" {
+		t.Fatalf("error code = %q, want message_too_big; err=%v", got, err)
+	}
+	requestErr, ok := err.(interface{ IsRequestScoped() bool })
+	if !ok || !requestErr.IsRequestScoped() {
+		t.Fatalf("message-too-big error should be request scoped, got %T", err)
 	}
 }
 
@@ -2169,6 +2142,10 @@ func TestCodexWebsocketTerminalFailureInvalidatesRetainedLifecycle(t *testing.T)
 		if _, _, errRead := conn.ReadMessage(); errRead != nil {
 			return
 		}
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","model":"gpt-5-codex"}}`)); errWrite != nil {
+			t.Errorf("write created response: %v", errWrite)
+			return
+		}
 		terminal := []byte(`{"type":"response.failed","response":{"error":{"type":"authentication_error","code":"invalid_api_key","message":"Invalid token."}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, terminal); errWrite != nil {
 			t.Errorf("write terminal response: %v", errWrite)
@@ -2256,7 +2233,7 @@ func TestCodexWebsocketNonstreamLifecycleBindFailureDetachesConnection(t *testin
 		if _, _, errRead := conn.ReadMessage(); errRead != nil {
 			return
 		}
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5-codex","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Errorf("write completed response: %v", errWrite)
 		}
@@ -2382,7 +2359,7 @@ func TestCodexWebsocketsExecuteObservesWebSocketResponseEvents(t *testing.T) {
 			t.Fatalf("write rate limit websocket message: %v", errWrite)
 		}
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -2460,7 +2437,7 @@ func TestCodexWebsocketsExecuteStreamObservesWebSocketResponseEvents(t *testing.
 			t.Fatalf("write rate limit websocket message: %v", errWrite)
 		}
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -2784,12 +2761,8 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		// Start server reader loop so server processes control frames.
 		readErrCh := make(chan error, 1)
 		go func() {
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					readErrCh <- errRead
-					return
-				}
-			}
+			_, _, errRead := conn.ReadMessage()
+			readErrCh <- errRead
 		}()
 
 		// Wait until client has entered writeMessage and is actively holding writeMu.
@@ -2815,8 +2788,13 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			return
 		}
 
+		// Do not close the connection before the held upload has finished.
+		if errRead := <-readErrCh; errRead != nil {
+			t.Errorf("read uploaded request: %v", errRead)
+			return
+		}
 		// Now send terminal response.
-		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
+		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
 	}))
 	defer server.Close()
@@ -2880,12 +2858,10 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return nil
 		})
 
+		readErrCh := make(chan error, 1)
 		go func() {
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					return
-				}
-			}
+			_, _, errRead := conn.ReadMessage()
+			readErrCh <- errRead
 		}()
 
 		// Wait until client has entered writeMessage on sessionless path.
@@ -2911,7 +2887,11 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return
 		}
 
-		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
+		if errRead := <-readErrCh; errRead != nil {
+			t.Errorf("read uploaded request: %v", errRead)
+			return
+		}
+		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
 	}))
 	defer server.Close()
@@ -2972,12 +2952,10 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			return nil
 		})
 
+		readErrCh := make(chan error, 1)
 		go func() {
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					return
-				}
-			}
+			_, _, errRead := conn.ReadMessage()
+			readErrCh <- errRead
 		}()
 
 		// Wait until client has entered writeMessage on nonstream path.
@@ -3003,7 +2981,11 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			return
 		}
 
-		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
+		if errRead := <-readErrCh; errRead != nil {
+			t.Errorf("read uploaded request: %v", errRead)
+			return
+		}
+		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
 	}))
 	defer server.Close()
@@ -3053,7 +3035,7 @@ func TestCodexWebsockets_SessionlessBufferingImmediateTerminalClosesConnection(t
 		}
 
 		// Send immediate terminal event while buffering is enabled.
-		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
+		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
 
 		// Wait until client closes connection.

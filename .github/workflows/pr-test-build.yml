@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   build:
+    needs: test
     # Public fork on a self-hosted pool: never run an outside fork's PR code (smarty-dev#1246, Light 5941520806).
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     # Mergify queue drafts and PRs labelled priority-ci use the reserved smarty-priority Forge pool (org 2026-10-02 15:38Z, smarty-dev#3257).
@@ -45,6 +46,20 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+
+  test:
+    # Match the existing PR trust boundary; outside forks must not run on our pool.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: smarty-linux-x64
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test all packages without filters or cached results
+        run: go test ./... -count=1 -timeout 15m
 
   artifact:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'

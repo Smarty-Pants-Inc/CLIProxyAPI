@@ -46,7 +46,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 					}
 					capturedPayload <- append([]byte(nil), payload...)
 					turn := requestCount.Add(1)
-					completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":"collaboration-optimize","arguments":"{}","call_id":"call_%d"}]}}`, turn, turn))
+					completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","model":"gpt-5.4","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":"collaboration-optimize","arguments":"{}","call_id":"call_%d"}]}}`, turn, turn))
 					if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 						t.Errorf("write websocket response: %v", errWrite)
 						return
@@ -172,7 +172,7 @@ func TestCodexWebsocketsExecutorOptimizeMultiAgentV2(t *testing.T) {
 	defer modelRegistry.UnregisterClient(clientID)
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	capturedPayload := make(chan []byte, 2)
+	capturedPayload := make(chan []byte, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		conn, errUpgrade := upgrader.Upgrade(w, request, nil)
 		if errUpgrade != nil {
@@ -187,7 +187,7 @@ func TestCodexWebsocketsExecutorOptimizeMultiAgentV2(t *testing.T) {
 		}
 		capturedPayload <- payload
 		namespace := gjson.GetBytes(payload, "input.0.tools.0.name").String()
-		completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":%q,"arguments":"{}","call_id":"call_1"}]}}`, namespace))
+		completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":%q,"arguments":"{}","call_id":"call_1"}]}}`, namespace))
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Errorf("write websocket response: %v", errWrite)
 		}

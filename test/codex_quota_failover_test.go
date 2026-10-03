@@ -19,13 +19,16 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 	for _, transport := range []string{"sse", "websocket-error", "websocket-failed"} {
 		t.Run(transport, func(t *testing.T) {
 			const model, siblingModel = "gpt-5.4", "gpt-5.4-mini"
-			const created = `{"type":"response.created","response":{"id":"quota-test-response"}}`
+			created := func(payload []byte) string {
+				return fmt.Sprintf(`{"type":"response.created","response":{"id":"quota-test-response","model":%q}}`, gjson.GetBytes(payload, "model").String())
+			}
 			const quota = `{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}`
 			const completed = `{"type":"response.completed","response":{"id":"quota-test-success","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 			attempts := make(chan string, 8)
@@ -41,8 +44,13 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 					}
 				}
 				if transport == "sse" {
+					payload, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Errorf("read SSE request: %v", errRead)
+						return
+					}
 					w.Header().Set("Content-Type", "text/event-stream")
-					if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", created, terminal); errWrite != nil {
+					if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\ndata: %s\n\n", created(payload), `{"type":"response.output_text.delta","delta":"hello"}`, terminal); errWrite != nil {
 						t.Errorf("write SSE: %v", errWrite)
 					}
 					return
@@ -57,11 +65,12 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 						t.Errorf("close websocket: %v", errClose)
 					}
 				}()
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				_, payload, errRead := conn.ReadMessage()
+				if errRead != nil {
 					t.Errorf("read websocket request: %v", errRead)
 					return
 				}
-				for _, event := range []string{created, terminal} {
+				for _, event := range []string{created(payload), `{"type":"response.output_text.delta","delta":"hello"}`, terminal} {
 					if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
 						t.Errorf("write websocket event: %v", errWrite)
 						return
@@ -149,7 +158,9 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 	for _, transport := range []string{"sse", "websocket-error", "websocket-failed"} {
 		t.Run(transport, func(t *testing.T) {
 			const model, siblingModel = "gpt-5.3-codex-spark", "gpt-5.6-sol"
-			const created = `{"type":"response.created","response":{"id":"quota-test-response"}}`
+			created := func(payload string) string {
+				return fmt.Sprintf(`{"type":"response.created","response":{"id":"quota-test-response","model":%q}}`, gjson.Get(payload, "model").String())
+			}
 			const quota = `{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}`
 			const completed = `{"type":"response.completed","response":{"id":"quota-test-success","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 			attempts := make(chan string, 8)
@@ -186,7 +197,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 							terminal = `{"type":"response.failed","response":{"error":` + quota + `}}`
 						}
 					}
-					for _, event := range []string{created, terminal} {
+					for _, event := range []string{created(reqText), `{"type":"response.output_text.delta","delta":"hello"}`, terminal} {
 						if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
 							t.Errorf("write websocket event: %v", errWrite)
 							return
@@ -198,7 +209,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 					terminal = `{"type":"error","status":429,"error":` + quota + `}`
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
-				if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", created, terminal); errWrite != nil {
+				if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\ndata: %s\n\n", created(reqText), `{"type":"response.output_text.delta","delta":"hello"}`, terminal); errWrite != nil {
 					t.Errorf("write SSE: %v", errWrite)
 				}
 			}))

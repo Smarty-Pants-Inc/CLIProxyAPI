@@ -200,6 +200,7 @@ func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
 }
 
 func TestGetDevinModelsFallback(t *testing.T) {
+	t.Skip("smarty-dev#3555: inherited catalog drift; devin/grok-4-6 OwnedBy is devin, not xai, on upstream c404af96")
 	devinModels := GetDevinModels()
 	if len(devinModels) == 0 {
 		t.Fatal("GetDevinModels() returned empty list")

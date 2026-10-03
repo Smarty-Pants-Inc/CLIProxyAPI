@@ -29,7 +29,7 @@ func testCodexNativeStreamFidelity(t *testing.T, source sdktranslator.Format) {
 			for _, buffering := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/lite=%s/buffering=%t", transport, lite, buffering), func(t *testing.T) {
 					metadata := `{"type":"codex.response.metadata","headers":{"x-models-etag":"models-v1","x-codex-turn-state":"turn-1","x-codex-safety-buffering-enabled":"true","x-codex-safety-buffering-faster-model":"fixture-model"},"future":{"ok":true}}`
-					completed := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"future":{"ok":true},"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+					completed := `{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6-sol","status":"completed","output":[],"future":{"ok":true},"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 					events := []string{metadata, `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`, completed}
 					captured := make(chan []byte, 1)
 					capturedHeaders := make(chan http.Header, 1)

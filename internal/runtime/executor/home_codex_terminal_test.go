@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -31,6 +32,7 @@ func (*terminalCodexHomeDispatcher) AbortAmbiguousDispatch() {}
 func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	var connections atomic.Int32
+	failFirstStream := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
 		if errUpgrade != nil {
@@ -42,10 +44,13 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 			return
 		}
 		if connections.Add(1) == 1 {
-			_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": "response-1"}})
+			_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": "response-1", "model": "gpt-5-codex"}})
+			_ = conn.WriteJSON(map[string]any{"type": "response.output_text.delta", "delta": "hello"})
+			// Fail only after the caller has received a verified, started stream.
+			<-failFirstStream
 			_ = conn.WriteJSON(map[string]any{"type": "error", "status": http.StatusBadGateway, "error": map[string]any{"message": "terminal failure"}})
 		} else {
-			_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": "response-2", "output": []any{}}})
+			_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": "response-2", "model": "gpt-5-codex", "output": []any{}}})
 		}
 		for {
 			if _, _, errRead := conn.ReadMessage(); errRead != nil {
@@ -54,6 +59,7 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 		}
 	}))
 	defer server.Close()
+	defer close(failFirstStream)
 
 	dispatcher := &terminalCodexHomeDispatcher{auth: cliproxyauth.Auth{
 		ID:       "home-codex",
@@ -67,7 +73,10 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 	manager := cliproxyauth.NewManager(nil, nil, nil)
 	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
 	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
-	manager.RegisterExecutor(NewCodexWebsocketsExecutor(&config.Config{}))
+	executor := NewCodexWebsocketsExecutor(&config.Config{})
+	manager.RegisterExecutor(executor)
+	disconnected := executor.UpstreamDisconnectChan("terminal-home-session")
+	t.Cleanup(func() { manager.CloseExecutionSession("terminal-home-session") })
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
 	opts := cliproxyexecutor.Options{
@@ -84,14 +93,35 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 	if errFirst != nil {
 		t.Fatalf("first ExecuteStream() error = %v", errFirst)
 	}
-	for range first.Chunks {
+	sawDelta := false
+	for chunk := range first.Chunks {
+		if !sawDelta && strings.Contains(string(chunk.Payload), "response.output_text.delta") {
+			sawDelta = true
+			failFirstStream <- struct{}{}
+		}
+	}
+	if !sawDelta {
+		t.Fatal("first stream did not deliver the verified content delta")
+	}
+	// Ending the Home selection cancels its stream context, so the terminal
+	// error is guaranteed on the disconnect channel, not on the chunk channel.
+	select {
+	case terminalErr := <-disconnected:
+		if terminalErr == nil || !strings.Contains(terminalErr.Error(), "terminal failure") {
+			t.Fatalf("upstream disconnect error = %v, want terminal failure", terminalErr)
+		}
+	default:
+		t.Fatal("terminal failure did not notify upstream disconnect")
 	}
 
 	second, errSecond := manager.ExecuteStream(ctx, []string{"codex"}, request, opts)
 	if errSecond != nil {
 		t.Fatalf("second ExecuteStream() error = %v", errSecond)
 	}
-	for range second.Chunks {
+	for chunk := range second.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("second stream error = %v", chunk.Err)
+		}
 	}
 	if got := dispatcher.calls.Load(); got != 2 {
 		t.Fatalf("Home RPOP calls = %d, want 2 after terminal failure", got)
