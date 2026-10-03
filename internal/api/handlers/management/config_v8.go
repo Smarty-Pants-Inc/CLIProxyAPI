@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -166,6 +167,16 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		}
 	}
 	stripAPIKeysAuthIndexesFromRoot(root)
+	// Fork: persist only the bcrypt verifier of a new management password,
+	// never the plaintext (v0 wrote the hash back synchronously on save).
+	if secret := configV8Node(root, []string{"management", "secret-key"}); secret != nil && secret.Kind == yaml.ScalarNode && secret.Value != "" && !looksLikeBcryptV8(secret.Value) {
+		hashed, errHash := bcrypt.GenerateFromPassword([]byte(secret.Value), bcrypt.DefaultCost)
+		if errHash != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "hash_failed"})
+			return
+		}
+		secret.Value, secret.Tag, secret.Style = string(hashed), "!!str", 0
+	}
 	data, err = yaml.Marshal(&doc)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
@@ -203,6 +214,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), snapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": 8})
+}
+
+func looksLikeBcryptV8(s string) bool {
+	return len(s) > 4 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
 }
 
 var v8ICEServersPath = []string{"oauth", "providers", "codex", "live-media-relay", "ice-servers"}
