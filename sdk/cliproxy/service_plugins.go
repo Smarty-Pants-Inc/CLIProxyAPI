@@ -2,7 +2,6 @@ package cliproxy
 
 import (
 	"context"
-	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -124,13 +123,18 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		return false
 	}
 	if s.accessManager != nil {
-		if missing := homePluginNotActivated(cfg, s.pluginHost); missing != "" {
-			// Fork: the missing plugin may be the exclusive frontend-auth gate.
-			// An empty provider list admits every request, so deny instead.
+		// Fork: the missing plugin may be the exclusive frontend-auth gate.
+		// An empty provider list admits every request, so deny instead. The
+		// manager gate survives server reconciliation on retries; only a
+		// complete activation clears it.
+		missing := homePluginNotActivated(cfg, s.pluginHost)
+		if missing != "" {
 			log.Warnf("home plugin %s is enabled but not loaded; denying frontend requests", missing)
-			s.accessManager.SetProviders([]sdkaccess.Provider{homeActivationDenyProvider{}})
-		} else {
-			s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+			s.accessManager.SetDenyAll(true) // before the list loses the old gate
+		}
+		s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+		if missing == "" {
+			s.accessManager.SetDenyAll(false)
 		}
 	}
 	s.pluginHost.RegisterUsagePlugins()
@@ -160,16 +164,6 @@ func homePluginNotActivated(cfg *config.Config, host *pluginhost.Host) string {
 		}
 	}
 	return ""
-}
-
-// homeActivationDenyProvider rejects every frontend request while a Home
-// plugin activation is incomplete.
-type homeActivationDenyProvider struct{}
-
-func (homeActivationDenyProvider) Identifier() string { return "home-plugin-activation-deny" }
-
-func (homeActivationDenyProvider) Authenticate(context.Context, *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
-	return nil, sdkaccess.NewNoCredentialsError()
 }
 
 func (s *Service) syncPluginModelRuntime(ctx context.Context) {

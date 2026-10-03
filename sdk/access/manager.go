@@ -10,6 +10,19 @@ import (
 type Manager struct {
 	mu        sync.RWMutex
 	providers []Provider
+	// Fork: denyAll is an authoritative fail-closed gate. SetProviders (for
+	// example config reconciliation) never clears it; only SetDenyAll does.
+	denyAll bool
+}
+
+// SetDenyAll makes Authenticate reject every request until it is cleared.
+func (m *Manager) SetDenyAll(deny bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.denyAll = deny
+	m.mu.Unlock()
 }
 
 // NewManager constructs an empty manager.
@@ -45,6 +58,12 @@ func (m *Manager) Providers() []Provider {
 func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *AuthError) {
 	if m == nil {
 		return nil, nil
+	}
+	m.mu.RLock()
+	deny := m.denyAll
+	m.mu.RUnlock()
+	if deny {
+		return nil, NewNoCredentialsError()
 	}
 	providers := m.Providers()
 	if len(providers) == 0 {
