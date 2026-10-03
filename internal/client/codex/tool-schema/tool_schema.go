@@ -142,7 +142,7 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 	// 1. Process top-level tools
 	toolsResult := gjson.GetBytes(body, "tools")
 	if toolsResult.IsArray() {
-		if updated, ok := normalizeToolIntegerTypesInArray(toolsResult); ok {
+		if updated, ok := normalizeToolIntegerTypesInArray(toolsResult, 0); ok {
 			if out, errSet := sjson.SetRawBytes(body, "tools", updated); errSet == nil {
 				body = out
 				changed = true
@@ -157,7 +157,7 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 			if item.Get("type").String() == "additional_tools" {
 				addTools := item.Get("tools")
 				if addTools.IsArray() {
-					if updated, ok := normalizeToolIntegerTypesInArray(addTools); ok {
+					if updated, ok := normalizeToolIntegerTypesInArray(addTools, 0); ok {
 						path := fmt.Sprintf("input.%d.tools", idx)
 						if out, errSet := sjson.SetRawBytes(body, path, updated); errSet == nil {
 							body = out
@@ -175,14 +175,19 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 	return body
 }
 
-func normalizeToolIntegerTypesInArray(tools gjson.Result) ([]byte, bool) {
-	if !tools.IsArray() {
+// maxToolNestingDepth bounds namespace and declaration nesting. Real requests
+// nest at most one level; deeper input is left untouched so a small body
+// cannot force repeated ancestor parsing.
+const maxToolNestingDepth = 4
+
+func normalizeToolIntegerTypesInArray(tools gjson.Result, depth int) ([]byte, bool) {
+	if !tools.IsArray() || depth > maxToolNestingDepth {
 		return nil, false
 	}
 	var out []byte
 	offset := 0
 	tools.ForEach(func(_, tool gjson.Result) bool {
-		updated, changed := normalizeToolIntegerTypesInElement(tool)
+		updated, changed := normalizeToolIntegerTypesInElement(tool, depth)
 		if !changed {
 			return true
 		}
@@ -201,7 +206,7 @@ func normalizeToolIntegerTypesInArray(tools gjson.Result) ([]byte, bool) {
 	return append(out, tools.Raw[offset:]...), true
 }
 
-func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
+func normalizeToolIntegerTypesInElement(tool gjson.Result, depth int) ([]byte, bool) {
 	toolRaw := []byte(tool.Raw)
 	changed := false
 
@@ -209,7 +214,7 @@ func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
 	if tool.Get("type").String() == "namespace" {
 		nested := tool.Get("tools")
 		if nested.IsArray() {
-			if updated, ok := normalizeToolIntegerTypesInArray(nested); ok {
+			if updated, ok := normalizeToolIntegerTypesInArray(nested, depth+1); ok {
 				if out, errSet := sjson.SetRawBytes(toolRaw, "tools", updated); errSet == nil {
 					toolRaw = out
 					changed = true
@@ -223,7 +228,7 @@ func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
 	for _, declKey := range []string{"function_declarations", "functionDeclarations"} {
 		decls := tool.Get(declKey)
 		if decls.IsArray() {
-			if updated, ok := normalizeToolIntegerTypesInArray(decls); ok {
+			if updated, ok := normalizeToolIntegerTypesInArray(decls, depth+1); ok {
 				if out, errSet := sjson.SetRawBytes(toolRaw, declKey, updated); errSet == nil {
 					toolRaw = out
 					changed = true
