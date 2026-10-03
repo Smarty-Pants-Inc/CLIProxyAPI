@@ -394,6 +394,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			fallback:  standardTransport,
 		},
 	}
+	client.Transport = restrictCodexAuthority(ctx, auth, client.Transport)
 	if timeout > 0 {
 		client.Timeout = timeout
 	}

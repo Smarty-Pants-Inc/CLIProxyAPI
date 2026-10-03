@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -131,7 +132,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.configCooldownMu.Lock()
 	defer m.configCooldownMu.Unlock()
-	if m.setConfigSnapshotLocked(cfg) {
+	if cleared, _ := m.setConfigSnapshotLocked(cfg); cleared {
 		m.persistCooldownStatesLocked(context.Background())
 	}
 }
@@ -144,10 +145,11 @@ func (m *Manager) SetConfigSnapshot(cfg *internalconfig.Config) bool {
 	}
 	m.configCooldownMu.Lock()
 	defer m.configCooldownMu.Unlock()
-	return m.setConfigSnapshotLocked(cfg)
+	cleared, _ := m.setConfigSnapshotLocked(cfg)
+	return cleared
 }
 
-func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
+func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) (bool, bool) {
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	} else {
@@ -157,10 +159,22 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 	oldCooldownStore := m.cooldownStore
 	m.mu.RUnlock()
 	previousCfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	cfg = internalconfig.PreserveAPIKeyPolicies(previousCfg, cfg)
+	if len(cfg.APIKeys) != 0 || len(cfg.PolicyReloadState) != 0 {
+		if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
+			m.keyPolicyMu.Lock()
+			m.runtimeConfig.Store(internalconfig.RetainAPIKeyPolicyWarnings(previousCfg, cfg))
+			m.keyPolicyMu.Unlock()
+			log.WithError(errValidate).Warn("rejected config update with invalid API key policies")
+			return false, false
+		}
+	}
 	if homeSessionAliasTTL(previousCfg) != homeSessionAliasTTL(cfg) {
 		m.homeSessionAliases.clear()
 	}
+	m.keyPolicyMu.Lock()
 	m.runtimeConfig.Store(cfg)
+	m.keyPolicyMu.Unlock()
 	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
 	if clearedCooldowns && oldCooldownStore != nil {
 		m.mu.Lock()
@@ -173,7 +187,7 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 		m.clearHomeRuntimeAuths()
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	return clearedCooldowns
+	return clearedCooldowns, true
 }
 
 // ApplyConfigWithCooldownStateStore serializes a config update with its cooldown
@@ -195,7 +209,9 @@ func (m *Manager) ApplyConfigWithCooldownStateStore(ctx context.Context, cfg *in
 	m.mu.RLock()
 	oldStore := m.cooldownStore
 	m.mu.RUnlock()
-	m.setConfigSnapshotLocked(cfg)
+	if _, accepted := m.setConfigSnapshotLocked(cfg); !accepted {
+		return false
+	}
 	if oldStore != nil && !m.persistCooldownStatesToLocked(ctx, oldStore) {
 		return false
 	}

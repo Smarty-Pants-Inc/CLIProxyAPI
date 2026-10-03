@@ -12,6 +12,9 @@ import (
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+	if err := cfg.ValidateAPIKeyPolicies(); err != nil {
+		return err
+	}
 	persistCfg := cfg
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
@@ -59,6 +62,11 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
+	// Policy arrays/zeros must survive the general default-pruning merge unchanged.
+	removeMapKey(original.Content[0], "api-key-policies")
+	if i := findMapKeyIndex(generated.Content[0], "api-key-policies"); i >= 0 {
+		original.Content[0].Content = append(original.Content[0].Content, deepCopyNode(generated.Content[0].Content[i]), deepCopyNode(generated.Content[0].Content[i+1]))
+	}
 	normalizeCollectionNodeStyles(original.Content[0])
 
 	// Write back.

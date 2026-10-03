@@ -33,6 +33,12 @@ func (s *Service) Run(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("cliproxy: service is nil")
 	}
+	if s.cfg == nil {
+		return fmt.Errorf("cliproxy: configuration is required")
+	}
+	if errValidate := s.cfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		return fmt.Errorf("cliproxy: validate API key policies: %w", errValidate)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

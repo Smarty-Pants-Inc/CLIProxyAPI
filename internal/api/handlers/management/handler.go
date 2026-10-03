@@ -22,6 +22,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 )
 
 type attemptInfo struct {
@@ -177,6 +178,10 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 // saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
 // Callers must hold h.mu.
 func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
+	if h.policyConfigFrozenLocked() {
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return configReloadSnapshot{}, false
+	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
 		return configReloadSnapshot{}, false
@@ -292,6 +297,14 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			c.AbortWithStatusJSON(statusCode, gin.H{"error": errMsg})
 			return
 		}
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if !policyFreezeExempt[strings.TrimPrefix(c.FullPath(), "/v0/management")] && h.policyConfigFrozen() {
+				c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+				return
+			}
+		}
 		c.Next()
 	}
 }
@@ -397,6 +410,48 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	return true, 0, ""
 }
 
+const errPolicyConfigFrozen = "api-key-policies are configured: edit config.yaml and restart; management config writes are disabled"
+
+// policyFreezeExempt lists management writes that never mutate h.cfg or write
+// config.yaml (auth files, quotas, logs, OAuth sessions).
+var policyFreezeExempt = map[string]bool{
+	"/auth-files": true, "/auth-files/status": true, "/auth-files/fields": true, "/auth-files/refresh": true,
+	"/vertex/import": true, "/api-call": true, "/reset-quota": true, "/quota/fetch": true, "/quota/reset": true,
+	"/plugins/:id/quota": true, "/plugins/:id/quota/reset": true, "/logs": true, "/oauth-session": true,
+}
+
+// policyConfigFrozen is the F24A/F30 scope cut: while client-key policies exist in
+// the runtime config or in config.yaml (a change deferred to restart), management
+// must not mutate the shared config or rewrite config.yaml. Unreadable/unparsable
+// disk state fails closed.
+// ponytail: refuse instead of separating desired and effective policy state;
+// revisit if operators need management edits on policied gateways.
+func (h *Handler) policyConfigFrozen() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.policyConfigFrozenLocked()
+}
+
+func (h *Handler) policyConfigFrozenLocked() bool {
+	if h.cfg != nil && len(h.cfg.APIKeyPolicies) > 0 {
+		return true
+	}
+	if h.configFilePath == "" {
+		return false
+	}
+	data, err := os.ReadFile(h.configFilePath)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	var disk struct {
+		Policies yaml.Node `yaml:"api-key-policies"`
+	}
+	if yaml.Unmarshal(data, &disk) != nil {
+		return true
+	}
+	return disk.Policies.Kind != 0
+}
+
 // persist saves the current in-memory config to disk.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
@@ -407,6 +462,10 @@ func (h *Handler) persist(c *gin.Context) bool {
 // persistLocked saves the current in-memory config to disk.
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
+	if h.policyConfigFrozenLocked() {
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return false
+	}
 	// Preserve comments when writing
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})

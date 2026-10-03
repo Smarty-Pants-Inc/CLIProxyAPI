@@ -49,6 +49,20 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional client-key policies (SHA256 of the configured key; exact runtime auth IDs).
+# Codex Responses HTTP/SSE only; other paths, Home/plugins, redirects/retries fail closed.
+# ws-auth must stay true. Nil models/caps are unlimited; [] models/auths and 0 caps deny.
+# Policy additions/removals/changes on existing keys take effect only after restart.
+# New keys added together with a policy take effect on reload.
+# UTC daily counters survive reload, NOT restart. One active operation per key:
+# request overshoot 0; token overshoot <= one operation's input+output. Missing usage exhausts.
+# api-key-policies:
+#   - key-sha256: "<64 lowercase hex characters>"
+#     allowed-models: [gpt-6.1-sol]
+#     allowed-auths: ["<verified runtime credential ID>"]
+#     daily-token-cap: 100000
+#     daily-request-cap: 100
+
 # Enable debug logging
 debug: false
 
@@ -366,7 +380,8 @@ codex:
   # Default: false
   model-level-cooling: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
-  # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
+  # This requires inbound UDP reachability. While disabled, Codex Live WebRTC calls are refused
+  # (503 api_key_policy_requires_media_relay): direct provider media cannot be ended by the gateway.
   live-media-relay:
     enabled: false
     # Maximum concurrent media sessions. Zero uses the default of 32.

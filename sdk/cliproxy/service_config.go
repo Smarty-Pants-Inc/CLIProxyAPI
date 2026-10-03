@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -164,12 +165,23 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if newCfg == nil {
 		return configCommit{}
 	}
+	if errValidate := newCfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with invalid API key policies")
+		return configCommit{}
+	}
 	if errValidate := newCfg.ValidateCredentialWeights(); errValidate != nil {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}
 	}
 
 	s.cfgMu.Lock()
+	newCfg = internalconfig.PreserveAPIKeyPolicies(s.cfg, newCfg)
+	if errValidate := newCfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		s.cfg = internalconfig.RetainAPIKeyPolicyWarnings(s.cfg, newCfg)
+		s.cfgMu.Unlock()
+		log.WithError(errValidate).Warn("rejected config update with invalid API key policies")
+		return configCommit{}
+	}
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
 	s.configSequence++
@@ -375,11 +387,13 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	cfg.APIKeys = nil
+	if len(cfg.APIKeyPolicies) == 0 {
+		cfg.APIKeys = nil
+		cfg.WebsocketAuth = false
+	}
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false
-	cfg.WebsocketAuth = false
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
 	cfg.Plugins.StoreAuth = nil
