@@ -221,6 +221,28 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 	if call.ordinary && !declared {
 		return [][]byte{event}, nil
 	}
+	if call.completed && call.namespace != "" {
+		if declared && call.namespace != namespace {
+			return nil, errors.New("conflicting apply_patch dispatcher namespace")
+		}
+		// Fork: completed patch input is cached in call.name/call.arguments. A
+		// later empty delta or argument-free added event adds no evidence, so
+		// drop it instead of re-validating and retaining an expanded copy.
+		if child := s.tools[util.QualifyResponsesNamespaceToolName(call.namespace, call.name)]; applypatch.IsCustomTool(child.Tool) {
+			switch kind {
+			case "response.function_call_arguments.delta":
+				if root.Get("delta").String() != "" {
+					return nil, errors.New("apply_patch dispatcher arguments received after completion")
+				}
+				return nil, nil
+			case "response.output_item.added":
+				if raw.Get("item.arguments").String() == "" && (name == "" || declared || util.QualifyResponsesNamespaceToolName(call.namespace, name) == child.Name) {
+					return nil, nil
+				}
+			}
+		}
+	}
+	completedBefore := call.completed
 	call.events = append(call.events, bytes.Clone(event))
 	call.originals = append(call.originals, bytes.Clone(original))
 	if declared {
@@ -409,6 +431,10 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 			}
 		}
 		out = append(out, pending)
+	}
+	if completedBefore {
+		// Post-completion events were validated above; do not retain them.
+		call.events, call.originals = call.events[:len(call.events)-1], call.originals[:len(call.originals)-1]
 	}
 	call.completed = true
 	call.name, call.arguments = name, finalArguments
