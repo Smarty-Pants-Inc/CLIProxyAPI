@@ -336,8 +336,8 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				fnName = strings.TrimSpace(t.Get("name").String())
 			}
 			if fnName != "" {
+				// Permission is by exact source identity; a backend alias never grants it.
 				allowedToolNames[fnName] = struct{}{}
-				allowedToolNames[names.ClaudeName(fnName)] = struct{}{}
 			}
 		}
 		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
@@ -358,9 +358,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				sanitizedFnName := names.ClaudeName(fnName)
 				if isAllowedTools {
 					if _, ok := allowedToolNames[fnName]; !ok {
-						if _, okSanitized := allowedToolNames[sanitizedFnName]; !okSanitized {
-							return true
-						}
+						return true
 					}
 				}
 				anthropicTool := []byte(`{"name":"","description":""}`)
