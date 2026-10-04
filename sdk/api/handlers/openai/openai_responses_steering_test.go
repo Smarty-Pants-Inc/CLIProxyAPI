@@ -61,7 +61,7 @@ func TestResponsesSteerInFlightWebSocket(t *testing.T) {
 		}
 
 		// Emit response.created
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1"}}`))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"model":"steering-red-model","id":"r1"}}`))
 
 		// Read next frame: in-flight response.steer
 		_, steerPayload, err := c.ReadMessage()
@@ -76,7 +76,7 @@ func TestResponsesSteerInFlightWebSocket(t *testing.T) {
 			t.Errorf("expected response.steer, got %s", steerPayload)
 		}
 
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"model":"steering-red-model","id":"r1","output":[]}}`))
 	}))
 	defer upstream.Close()
 
