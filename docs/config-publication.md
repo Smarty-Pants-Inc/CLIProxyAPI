@@ -67,13 +67,14 @@ plaintext management key also refuses if its secure rewrite cannot be published.
 
 ## Security and scope
 
-Unix staging and replacements preserve the original owner/group and use the
-stricter `0600` mode, masking inherited POSIX ACL group/named-user grants. New
-configs are also owner-only. This can remove existing group-read access; the
-server must run as the owner. If ownership cannot be retained, publication is
-refused before writing credentials. Windows publication is currently refused:
-numeric mode bits cannot preserve a Windows DACL safely. Failed owner-private
-staging files may remain in the config directory for diagnosis.
+Linux staging and replacements preserve the original owner/group and use
+owner-only mode bits no broader than the original (`0600` for new configs),
+masking inherited POSIX ACL group/named-user grants. This can remove existing
+group-read access; the server must run as the owner. If ownership cannot be retained, publication is
+refused before writing credentials. Windows and other non-Linux publication
+are currently refused: numeric mode bits alone cannot preserve their native
+ACLs safely. Native security-descriptor support needs platform-hosted validation.
+Failed owner-private staging files may remain in the config directory for diagnosis.
 
 Only the successfully runtime-applied version is marked observed by the watcher;
 load or runtime-apply failures are reported and remain eligible for retry.
