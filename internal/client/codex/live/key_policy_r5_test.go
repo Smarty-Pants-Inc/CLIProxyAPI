@@ -94,25 +94,42 @@ func TestR5OwnerHangupCancelsPendingSidebandJoin(t *testing.T) {
 			next(c)
 		}
 	}
+	relayReleased, hangupProcessed := make(chan struct{}), make(chan string, 2)
 	router := gin.New()
-	router.GET("/v1/realtime/calls/:call_id", as("owner", h.HandleSideband))
-	router.POST("/v1/realtime/calls/:call_id/hangup", func(c *gin.Context) { as(c.GetHeader("X-Key"), h.HandleHangup)(c) })
+	router.GET("/v1/realtime/calls/:call_id", func(c *gin.Context) {
+		as("owner", h.HandleSideband)(c)
+		close(relayReleased) // HandleSideband has run its releaseRaw defer.
+	})
+	router.POST("/v1/realtime/calls/:call_id/hangup", func(c *gin.Context) {
+		key := c.GetHeader("X-Key")
+		as(key, h.HandleHangup)(c)
+		hangupProcessed <- key
+	})
 	server := httptest.NewServer(router)
 	defer server.Close()
-	defer close(stall) // release a stuck upstream first so a RED run fails instead of hanging
+	defer close(stall) // Unblock a broken implementation before server shutdown.
 
 	joined := make(chan error, 1)
 	go func() {
 		conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/realtime/calls/call", nil)
 		if conn != nil {
-			conn.Close()
+			_ = conn.Close()
 		}
 		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		joined <- err
 	}()
-	<-arrived
+	waitLiveEvent(t, arrived, "authenticated upgrade arrival")
+	h.mediaRelayMu.Lock()
+	var pending *liveSessionResources
+	for resources := range h.rawRelayOwners {
+		pending = resources
+	}
+	h.mediaRelayMu.Unlock()
+	if pending == nil {
+		t.Fatal("join was not attached before dial")
+	}
 
 	hangup := func(key string) int {
 		req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/realtime/calls/call/hangup", nil)
@@ -121,55 +138,53 @@ func TestR5OwnerHangupCancelsPendingSidebandJoin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
+		select {
+		case processed := <-hangupProcessed:
+			if processed != key {
+				t.Fatalf("processed hangup %q, want %q", processed, key)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("hangup handler did not finish")
+		}
 		return resp.StatusCode
 	}
 	if code := hangup("other"); code != http.StatusForbidden {
 		t.Fatalf("foreign hangup status=%d, want 403", code)
 	}
+	// The foreign handler has fully returned. Cancellation closes resources
+	// synchronously; do not infer non-cancellation from an arbitrary delay.
+	pending.mu.Lock()
+	closed := pending.closed
+	pending.mu.Unlock()
+	if closed {
+		t.Fatal("foreign hangup closed the owner's pending transport")
+	}
 	select {
 	case <-upstreamGone:
 		t.Fatal("foreign hangup cancelled the owner's join")
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	if code := hangup("owner"); code != http.StatusOK {
 		t.Fatalf("owner hangup status=%d", code)
 	}
-	select {
-	case <-upstreamGone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("owner hangup left the pending upstream handshake open")
-	}
+	waitLiveEvent(t, upstreamGone, "owner hangup closing pending upstream handshake")
 	select {
 	case err := <-joined:
 		if err == nil {
 			t.Fatal("join succeeded after owner hangup")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("joining request still pending after owner hangup")
 	}
 	if _, ok := h.sessions.peek("call"); ok {
 		t.Fatal("call still stored after owner hangup")
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		h.mediaRelayMu.Lock()
-		n := len(h.rawRelayOwners)
-		h.mediaRelayMu.Unlock()
-		if n == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("raw relay owners left: %d", n)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func TestR5SidebandDialerHasFiniteHandshake(t *testing.T) {
-	for _, proxy := range []string{"", "direct", "http://proxy.example:8080", "socks5://proxy.example:1080"} {
-		if d := newSidebandDialer(proxy); d.HandshakeTimeout <= 0 || d.HandshakeTimeout > time.Minute {
-			t.Fatalf("proxy %q: HandshakeTimeout=%v", proxy, d.HandshakeTimeout)
-		}
+	waitLiveEvent(t, relayReleased, "raw relay cleanup")
+	h.mediaRelayMu.Lock()
+	n := len(h.rawRelayOwners)
+	h.mediaRelayMu.Unlock()
+	if n != 0 {
+		t.Fatalf("raw relay owners left: %d", n)
 	}
 }

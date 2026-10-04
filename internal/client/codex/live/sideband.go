@@ -727,7 +727,7 @@ func proxyURLForAuth(cfg *config.Config, selected *auth.Auth) string {
 
 // closeDialOnCancel closes the dialed transport when ctx ends. gorilla/websocket
 // honors only the context deadline during the handshake, not cancellation, so a
-// cancelled join would otherwise wait for HandshakeTimeout.
+// cancelled join would otherwise leave the HTTP upgrade blocked indefinitely.
 func closeDialOnCancel(dialer *websocket.Dialer, ctx context.Context) {
 	next := dialer.NetDialContext
 	if next == nil {
@@ -742,12 +742,10 @@ func closeDialOnCancel(dialer *websocket.Dialer, ctx context.Context) {
 	}
 }
 
-// sidebandHandshakeTimeout bounds an upstream sideband handshake; it matches the
-// Codex Responses websocket handshake timeout.
-const sidebandHandshakeTimeout = 30 * time.Second
-
 func newSidebandDialer(proxyURL string) *websocket.Dialer {
-	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: sidebandHandshakeTimeout}
+	// Credentials are already acquired. Only the owning request/call may cancel
+	// the network handshake; do not impose a fixed handshake timeout.
+	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment}
 	if strings.TrimSpace(proxyURL) == "" {
 		return dialer
 	}
