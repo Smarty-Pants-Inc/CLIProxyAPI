@@ -36,7 +36,7 @@ func TestListPluginStoreMergesInstalledStatus(t *testing.T) {
 				},
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
@@ -128,7 +128,7 @@ func TestListPluginStoreUsesVersionFromInstalledFilename(t *testing.T) {
 				Dir:     pluginsDir,
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
@@ -186,7 +186,7 @@ func TestListPluginStoreUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T)
 				},
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
@@ -225,7 +225,7 @@ func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
 				Dir:     t.TempDir(),
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": []byte(`{
@@ -297,7 +297,7 @@ func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 				Dir:     t.TempDir(),
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient:  httpClient,
 	}
@@ -343,7 +343,7 @@ func TestListPluginStoreFallsBackToRegistryVersion(t *testing.T) {
 				Dir:     t.TempDir(),
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
@@ -382,7 +382,7 @@ func TestListPluginStoreIncludesThirdPartySources(t *testing.T) {
 				StoreSources: []string{"https://community.example/registry.json"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			pluginstore.DefaultRegistryURL: registryJSON(t),
 			"https://community.example/registry.json": []byte(`{
@@ -457,7 +457,7 @@ func TestListPluginStoreMatchesInstalledStatusToManifestSource(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreHTTPClient: &countingPluginStoreHTTPClient{responses: fakePluginStoreHTTPClient{
 			pluginstore.DefaultRegistryURL: registryJSON(t),
 			communityURL:                   thirdPartySampleRegistryJSON(t),
@@ -531,7 +531,7 @@ func TestInstallPluginFromStoreRejectsImplicitSourceSwitch(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			pluginstore.DefaultRegistryURL: registryJSON(t),
 			communityURL:                   thirdPartySampleRegistryJSON(t),
@@ -566,7 +566,7 @@ func TestInstallPluginFromStoreRejectsUnknownManagedSource(t *testing.T) {
 				},
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
@@ -603,7 +603,7 @@ func TestListPluginStoreIncludesDirectMetadataAndAuth(t *testing.T) {
 				}},
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": directRegistryJSON("https://downloads.example/sample-provider.zip", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
@@ -651,7 +651,7 @@ func TestListPluginStoreReportsVersionArtifactAuth(t *testing.T) {
 				}},
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": directRegistryJSONWithVersionArtifact(
@@ -699,7 +699,7 @@ func TestListPluginStoreReportsGitHubMetadataAuth(t *testing.T) {
 				}},
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
@@ -789,8 +789,8 @@ plugins:
 	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
 	checksum := sha256.Sum256(archiveData)
 	h := &Handler{
-		cfg:                    cfg,
-		configFilePath:         writeTestConfigFile(t),
+		cfg:           cfg,
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
@@ -884,7 +884,7 @@ func TestInstallPluginFromStoreInstallsDirectArtifact(t *testing.T) {
 				Dir:     pluginsDir,
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": directRegistryJSON(artifactURL, hex.EncodeToString(checksum[:])),
@@ -947,7 +947,7 @@ func TestInstallPluginFromStoreHonorsDirectQueryVersion(t *testing.T) {
 				Dir:     pluginsDir,
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": directRegistryJSONWithVersionArtifact(topArtifactURL, versionArtifactURL, hex.EncodeToString(checksum[:])),
@@ -1007,7 +1007,7 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 				StoreSources: []string{"https://community.example/registry.json"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			pluginstore.DefaultRegistryURL:            registryJSON(t),
 			"https://community.example/registry.json": thirdPartySampleRegistryJSON(t),
@@ -1072,7 +1072,7 @@ func TestInstallPluginFromStoreRequiresSourceForDuplicateIDs(t *testing.T) {
 				StoreSources: []string{"https://community.example/registry.json"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			pluginstore.DefaultRegistryURL:            registryJSON(t),
 			"https://community.example/registry.json": thirdPartySampleRegistryJSON(t),
@@ -1118,7 +1118,7 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 				},
 			},
 		},
-		configFilePath:         writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),

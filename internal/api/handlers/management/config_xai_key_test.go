@@ -20,7 +20,7 @@ func TestPatchXAIKeyUpdatesExecutionFields(t *testing.T) {
 			Websockets:     true,
 			DisableCooling: &disableCooling,
 		}}},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()

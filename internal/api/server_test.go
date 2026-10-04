@@ -1712,9 +1712,16 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	server.cfg.Plugins.Configs = map[string]proxyconfig.PluginInstanceConfig{
 		"sample": {Enabled: &enabled, Priority: 4},
 	}
-	if errWrite := os.WriteFile(server.configFilePath, []byte("{}\n"), 0o600); errWrite != nil {
+	fixture := []byte("plugins:\n  configs:\n    sample:\n      enabled: true\n      priority: 4\n")
+	if errWrite := os.WriteFile(server.configFilePath, fixture, 0o600); errWrite != nil {
 		t.Fatalf("failed to write config file: %v", errWrite)
 	}
+	loaded, errLoad := proxyconfig.LoadConfig(server.configFilePath)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	server.cfg = loaded
+	server.mgmt.SetConfig(loaded)
 
 	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
 	req.Header.Set("Authorization", "Bearer test-management-key")

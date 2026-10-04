@@ -71,6 +71,57 @@ func TestPublicationNeverWidensAccess(t *testing.T) {
 	}
 }
 
+type restrictedGroupInfo struct {
+	os.FileInfo
+	stat syscall.Stat_t
+}
+
+func (info restrictedGroupInfo) Sys() any { return &info.stat }
+
+func TestReplacementRefusesUnpreservableRestrictedGroup(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("privileged process can preserve every group")
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const restrictedGroup = 65534
+	for _, gid := range groups {
+		if gid == restrictedGroup {
+			t.Skip("test group is already authorized")
+		}
+	}
+	file, err := os.CreateTemp(t.TempDir(), "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := *info.Sys().(*syscall.Stat_t)
+	stat.Gid = restrictedGroup
+	// Model an original restricted group this process cannot retain. Refusal must
+	// happen before any credential bytes can be written to the replacement.
+	err = secureConfigReplacement(file, restrictedGroupInfo{FileInfo: info, stat: stat})
+	if err == nil {
+		t.Fatal("publication would proceed without retaining restricted original group")
+	}
+	after, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != 0 || after.Mode().Perm() != 0600 {
+		t.Fatal("refused staging file not empty/private")
+	}
+}
+
 func TestNewConfigIsPrivate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := AtomicWriteConfig(path, []byte("api-keys: [secret]\n")); err != nil {

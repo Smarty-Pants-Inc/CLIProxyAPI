@@ -19,7 +19,7 @@ func TestPatchMetaKeyUpdatesExecutionFields(t *testing.T) {
 			BaseURL:        "https://api.meta.ai/v1",
 			DisableCooling: &disableCooling,
 		}}},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()

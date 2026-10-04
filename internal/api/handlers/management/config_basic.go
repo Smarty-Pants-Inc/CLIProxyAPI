@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -118,7 +116,7 @@ func WriteConfig(path string, data []byte, expectedVersion ...string) error {
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
-	if !prepareManagementBody(c) {
+	if !prepareManagementRawBody(c) {
 		return
 	}
 	expectedVersion := strings.Trim(c.GetHeader("If-Match"), "\"")
@@ -131,41 +129,15 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
 		return
 	}
-	var cfg config.Config
-	if err = yaml.Unmarshal(body, &cfg); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
-		return
-	}
-	// Validate config using LoadConfigOptional with optional=false to enforce parsing
-	tmpDir := filepath.Dir(h.configFilePath)
-	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
-		return
-	}
-	tempFile := tmpFile.Name()
-	if _, errWrite := tmpFile.Write(body); errWrite != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tempFile)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errWrite.Error()})
-		return
-	}
-	if errClose := tmpFile.Close(); errClose != nil {
-		_ = os.Remove(tempFile)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errClose.Error()})
-		return
-	}
-	defer func() {
-		_ = os.Remove(tempFile)
-		_ = os.Remove(tempFile + ".lock")
-	}()
-	_, err = config.LoadConfigOptional(tempFile, false)
-	if err != nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
+	if _, errValidate := config.ParseConfigBytes(body); errValidate != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errValidate.Error()})
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !managementRequestActive(c) {
+		return
+	}
 	version, errWrite := config.AtomicWriteConfigCAS(h.configFilePath, config.NormalizeCommentIndentation(body), expectedVersion)
 	if errWrite != nil {
 		if errWrite == config.ErrConfigConflict {

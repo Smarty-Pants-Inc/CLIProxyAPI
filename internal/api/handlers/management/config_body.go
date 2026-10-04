@@ -3,6 +3,8 @@ package management
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -29,7 +31,7 @@ func withManagementBodyDeadline(next http.Handler, readTimeout time.Duration) ht
 			return
 		}
 		controller := http.NewResponseController(w)
-		if err := controller.SetReadDeadline(time.Now().Add(readTimeout)); err != nil && err != http.ErrNotSupported {
+		if err := controller.SetReadDeadline(time.Now().Add(readTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			http.Error(w, "cannot bound management body read", http.StatusBadRequest)
 			return
 		}
@@ -42,6 +44,14 @@ func withManagementBodyDeadline(next http.Handler, readTimeout time.Duration) ht
 // prepareManagementBody consumes network input before any mutation mutex is held.
 // Later binding operates only on a bounded in-memory reader.
 func prepareManagementBody(c *gin.Context) bool {
+	return prepareManagementBodyMode(c, true)
+}
+
+func prepareManagementRawBody(c *gin.Context) bool {
+	return prepareManagementBodyMode(c, false)
+}
+
+func prepareManagementBodyMode(c *gin.Context, requireJSON bool) bool {
 	if _, ok := c.Get("management-body-buffered"); ok {
 		return true
 	}
@@ -64,6 +74,10 @@ func prepareManagementBody(c *gin.Context) bool {
 	}
 	if c.Request.Context().Err() != nil {
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": "request cancelled"})
+		return false
+	}
+	if requireJSON && !json.Valid(data) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return false
 	}
 	c.Request.Body = io.NopCloser(bytes.NewReader(data))

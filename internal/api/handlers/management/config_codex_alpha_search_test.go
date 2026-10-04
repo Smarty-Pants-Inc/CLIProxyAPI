@@ -16,7 +16,7 @@ func TestPatchCodexKeyUpdatesAlphaSearch(t *testing.T) {
 			APIKey:  "codex-key",
 			BaseURL: "https://codex.example.com",
 		}}},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()

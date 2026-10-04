@@ -110,7 +110,7 @@ func TestPatchDisableCoolingOverrideForEveryFamily(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
 			tc.setup(cfg)
-			h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			h := &Handler{cfg: cfg, configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t)}
 
 			patch := func(value string) *httptest.ResponseRecorder {
 				t.Helper()

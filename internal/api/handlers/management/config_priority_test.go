@@ -95,7 +95,7 @@ func TestPatchPriorityForEveryProvider(t *testing.T) {
 			cfg := &config.Config{}
 			test.setup(cfg)
 			configFile := writeTestConfigFile(t)
-			h := &Handler{cfg: cfg, configFilePath: configFile}
+			h := &Handler{cfg: cfg, configVersion: testConfigSourceVersion("{}\n"), configFilePath: configFile}
 
 			// Update priority to 7
 			rec := httptest.NewRecorder()
