@@ -27,7 +27,13 @@ func matchProvider(provider string, targets []string) (string, bool) {
 }
 
 func (w *Watcher) start(ctx context.Context) error {
-	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
+	configPath, errResolve := filepath.EvalSymlinks(w.configPath)
+	if errResolve != nil {
+		return errResolve
+	}
+	w.configPath = configPath
+	// Watch the directory: atomic publication replaces the file's inode.
+	if errAddConfig := w.watcher.Add(filepath.Dir(w.configPath)); errAddConfig != nil {
 		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
 		return errAddConfig
 	}

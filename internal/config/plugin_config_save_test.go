@@ -50,8 +50,8 @@ empty_list: []
 		Raw:     cfg.Plugins.Configs["sample"].Raw,
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -121,8 +121,8 @@ nested:
 		},
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -178,8 +178,8 @@ func TestSaveConfigPreserveComments_PluginConfigPreservesSequenceReordering(t *t
 		},
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -261,8 +261,8 @@ count: 0
 		Raw:     cfg.Plugins.Configs["new-plugin"].Raw,
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -311,8 +311,8 @@ empty_list: []
 		Raw:     cfg.Plugins.Configs["zero-plugin"].Raw,
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -359,8 +359,8 @@ func TestSaveConfigPreserveComments_PluginConfigDeletesPluginAndClearsConfigs(t 
 			},
 		},
 	}
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() step 1 error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() step 1 error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -377,8 +377,8 @@ func TestSaveConfigPreserveComments_PluginConfigDeletesPluginAndClearsConfigs(t 
 
 	// Step 2: clear all configs
 	cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() step 2 error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() step 2 error = %v", errSave)
 	}
 
 	savedBytes, errRead = os.ReadFile(configPath)
@@ -419,8 +419,8 @@ plugins:
 			},
 		},
 	}
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -459,8 +459,8 @@ func TestSaveConfigPreserveComments_PluginConfigAddsConfigsWhenPluginsExistsWith
 			},
 		},
 	}
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)

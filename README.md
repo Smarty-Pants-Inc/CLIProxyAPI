@@ -134,6 +134,8 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+For live config edits, use [coordinated config publication](docs/config-publication.md) instead of writing directly over the config file.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

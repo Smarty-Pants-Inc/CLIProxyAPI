@@ -72,8 +72,8 @@ func (m *managementTokenRequester) PostOAuthCallback(c *gin.Context) {
 }
 
 // WriteConfig persists management configuration to disk.
-func WriteConfig(path string, data []byte) error {
-	return internalmanagement.WriteConfig(path, data)
+func WriteConfig(path string, data []byte, expectedVersion ...string) error {
+	return internalmanagement.WriteConfig(path, data, expectedVersion...)
 }
 
 // RegisterOAuthSession records a pending OAuth callback state.

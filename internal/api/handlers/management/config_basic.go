@@ -1,6 +1,7 @@
 package management
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,7 +25,13 @@ const (
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
+		c.JSON(200, gin.H{})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
 		c.JSON(200, gin.H{})
 		return
 	}
@@ -48,8 +55,12 @@ func setLatestReleaseRequestHeaders(req *http.Request) {
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	proxyURL := ""
-	if h != nil && h.cfg != nil {
-		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+	if h != nil {
+		h.mu.Lock()
+		if h.cfg != nil {
+			proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+		}
+		h.mu.Unlock()
 	}
 	if proxyURL != "" {
 		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
@@ -98,24 +109,20 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"latest-version": version})
 }
 
-func WriteConfig(path string, data []byte) error {
-	data = config.NormalizeCommentIndentation(data)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
+func WriteConfig(path string, data []byte, expectedVersion ...string) error {
+	if len(expectedVersion) == 0 {
+		return config.AtomicWriteConfig(path, config.NormalizeCommentIndentation(data))
 	}
-	if _, errWrite := f.Write(data); errWrite != nil {
-		_ = f.Close()
-		return errWrite
-	}
-	if errSync := f.Sync(); errSync != nil {
-		_ = f.Close()
-		return errSync
-	}
-	return f.Close()
+	_, errWrite := config.AtomicWriteConfigCAS(path, config.NormalizeCommentIndentation(data), expectedVersion[0])
+	return errWrite
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
+	expectedVersion := strings.Trim(c.GetHeader("If-Match"), "\"")
+	if expectedVersion == "" {
+		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "config_version_required", "message": "send the ETag from GET /config.yaml as If-Match"})
+		return
+	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
@@ -147,6 +154,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	}
 	defer func() {
 		_ = os.Remove(tempFile)
+		_ = os.Remove(tempFile + ".lock")
 	}()
 	_, err = config.LoadConfigOptional(tempFile, false)
 	if err != nil {
@@ -155,10 +163,16 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if WriteConfig(h.configFilePath, body) != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
+	version, errWrite := config.AtomicWriteConfigCAS(h.configFilePath, config.NormalizeCommentIndentation(body), expectedVersion)
+	if errWrite != nil {
+		if errWrite == config.ErrConfigConflict {
+			c.JSON(http.StatusConflict, gin.H{"error": "config_changed", "message": "config changed since it was read"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errWrite.Error()})
+		}
 		return
 	}
+	h.configVersion = version
 	// Reload into handler to keep memory in sync
 	newCfg, err := config.LoadConfig(h.configFilePath)
 	if err != nil {
@@ -166,6 +180,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.cfg = newCfg
+	h.configVersion = newCfg.ConfigFileVersion
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
@@ -181,6 +196,8 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed", "message": err.Error()})
 		return
 	}
+	hash := sha256.Sum256(data)
+	c.Header("ETag", fmt.Sprintf("\"%x\"", hash[:]))
 	c.Header("Content-Type", "application/yaml; charset=utf-8")
 	c.Header("Cache-Control", "no-store")
 	c.Header("X-Content-Type-Options", "nosniff")
@@ -189,11 +206,17 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 }
 
 // Debug
-func (h *Handler) GetDebug(c *gin.Context) { c.JSON(200, gin.H{"debug": h.cfg.Debug}) }
+func (h *Handler) GetDebug(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.JSON(200, gin.H{"debug": h.cfg.Debug})
+}
 func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) { h.cfg.Debug = v }) }
 
 // UsageStatisticsEnabled
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg.UsageStatisticsEnabled})
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
@@ -202,6 +225,8 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 
 // UsageStatisticsEnabled
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
 }
 func (h *Handler) PutLoggingToFile(c *gin.Context) {
@@ -210,9 +235,14 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 
 // LogsMaxTotalSizeMB
 func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"logs-max-total-size-mb": h.cfg.LogsMaxTotalSizeMB})
 }
 func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -225,14 +255,19 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 		value = 0
 	}
 	h.cfg.LogsMaxTotalSizeMB = value
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // ErrorLogsMaxFiles
 func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
 }
 func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -245,20 +280,29 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 		value = 10
 	}
 	h.cfg.ErrorLogsMaxFiles = value
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // Request log
-func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
+func (h *Handler) GetRequestLog(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.JSON(200, gin.H{"request-log": h.cfg.RequestLog})
+}
 func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
 // Websocket auth
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
 }
 func (h *Handler) PutWebsocketAuth(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -267,11 +311,13 @@ func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 		return
 	}
 	h.cfg.WebsocketAuth = *body.Value
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // Request retry
 func (h *Handler) GetRequestRetry(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"request-retry": h.cfg.RequestRetry})
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
@@ -280,6 +326,8 @@ func (h *Handler) PutRequestRetry(c *gin.Context) {
 
 // Max retry credentials
 func (h *Handler) GetMaxRetryCredentials(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"max-retry-credentials": h.cfg.MaxRetryCredentials})
 }
 func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
@@ -288,6 +336,8 @@ func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
 
 // Max retry interval
 func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
 }
 func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
@@ -296,6 +346,8 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 
 // ForceModelPrefix
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})
 }
 func (h *Handler) PutForceModelPrefix(c *gin.Context) {
@@ -318,6 +370,8 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 
 // RoutingStrategy
 func (h *Handler) GetRoutingStrategy(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
 	if !ok {
 		c.JSON(200, gin.H{"strategy": strings.TrimSpace(h.cfg.Routing.Strategy)})
@@ -326,6 +380,9 @@ func (h *Handler) GetRoutingStrategy(c *gin.Context) {
 	c.JSON(200, gin.H{"strategy": strategy})
 }
 func (h *Handler) PutRoutingStrategy(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	var body struct {
 		Value *string `json:"value"`
 	}
@@ -339,15 +396,22 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		return
 	}
 	h.cfg.Routing.Strategy = normalized
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // Proxy URL
-func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
+func (h *Handler) GetProxyURL(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL})
+}
 func (h *Handler) PutProxyURL(c *gin.Context) {
 	h.updateStringField(c, func(v string) { h.cfg.ProxyURL = v })
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	h.cfg.ProxyURL = ""
-	h.persist(c)
+	h.persistLocked(c)
 }

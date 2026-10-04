@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Client wraps HTTP calls to the management API.
@@ -34,7 +37,7 @@ func (c *Client) SetSecretKey(secretKey string) {
 	c.secretKey = strings.TrimSpace(secretKey)
 }
 
-func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, error) {
+func (c *Client) doRequest(method, path string, body io.Reader, expectedVersion ...string) ([]byte, int, error) {
 	url := c.baseURL + path
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
@@ -46,11 +49,18 @@ func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, er
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if len(expectedVersion) > 0 {
+		req.Header.Set("If-Match", expectedVersion[0])
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Debug("failed to close management response")
+		}
+	}()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, err
@@ -134,10 +144,29 @@ func (c *Client) GetConfigYAML() (string, error) {
 	return string(data), nil
 }
 
-// PutConfigYAML uploads new config.yaml content.
-func (c *Client) PutConfigYAML(yamlContent string) error {
-	_, err := c.put("/v0/management/config.yaml", strings.NewReader(yamlContent))
-	return err
+// GetConfigYAMLWithVersion returns raw YAML and its source ETag for a later edit.
+func (c *Client) GetConfigYAMLWithVersion() (string, string, error) {
+	body, err := c.GetConfigYAML()
+	if err != nil {
+		return "", "", err
+	}
+	hash := sha256.Sum256([]byte(body))
+	return body, fmt.Sprintf("\"%x\"", hash[:]), nil
+}
+
+// PutConfigYAML uploads edited YAML with the version of its source bytes.
+func (c *Client) PutConfigYAML(yamlContent string, expectedVersion ...string) error {
+	if len(expectedVersion) != 1 || expectedVersion[0] == "" {
+		return fmt.Errorf("config version required: use GetConfigYAMLWithVersion before editing")
+	}
+	data, code, err := c.doRequest("PUT", "/v0/management/config.yaml", strings.NewReader(yamlContent), expectedVersion[0])
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return fmt.Errorf("HTTP %d: %s", code, strings.TrimSpace(string(data)))
+	}
+	return nil
 }
 
 // GetAuthFiles lists auth credential files.
