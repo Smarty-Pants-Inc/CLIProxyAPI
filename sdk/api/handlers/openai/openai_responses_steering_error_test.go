@@ -64,8 +64,8 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 				}
 				read()
 				if !tc.initial {
-					write([]byte(`{"type":"response.created","response":{"id":"first","output":[]}}`))
-					write([]byte(`{"type":"response.completed","response":{"id":"first","output":[]}}`))
+					write([]byte(`{"type":"response.created","response":{"model":"steering-error-model","id":"first","output":[]}}`))
+					write([]byte(`{"type":"response.completed","response":{"model":"steering-error-model","id":"first","output":[]}}`))
 					read()
 				}
 				write(rejection)
@@ -77,8 +77,8 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 					if gjson.GetBytes(corrected, "instructions").String() != "CORRECTED" {
 						t.Errorf("corrected create missing: %s", corrected)
 					}
-					write([]byte(`{"type":"response.created","response":{"id":"corrected","output":[]}}`))
-					write([]byte(`{"type":"response.completed","response":{"id":"corrected","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"RECOVERED"}]}]}}`))
+					write([]byte(`{"type":"response.created","response":{"model":"steering-error-model","id":"corrected","output":[]}}`))
+					write([]byte(`{"type":"response.completed","response":{"model":"steering-error-model","id":"corrected","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"RECOVERED"}]}]}}`))
 				}
 				_, _, _ = c.ReadMessage()
 			}))
