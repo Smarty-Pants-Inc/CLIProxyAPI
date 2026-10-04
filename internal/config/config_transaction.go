@@ -118,21 +118,19 @@ func AtomicWriteConfigCAS(configFile string, data []byte, expectedVersion string
 
 func atomicWriteConfigUnlocked(configFile string, data []byte) error {
 	dir := filepath.Dir(configFile)
-	mode := os.FileMode(0o644)
-	if info, err := os.Stat(configFile); err == nil {
-		mode = info.Mode().Perm()
+	// Owner-only staging and publication are deliberately stricter than any
+	// original group/ACL grants. Never enable inherited named-user ACLs.
+	info, errStat := os.Stat(configFile)
+	if errStat != nil && !os.IsNotExist(errStat) {
+		return errStat
 	}
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer func() {
-		if errRemove := os.Remove(tmpName); errRemove != nil && !os.IsNotExist(errRemove) {
-			log.WithError(errRemove).Error("failed to remove config temporary file")
-		}
-	}()
-	if err = tmp.Chmod(mode); err != nil {
+	// Failed private staging files are retained for diagnosis, never unlinked.
+	if err = secureConfigReplacement(tmp, info); err != nil {
 		_ = tmp.Close()
 		return err
 	}
