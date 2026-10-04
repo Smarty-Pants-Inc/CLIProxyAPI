@@ -349,6 +349,18 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
+	// Keep a new Codex mapping that contains an explicit buffering option, even when false.
+	if len(path) == 1 && path[0] == "codex" && node != nil && node.Kind == yaml.MappingNode {
+		if findMapKeyIndex(node, "stream-bootstrap-buffering") >= 0 {
+			return false
+		}
+	}
+
+	// Explicit false opts out of default-on Codex buffering and must survive save/reload.
+	if len(path) == 2 && path[0] == "codex" && path[1] == "stream-bootstrap-buffering" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		return false
+	}
+
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true

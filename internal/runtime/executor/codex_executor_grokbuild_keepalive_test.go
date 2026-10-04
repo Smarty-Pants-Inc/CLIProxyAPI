@@ -113,7 +113,7 @@ func TestCodexExecutorExecuteStream_GrokBuildWithBuffering(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{}
-	cfg.Codex.StreamBootstrapBuffering = true
+	cfg.Codex.StreamBootstrapBuffering = new(true)
 	executor := NewCodexExecutor(cfg)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"base_url": server.URL,

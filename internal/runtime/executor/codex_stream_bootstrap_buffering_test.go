@@ -25,7 +25,7 @@ const (
 	codexCapacityEvent      = `{"type":"error","error":{"message":"Selected model is at capacity. Please try a different model."},"sequence_number":2}`
 	codexInvalidEvent       = `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."},"sequence_number":2}`
 	codexCreatedEvent       = `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-terra"}}`
-	codexInProgressEvent    = `{"type":"response.in_progress","response":{"id":"resp_1"}}`
+	codexInProgressEvent    = `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"resp_1"}}`
 	codexOutputAddedEvent   = `{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","content":[]},"output_index":0}`
 	codexKeepaliveEvent     = `{"type":"keepalive","sequence_number":1}`
 	codexOutputDeltaEvent   = `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hi"}`
@@ -33,11 +33,11 @@ const (
 )
 
 func codexBufferingConfig(enabled bool) *config.Config {
-	return &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: enabled}}
+	return &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: &enabled}}
 }
 
 func codexBufferingConfigWithTimeout(enabled bool, timeout string) *config.Config {
-	return &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: enabled, StreamBootstrapTimeout: timeout}}
+	return &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: &enabled, StreamBootstrapTimeout: timeout}}
 }
 
 func codexTestAuth(baseURL string) *cliproxyauth.Auth {
@@ -211,7 +211,7 @@ func TestCodexExecutor_BootstrapBuffering_NonOverloadStaysInStream(t *testing.T)
 func TestCodexExecutor_BootstrapBuffering_BufferLimitReleasesStream(t *testing.T) {
 	events := make([]string, 0, codexBootstrapMaxBufferedFrames+2)
 	for i := 0; i < codexBootstrapMaxBufferedFrames+1; i++ {
-		events = append(events, fmt.Sprintf(`{"type":"response.in_progress","response":{"id":"resp_%d"}}`, i))
+		events = append(events, fmt.Sprintf(`{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"resp_%d"}}`, i))
 	}
 	events = append(events, codexOverloadEvent)
 	server := codexSSEServer(events...)
@@ -312,7 +312,7 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *tes
 // seeded from the upstream message so it still advances for a downstream that renders nothing.
 func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapOrderingAndSeed(t *testing.T) {
 	t.Run("oversized message is not admitted", func(t *testing.T) {
-		oversized := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
+		oversized := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
 		server := codexWebsocketRawServer(t, []string{oversized}, codexOverloadEvent)
 		defer server.Close()
 
@@ -328,7 +328,7 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapOrderingAndSeed(t *te
 	})
 
 	t.Run("budget counts the upstream message", func(t *testing.T) {
-		frame := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
+		frame := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
 		frames := make([]string, 10)
 		for i := range frames {
 			frames[i] = frame
@@ -392,6 +392,8 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_SkippedFramesExhaustTheWindo
 			for i := range frames {
 				frames[i] = tc.frame
 			}
+			// Replace one frame to verify identity without changing the frame count.
+			frames[0] = codexCreatedEvent
 			server := codexWebsocketRawServer(t, frames, codexOverloadEvent)
 			defer server.Close()
 
@@ -487,7 +489,7 @@ func TestCodexExecutor_BootstrapBuffering_NonOverloadTerminalStaysInStream(t *te
 // admission and released, so the rejection that follows it immediately - with no line in between to
 // trigger a late release - is delivered in-stream rather than failing the attempt over.
 func TestCodexExecutor_BootstrapBuffering_OversizedFrameIsNotAdmitted(t *testing.T) {
-	oversized := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
+	oversized := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
 	body := "data: " + oversized + "\n" + "data: " + codexOverloadEvent + "\n\n"
 	server := codexSSERawServer(body)
 	defer server.Close()
@@ -508,7 +510,7 @@ func TestCodexExecutor_BootstrapBuffering_OversizedFrameIsNotAdmitted(t *testing
 // measured chunks alone would never advance and only the frame budget would remain - which these ten
 // frames stay well inside.
 func TestCodexExecutor_BootstrapBuffering_ByteCapCountsUpstreamFrames(t *testing.T) {
-	frame := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
+	frame := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
 	body := strings.Repeat("data: "+frame+"\n\n", 10) + "data: " + codexOverloadEvent + "\n\n"
 	server := codexSSERawServer(body)
 	defer server.Close()
@@ -528,7 +530,7 @@ func TestCodexExecutor_BootstrapBuffering_ByteCapCountsUpstreamFrames(t *testing
 // The websocket byte cap needs its own coverage: without it a handful of large frames would sit
 // inside the frame budget while retaining far more than the cap.
 func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapReleasesStream(t *testing.T) {
-	third := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("z", codexBootstrapMaxBufferedBytes/3) + `"}}`
+	third := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("z", codexBootstrapMaxBufferedBytes/3) + `"}}`
 	server := codexWebsocketRawServer(t, []string{third, third, third, third}, codexOverloadEvent)
 	defer server.Close()
 
@@ -560,7 +562,7 @@ func TestCodexExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *testing.T) {
 	overload := "data: " + codexOverloadEvent + "\n\n"
 
 	t.Run("one line under the budget still fails over", func(t *testing.T) {
-		body := strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames-1) + overload
+		body := "data: " + codexCreatedEvent + "\n" + strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames-2) + overload
 		server := codexSSERawServer(body)
 		defer server.Close()
 
@@ -572,7 +574,7 @@ func TestCodexExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *testing.T) {
 	})
 
 	t.Run("exactly the budget still fails over", func(t *testing.T) {
-		body := strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames) + overload
+		body := "data: " + codexCreatedEvent + "\n" + strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames-1) + overload
 		server := codexSSERawServer(body)
 		defer server.Close()
 
@@ -584,7 +586,7 @@ func TestCodexExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *testing.T) {
 	})
 
 	t.Run("one line over the budget releases", func(t *testing.T) {
-		body := strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames+1) + overload
+		body := "data: " + codexCreatedEvent + "\n" + strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames) + overload
 		server := codexSSERawServer(body)
 		defer server.Close()
 
@@ -629,7 +631,7 @@ func TestCodexExecutor_BootstrapBuffering_EmptyDataFrameDoesNotReleaseStream(t *
 // NonContentFramesDoNotReleaseStream cases, which run against a passthrough downstream.
 func TestCodexExecutor_BootstrapBuffering_BoundHoldsForEverySSEFraming(t *testing.T) {
 	overload := "data: " + codexOverloadEvent + "\n\n"
-	handshake := `{"type":"response.in_progress","response":{"id":"resp_1"}}`
+	handshake := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"resp_1"}}`
 
 	cases := []struct {
 		name string
@@ -659,7 +661,7 @@ func TestCodexExecutor_BootstrapBuffering_BoundHoldsForEverySSEFraming(t *testin
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			server := codexSSERawServer(tc.body)
+			server := codexSSERawServer("data: " + codexCreatedEvent + "\n" + tc.body)
 			defer server.Close()
 
 			req, _ := codexTestRequest()
@@ -687,7 +689,7 @@ func TestCodexExecutor_BootstrapBuffering_BoundHoldsForEverySSEFraming(t *testin
 func TestCodexExecutor_BootstrapBuffering_ByteCapReleasesStream(t *testing.T) {
 	// Frames that are individually well inside the cap but add up past it must still release, which
 	// is what makes this a cap on the buffer rather than a per-frame size limit.
-	third := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("y", codexBootstrapMaxBufferedBytes/3) + `"}}`
+	third := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("y", codexBootstrapMaxBufferedBytes/3) + `"}}`
 	body := "data: " + third + "\n\n" + "data: " + third + "\n\n" + "data: " + third + "\n\n" +
 		"data: " + third + "\n\n" + "data: " + codexOverloadEvent + "\n\n"
 	server := codexSSERawServer(body)
@@ -860,7 +862,12 @@ func TestCodexExecutor_BootstrapBuffering_HeartbeatArithmeticPerFraming(t *testi
 	}
 	failsOver := func(t *testing.T, heartbeats int, heartbeat, overload string) bool {
 		t.Helper()
-		server := codexSSERawServer(strings.Repeat(heartbeat, heartbeats) + overload)
+		// Make the first heartbeat model-bearing, preserving its exact line count.
+		identified := strings.Replace(heartbeat, "data: "+codexKeepaliveEvent, "data: "+codexCreatedEvent, 1)
+		if identified == heartbeat {
+			identified = strings.Replace(heartbeat, ": keepalive", "data: "+codexCreatedEvent, 1)
+		}
+		server := codexSSERawServer(identified + strings.Repeat(heartbeat, heartbeats-1) + overload)
 		defer server.Close()
 		req, opts := codexTestRequest()
 		result, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
@@ -885,7 +892,7 @@ func TestCodexExecutor_BootstrapBuffering_HeartbeatArithmeticPerFraming(t *testi
 // what is retained is the chunks. Both padded frames fit the cap on their upstream bytes alone, so
 // only a budget that also counts the translated chunks releases the stream here.
 func TestCodexExecutor_BootstrapBuffering_ByteCapCountsTranslatedChunks(t *testing.T) {
-	padded := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("p", 300<<10) + `"}}`
+	padded := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("p", 300<<10) + `"}}`
 	server := codexSSEServer(padded, padded, codexOverloadEvent)
 	defer server.Close()
 
@@ -903,7 +910,7 @@ func TestCodexExecutor_BootstrapBuffering_ByteCapCountsTranslatedChunks(t *testi
 }
 
 func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapCountsTranslatedChunks(t *testing.T) {
-	padded := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("p", 300<<10) + `"}}`
+	padded := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("p", 300<<10) + `"}}`
 	server := codexWebsocketRawServer(t, []string{padded, padded}, codexOverloadEvent)
 	defer server.Close()
 
@@ -1028,22 +1035,88 @@ func TestCodexExecutor_BootstrapBuffering_FlushesInOrderOnFirstOutput(t *testing
 	}
 }
 
-// With the feature disabled the overload rejection keeps its legacy in-stream delivery.
+func TestCodexBootstrapBuffering_DefaultUnsetKeepsOverloadFailover(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		for _, cfg := range []*config.Config{nil, {}} {
+			t.Run(fmt.Sprintf("websocket=%t/nil-config=%t", websocketTransport, cfg == nil), func(t *testing.T) {
+				var server *httptest.Server
+				execute := NewCodexExecutor(cfg).ExecuteStream
+				if websocketTransport {
+					server = codexWebsocketServer(t, codexCreatedEvent, codexInProgressEvent, codexOverloadEvent)
+					execute = NewCodexWebsocketsExecutor(cfg).ExecuteStream
+				} else {
+					server = codexSSEServer(codexCreatedEvent, codexInProgressEvent, codexOverloadEvent)
+				}
+				defer server.Close()
+				req, opts := codexWebsocketRequest()
+				result, err := execute(context.Background(), codexTestAuth(server.URL), req, opts)
+				if result != nil || err == nil {
+					t.Fatalf("default must fail over without releasing handshake: result=%v err=%v", result, err)
+				}
+				if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
+					t.Fatalf("status = %d, want 503", got)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexBootstrapBuffering_DisabledStillVerifiesModel(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		for _, model := range []string{"gpt-5.6-terra", "wrong-model", ""} {
+			t.Run(fmt.Sprintf("websocket=%t/model=%s", websocketTransport, model), func(t *testing.T) {
+				terminal := codexCompletedEventBody
+				if model != "" {
+					terminal = strings.Replace(terminal, `"id":"resp_1"`, fmt.Sprintf(`"id":"resp_1","model":%q`, model), 1)
+				}
+				frames := []string{`{"type":"response.created","response":{"id":"resp_1"}}`, codexOutputDeltaEvent, terminal}
+				cfg := codexBufferingConfig(false)
+				var server *httptest.Server
+				execute := NewCodexExecutor(cfg).ExecuteStream
+				if websocketTransport {
+					server = codexWebsocketServer(t, frames...)
+					execute = NewCodexWebsocketsExecutor(cfg).ExecuteStream
+				} else {
+					server = codexSSEServer(frames...)
+				}
+				defer server.Close()
+				req, opts := codexWebsocketRequest()
+				result, err := execute(context.Background(), codexTestAuth(server.URL), req, opts)
+				if model != req.Model {
+					if result != nil || err == nil || !strings.Contains(err.Error(), "model_mismatch") {
+						t.Fatalf("unverified stream must not escape: result=%v err=%v", result, err)
+					}
+					return
+				}
+				if err != nil || result == nil {
+					t.Fatalf("verified stream failed: result=%v err=%v", result, err)
+				}
+				combined, streamErr := drainChunks(result)
+				if streamErr != nil || !strings.Contains(combined, `"delta":"hi"`) {
+					t.Fatalf("held output lost after verification: payload=%s err=%v", combined, streamErr)
+				}
+			})
+		}
+	}
+}
+
+// With the feature explicitly disabled the overload rejection keeps its legacy in-stream delivery.
+// The historical B1 test name is retained for the known-failure classification.
 func TestCodexExecutor_BootstrapBuffering_DefaultDisabledPassthrough(t *testing.T) {
 	server := codexSSEServer(codexCreatedEvent, codexOverloadEvent)
 	defer server.Close()
 
 	req, opts := codexTestRequest()
-	result, err := NewCodexExecutor(&config.Config{}).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	result, err := NewCodexExecutor(codexBufferingConfig(false)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
 	if err != nil {
-		t.Fatalf("default unbuffered ExecuteStream returned error at call time: %v", err)
+		t.Fatalf("explicitly unbuffered ExecuteStream returned error at call time: %v", err)
 	}
 	if result == nil {
-		t.Fatal("expected non-nil result in default unbuffered mode")
+		t.Fatal("expected non-nil result in explicitly unbuffered mode")
 	}
 	_, streamErr := drainChunks(result)
 	if streamErr == nil {
-		t.Fatal("expected stream error in chunks for default unbuffered mode")
+		t.Fatal("expected stream error in chunks for explicitly unbuffered mode")
 	}
 	// Disabling the feature must restore the previous behaviour exactly, status classification
 	// included: the 503 restoration is scoped to the buffered failover path, so an unbuffered
@@ -1206,16 +1279,16 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_DefaultDisabledPassthrough(t
 	defer server.Close()
 
 	req, opts := codexWebsocketRequest()
-	result, err := NewCodexWebsocketsExecutor(&config.Config{}).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	result, err := NewCodexWebsocketsExecutor(codexBufferingConfig(false)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
 	if err != nil {
-		t.Fatalf("default unbuffered ExecuteStream returned error at call time: %v", err)
+		t.Fatalf("explicitly unbuffered ExecuteStream returned error at call time: %v", err)
 	}
 	if result == nil {
-		t.Fatal("expected non-nil result in default unbuffered mode")
+		t.Fatal("expected non-nil result in explicitly unbuffered mode")
 	}
 	_, streamErr := drainChunks(result)
 	if streamErr == nil {
-		t.Fatal("expected stream error in chunks for default unbuffered mode")
+		t.Fatal("expected stream error in chunks for explicitly unbuffered mode")
 	}
 	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadGateway {
 		t.Fatalf("status code = %d, want %d while buffering is disabled", got, http.StatusBadGateway)
@@ -1420,18 +1493,23 @@ func TestCodexExecutor_BootstrapBuffering_TimeBudgetReleasesStream(t *testing.T)
 
 	bootstrapStarted := make(chan struct{})
 	var once sync.Once
+	calls := 0
 	cleanup := setCodexBootstrapNowForTest(func() time.Time {
 		now := clock.now()
-		once.Do(func() {
-			close(bootstrapStarted)
-		})
+		calls++
+		// Capture the first frame's time before allowing the server to advance the clock.
+		if calls >= 2 {
+			once.Do(func() {
+				close(bootstrapStarted)
+			})
+		}
 		return now
 	})
 	t.Cleanup(cleanup)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: response.in_progress\ndata: " + codexInProgressEvent + "\n\n"))
+		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -1470,11 +1548,16 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_TimeBudgetReleasesStream(t *
 
 	bootstrapStarted := make(chan struct{})
 	var once sync.Once
+	calls := 0
 	cleanup := setCodexBootstrapNowForTest(func() time.Time {
 		now := clock.now()
-		once.Do(func() {
-			close(bootstrapStarted)
-		})
+		calls++
+		// Capture the first frame's time before allowing the server to advance the clock.
+		if calls >= 2 {
+			once.Do(func() {
+				close(bootstrapStarted)
+			})
+		}
 		return now
 	})
 	t.Cleanup(cleanup)
@@ -1633,11 +1716,16 @@ func TestCodexExecutor_BootstrapBuffering_OverloadDirectlyAfterTimeoutDeliveredI
 
 	bootstrapStarted := make(chan struct{})
 	var once sync.Once
+	calls := 0
 	cleanup := setCodexBootstrapNowForTest(func() time.Time {
 		now := clock.now()
-		once.Do(func() {
-			close(bootstrapStarted)
-		})
+		calls++
+		// Capture the first frame's time before allowing the server to advance the clock.
+		if calls >= 2 {
+			once.Do(func() {
+				close(bootstrapStarted)
+			})
+		}
 		return now
 	})
 	t.Cleanup(cleanup)
@@ -1645,12 +1733,13 @@ func TestCodexExecutor_BootstrapBuffering_OverloadDirectlyAfterTimeoutDeliveredI
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
 
 		<-bootstrapStarted
-		// Advance clock past 10s timeout before the first event arrives
+		// Advance clock past 10s timeout before the rejection arrives
 		clock.advance(11 * time.Second)
 
 		_, _ = w.Write([]byte("event: error\ndata: " + codexOverloadEvent + "\n\n"))
@@ -1679,11 +1768,16 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_OverloadDirectlyAfterTimeout
 
 	bootstrapStarted := make(chan struct{})
 	var once sync.Once
+	calls := 0
 	cleanup := setCodexBootstrapNowForTest(func() time.Time {
 		now := clock.now()
-		once.Do(func() {
-			close(bootstrapStarted)
-		})
+		calls++
+		// Capture the first frame's time before allowing the server to advance the clock.
+		if calls >= 2 {
+			once.Do(func() {
+				close(bootstrapStarted)
+			})
+		}
 		return now
 	})
 	t.Cleanup(cleanup)
@@ -1699,8 +1793,9 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_OverloadDirectlyAfterTimeout
 			return
 		}
 
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(codexCreatedEvent))
 		<-bootstrapStarted
-		// Advance clock past 10s timeout before writing any messages
+		// Advance clock past 10s timeout before writing the rejection
 		clock.advance(11 * time.Second)
 
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(codexOverloadEvent))
@@ -1728,11 +1823,16 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_StatusBearingErrorAfterTimeo
 
 	bootstrapStarted := make(chan struct{})
 	var once sync.Once
+	calls := 0
 	cleanup := setCodexBootstrapNowForTest(func() time.Time {
 		now := clock.now()
-		once.Do(func() {
-			close(bootstrapStarted)
-		})
+		calls++
+		// Capture the first frame's time before allowing the server to advance the clock.
+		if calls >= 2 {
+			once.Do(func() {
+				close(bootstrapStarted)
+			})
+		}
 		return now
 	})
 	t.Cleanup(cleanup)
@@ -1750,6 +1850,7 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_StatusBearingErrorAfterTimeo
 			return
 		}
 
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(codexCreatedEvent))
 		<-bootstrapStarted
 		// Advance clock past 10s timeout before writing error frame
 		clock.advance(11 * time.Second)
