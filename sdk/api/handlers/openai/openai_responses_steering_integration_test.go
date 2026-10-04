@@ -54,7 +54,7 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 				if gjson.GetBytes(read(), "type").String() != "response.create" {
 					t.Error("missing initial create")
 				}
-				write(`{"type":"response.created","response":{"id":"r1"}}`)
+				write(`{"type":"response.created","response":{"model":"steering-test-model","id":"r1"}}`)
 				if b := read(); !bytes.Equal(b, control1) {
 					t.Errorf("first steer altered: %s", b)
 				}
@@ -67,7 +67,7 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 					return
 				}
 				if scenario == "tool_pending" || scenario == "disconnect_pending" {
-					write(`{"type":"response.completed","response":{"id":"r1","output":[{"type":"function_call","call_id":"call1","name":"lookup","arguments":"{}"}]}}`)
+					write(`{"type":"response.completed","response":{"model":"steering-test-model","id":"r1","output":[{"type":"function_call","call_id":"call1","name":"lookup","arguments":"{}"}]}}`)
 					write(`{"type":"response.steer.pending","steer":{"id":"s1","previous_response_id":"r1"},"reason":"waiting_for_required_input","required_input":[{"type":"function_call_output","call_id":"call1","name":"lookup"}]}`)
 					if scenario == "disconnect_pending" {
 						return
@@ -77,11 +77,11 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 						t.Errorf("required input lost: %s", b)
 					}
 				} else {
-					write(`{"type":"response.incomplete","response":{"id":"r1","incomplete_details":{"reason":"steered"},"output":[]}}`)
+					write(`{"type":"response.incomplete","response":{"model":"steering-test-model","id":"r1","incomplete_details":{"reason":"steered"},"output":[]}}`)
 				}
-				write(`{"type":"response.created","response":{"id":"r2"}}`)
+				write(`{"type":"response.created","response":{"model":"steering-test-model","id":"r2"}}`)
 				write(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"STEER_OK"}]}}`)
-				write(`{"type":"response.completed","response":{"id":"r2","output":[]}}`)
+				write(`{"type":"response.completed","response":{"model":"steering-test-model","id":"r2","output":[]}}`)
 				_, _, _ = c.ReadMessage()
 			}))
 			defer upstream.Close()

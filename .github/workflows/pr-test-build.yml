@@ -41,6 +41,14 @@ jobs:
           for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
+      - name: Test full Go suite with explicit known-failure quarantine
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          # smarty-dev#3555: exact names only; newly added tests must run, even in quarantined packages.
+          skip=$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' .github/scripts/go-test-known-failures.txt | paste -sd '|')
+          go test ./... -count=1 -skip "^(${skip})$"
       - name: Build
         run: |
           go build -o test-output ./cmd/server
