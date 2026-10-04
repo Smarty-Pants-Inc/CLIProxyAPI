@@ -41,6 +41,7 @@ const attemptMaxIdleTime = 2 * time.Hour
 type Handler struct {
 	cfg                     *config.Config
 	configFilePath          string
+	configVersion           string
 	mu                      sync.Mutex
 	authStatusMu            sync.Mutex
 	reloadMu                sync.Mutex
@@ -82,6 +83,14 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+	}
+	if cfg != nil {
+		h.configVersion = cfg.ConfigFileVersion
+	}
+	if h.configVersion == "" && configFilePath != "" {
+		if version, errVersion := config.ConfigFileVersion(configFilePath); errVersion == nil {
+			h.configVersion = version
+		}
 	}
 	h.startAttemptCleanup()
 	return h
@@ -129,6 +138,15 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	}
 	h.mu.Lock()
 	h.cfg = cfg
+	h.configVersion = ""
+	if cfg != nil {
+		h.configVersion = cfg.ConfigFileVersion
+	}
+	if h.configVersion == "" && h.configFilePath != "" {
+		if version, errVersion := config.ConfigFileVersion(h.configFilePath); errVersion == nil {
+			h.configVersion = version
+		}
+	}
 	h.mu.Unlock()
 }
 
@@ -182,8 +200,12 @@ func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnaps
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return configReloadSnapshot{}, false
 	}
-	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+	if errSave := h.saveConfigLocked(); errSave != nil {
+		if errSave == config.ErrConfigConflict {
+			c.JSON(http.StatusConflict, gin.H{"error": "config changed since it was read"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+		}
 		return configReloadSnapshot{}, false
 	}
 	return h.reloadSnapshotConfigLocked(), true
@@ -319,6 +341,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
+	h.mu.Lock()
 	cfg := h.cfg
 	var (
 		allowRemote bool
@@ -328,6 +351,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
 	}
+	h.mu.Unlock()
 	if h.allowRemoteOverride {
 		allowRemote = true
 	}
@@ -452,6 +476,37 @@ func (h *Handler) policyConfigFrozenLocked() bool {
 	return disk.Policies.Kind != 0
 }
 
+// configMutationLocked isolates a management edit from the live runtime snapshot.
+// Callers hold h.mu and defer the returned rollback until after publication.
+func (h *Handler) configMutationLocked() func() {
+	previous := h.cfg
+	if h.configVersion == "" && previous != nil {
+		h.configVersion = previous.ConfigFileVersion
+		if h.configVersion == "" && h.configFilePath != "" {
+			h.configVersion, _ = config.ConfigFileVersion(h.configFilePath)
+		}
+	}
+	generation := h.reloadGeneration
+	h.cfg = previous.CloneForRuntime()
+	return func() {
+		if h.reloadGeneration != generation && previous != nil {
+			*previous = *h.cfg
+		}
+		h.cfg = previous
+	}
+}
+
+func (h *Handler) saveConfigLocked() error {
+	if h.configFilePath == "" {
+		return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+	}
+	version, errSave := config.SaveConfigPreserveCommentsCAS(h.configFilePath, h.cfg, h.configVersion)
+	if errSave == nil {
+		h.configVersion = version
+	}
+	return errSave
+}
+
 // persist saves the current in-memory config to disk.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
@@ -466,9 +521,12 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return false
 	}
-	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+	if err := h.saveConfigLocked(); err != nil {
+		if err == config.ErrConfigConflict {
+			c.JSON(http.StatusConflict, gin.H{"error": "config changed since it was read"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		}
 		return false
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
@@ -490,8 +548,11 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
@@ -502,8 +563,11 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
@@ -514,6 +578,9 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }

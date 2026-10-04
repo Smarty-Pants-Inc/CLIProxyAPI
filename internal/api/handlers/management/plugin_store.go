@@ -306,7 +306,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	restartRequired := false
 
 	h.mu.Lock()
+	rollback := h.configMutationLocked()
 	if h.cfg == nil {
+		rollback()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_unavailable",
@@ -316,6 +318,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errEnable := h.enablePluginConfigLocked(id, manifest); errEnable != nil {
+		rollback()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_update_failed",
@@ -324,7 +327,8 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		})
 		return
 	}
-	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+	if errSave := h.saveConfigLocked(); errSave != nil {
+		rollback()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_save_failed",
@@ -334,6 +338,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	cfgSnapshot := h.reloadSnapshotConfigLocked()
+	rollback()
 	h.mu.Unlock()
 
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)

@@ -228,18 +228,21 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 	}
 
 	h.mu.Lock()
+	rollback := h.configMutationLocked()
 	ensurePluginConfigMap(h.cfg)
 	item := h.cfg.Plugins.Configs[id]
 	node := pluginConfigNode(item)
 	setYAMLMappingValue(node, "enabled", boolYAMLNode(*body.Enabled))
 	updated, errConfig := pluginInstanceConfigFromNode(node)
 	if errConfig != nil {
+		rollback()
 		h.mu.Unlock()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
 		return
 	}
 	h.cfg.Plugins.Configs[id] = updated
 	cfgSnapshot, okSnapshot := h.saveConfigAndSnapshotLocked(c)
+	rollback()
 	h.mu.Unlock()
 	if !okSnapshot {
 		return
@@ -272,6 +275,7 @@ func (h *Handler) PutPluginConfig(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	ensurePluginConfigMap(h.cfg)
 	h.cfg.Plugins.Configs[id] = updated
 	h.persistLocked(c)
@@ -290,6 +294,7 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	defer h.configMutationLocked()()
 	ensurePluginConfigMap(h.cfg)
 	node := pluginConfigNode(h.cfg.Plugins.Configs[id])
 	keys := make([]string, 0, len(body))
@@ -383,9 +388,11 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 
 	h.mu.Lock()
+	rollback := h.configMutationLocked()
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
-		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		if errSave := h.saveConfigLocked(); errSave != nil {
+			rollback()
 			h.mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":        "config_save_failed",
@@ -397,6 +404,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		}
 	}
 	cfgSnapshot := h.reloadSnapshotConfigLocked()
+	rollback()
 	h.mu.Unlock()
 
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)

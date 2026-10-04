@@ -39,7 +39,7 @@ func TestAPIKeyPolicyConfig(t *testing.T) {
 			if err := os.WriteFile(path, []byte("api-keys: [key]\n"+tc.body), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := SaveConfigPreserveComments(path, cfg); err != nil {
+			if err := saveConfigFixture(path, cfg); err != nil {
 				t.Fatal(err)
 			}
 			cfg, err = LoadConfig(path)

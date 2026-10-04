@@ -96,23 +96,28 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 	if coreauth.IsConfigAPIKeyAuth(targetAuth) {
 		h.mu.Lock()
+		rollback := h.configMutationLocked()
 		if h.policyConfigFrozenLocked() {
+			rollback()
 			h.mu.Unlock()
 			c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 			return
 		}
 		handled, errToggle := toggleConfigAPIKeyExcludedAll(h.cfg, targetAuth, *req.Disabled)
 		if errToggle != nil {
+			rollback()
 			h.mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update config api key: %v", errToggle)})
 			return
 		}
 		if !handled {
+			rollback()
 			h.mu.Unlock()
 			c.JSON(http.StatusNotFound, gin.H{"error": "config api key entry not found"})
 			return
 		}
 		cfgSnapshot, okSnapshot := h.saveConfigAndSnapshotLocked(c)
+		rollback()
 		h.mu.Unlock()
 		if !okSnapshot {
 			return

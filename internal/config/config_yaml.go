@@ -12,6 +12,45 @@ import (
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	_, errSave := SaveConfigPreserveCommentsCAS(configFile, cfg, cfg.ConfigFileVersion)
+	return errSave
+}
+
+// SaveConfigPreserveCommentsCAS publishes cfg only when configFile still has expectedVersion.
+func SaveConfigPreserveCommentsCAS(configFile string, cfg *Config, expectedVersion string) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("config is nil")
+	}
+	var version string
+	err := withConfigFileLock(configFile, func(configFile string) error {
+		if expectedVersion == "" {
+			return ErrConfigVersionRequired
+		}
+		current, errRead := os.ReadFile(configFile)
+		if errRead != nil {
+			return errRead
+		}
+		if configVersion(current) != expectedVersion {
+			return ErrConfigConflict
+		}
+		if errSave := saveConfigPreserveCommentsUnlocked(configFile, cfg); errSave != nil {
+			return errSave
+		}
+		published, errPublished := os.ReadFile(configFile)
+		if errPublished != nil {
+			return errPublished
+		}
+		version = configVersion(published)
+		cfg.ConfigFileVersion = version
+		return nil
+	})
+	return version, err
+}
+
+func saveConfigPreserveCommentsUnlocked(configFile string, cfg *Config) error {
 	if err := cfg.ValidateAPIKeyPolicies(); err != nil {
 		return err
 	}
@@ -69,12 +108,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	}
 	normalizeCollectionNodeStyles(original.Content[0])
 
-	// Write back.
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	// Write back atomically.
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -85,14 +119,18 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	if err = enc.Close(); err != nil {
 		return err
 	}
-	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return atomicWriteConfigUnlocked(configFile, NormalizeCommentIndentation(buf.Bytes()))
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
+	return withConfigFileLock(configFile, func(configFile string) error {
+		return saveConfigPreserveCommentsUpdateNestedScalarUnlocked(configFile, path, value)
+	})
+}
+
+func saveConfigPreserveCommentsUpdateNestedScalarUnlocked(configFile string, path []string, value string) error {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return err
@@ -122,11 +160,6 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -137,9 +170,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	if err = enc.Close(); err != nil {
 		return err
 	}
-	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return atomicWriteConfigUnlocked(configFile, NormalizeCommentIndentation(buf.Bytes()))
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.

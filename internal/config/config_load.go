@@ -30,6 +30,10 @@ func LoadConfig(configFile string) (*Config, error) {
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
+	return loadConfigOptional(configFile, optional, false)
+}
+
+func loadConfigOptional(configFile string, optional, locked bool) (*Config, error) {
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -108,7 +112,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
+	cfg.ConfigFileVersion = configVersion(data)
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+		if !locked {
+			var current *Config
+			errLock := withConfigFileLock(configFile, func(configFile string) error {
+				var errLoad error
+				current, errLoad = loadConfigOptional(configFile, optional, true)
+				return errLoad
+			})
+			return current, errLock
+		}
 		hashed, errHash := hashSecret(cfg.RemoteManagement.SecretKey)
 		if errHash != nil {
 			return nil, fmt.Errorf("failed to hash remote management key: %w", errHash)
@@ -117,7 +131,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
 		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
+		if errSave := saveConfigPreserveCommentsUpdateNestedScalarUnlocked(configFile, []string{"remote-management", "secret-key"}, hashed); errSave != nil {
+			return nil, fmt.Errorf("failed to publish hashed management key: %w", errSave)
+		}
+		published, errPublished := os.ReadFile(configFile)
+		if errPublished != nil {
+			return nil, fmt.Errorf("failed to read published config: %w", errPublished)
+		}
+		cfg.ConfigFileVersion = configVersion(published)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
