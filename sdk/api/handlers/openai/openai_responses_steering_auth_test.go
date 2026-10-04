@@ -35,8 +35,8 @@ func TestResponsesSteeringDisabledAccountCannotSendAnotherFrame(t *testing.T) {
 			return
 		}
 		frames.Add(1)
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1"}}`))
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"model":"steering-disable-model","id":"r1"}}`))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"model":"steering-disable-model","id":"r1","output":[]}}`))
 		if _, _, err := c.ReadMessage(); err == nil {
 			frames.Add(1)
 		}
