@@ -14,7 +14,7 @@ func TestComposeConfigDirectoryPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(compose), "${CLI_PROXY_CONFIG_DIR:-./config}:/CLIProxyAPI/config") || !strings.Contains(string(compose), `command: ["--config", "/CLIProxyAPI/config/config.yaml"]`) {
+	if !strings.Contains(string(compose), "${CLI_PROXY_CONFIG_DIR:-./config}:/CLIProxyAPI/config") || !strings.Contains(string(compose), `command: ["./CLIProxyAPI", "--config", "/CLIProxyAPI/config/config.yaml"]`) {
 		t.Fatal("Compose must mount a config directory and select the file inside it")
 	}
 	path := filepath.Join(t.TempDir(), "config.yaml")

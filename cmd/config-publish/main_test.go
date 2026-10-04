@@ -5,10 +5,25 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+func TestPublicationGuideMatchesCLI(t *testing.T) {
+	_, source, _, _ := runtime.Caller(0)
+	guide, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../docs/config-publication.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"--config", "--input", "--expected-version", `sha256sum "$work/original.yaml"`, "CLI_PROXY_CONFIG_DIR", "fresh snapshot and reapplication", "file-backed", "4527"} {
+		if !strings.Contains(string(guide), text) {
+			t.Errorf("publication guide missing %q", text)
+		}
+	}
+}
 
 func TestPublisherUsesCompleteServerValidation(t *testing.T) {
 	for _, valid := range []bool{false, true} {
