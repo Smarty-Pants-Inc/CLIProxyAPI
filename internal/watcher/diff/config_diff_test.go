@@ -8,6 +8,33 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
+func TestCodexBootstrapBufferingChangeDetails(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		old, next *bool
+		want      string
+	}{
+		{"unset-to-true", nil, new(true), ""},
+		{"same-value-different-pointers", new(false), new(false), ""},
+		{"unset-to-false", nil, new(false), "codex.stream-bootstrap-buffering: true -> false"},
+		{"false-to-unset", new(false), nil, "codex.stream-bootstrap-buffering: false -> true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: tc.old}}
+			newCfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: tc.next}}
+			var got string
+			for _, detail := range BuildConfigChangeDetails(oldCfg, newCfg) {
+				if strings.HasPrefix(detail, "codex.stream-bootstrap-buffering:") {
+					got = detail
+				}
+			}
+			if got != tc.want {
+				t.Fatalf("buffering change = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildConfigChangeDetails(t *testing.T) {
 	oldCfg := &config.Config{
 		Port:    8080,

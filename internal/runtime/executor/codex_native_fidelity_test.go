@@ -74,7 +74,7 @@ func testCodexNativeStreamFidelity(t *testing.T, source sdktranslator.Format) {
 					} else if lite == "metadata" {
 						payload = []byte(`{"model":"gpt-5.6-sol","input":[],"parallel_tool_calls":false,"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`)
 					}
-					cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: buffering, DisableCodexCloaking: true}}
+					cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: &buffering, DisableCodexCloaking: true}}
 					executeStream := NewCodexExecutor(cfg).ExecuteStream
 					if transport == "websocket" {
 						executeStream = NewCodexWebsocketsExecutor(cfg).ExecuteStream

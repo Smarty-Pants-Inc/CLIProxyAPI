@@ -46,7 +46,7 @@ func TestCodexStreamChunksRemainOwnedAfterScannerAdvances(t *testing.T) {
 		for _, format := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAIResponse, "test-codex-raw-ownership"} {
 			t.Run(fmt.Sprintf("buffered=%t/%s", buffered, format), func(t *testing.T) {
 				cfg := &config.Config{}
-				cfg.Codex.StreamBootstrapBuffering = buffered
+				cfg.Codex.StreamBootstrapBuffering = &buffered
 				executor := NewCodexExecutor(cfg)
 				ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", codexAllocationTransport{stream: codexAllocationStream(deltas, deltaSize)})
 				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test"}}
@@ -102,7 +102,7 @@ func BenchmarkCodexExecuteStreamAllocations(b *testing.B) {
 			b.Run(fmt.Sprintf("buffered=%t/%s", buffered, format), func(b *testing.B) {
 				stream := codexAllocationStream(256, 1024)
 				cfg := &config.Config{}
-				cfg.Codex.StreamBootstrapBuffering = buffered
+				cfg.Codex.StreamBootstrapBuffering = &buffered
 				executor := NewCodexExecutor(cfg)
 				ctx := context.WithValue(b.Context(), "cliproxy.roundtripper", codexAllocationTransport{stream: stream})
 				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test"}}
