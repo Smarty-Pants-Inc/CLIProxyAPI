@@ -87,11 +87,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	if cfg != nil {
 		h.configVersion = cfg.ConfigFileVersion
 	}
-	if h.configVersion == "" && configFilePath != "" {
-		if version, errVersion := config.ConfigFileVersion(configFilePath); errVersion == nil {
-			h.configVersion = version
-		}
-	}
+
 	h.startAttemptCleanup()
 	return h
 }
@@ -142,11 +138,7 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	if cfg != nil {
 		h.configVersion = cfg.ConfigFileVersion
 	}
-	if h.configVersion == "" && h.configFilePath != "" {
-		if version, errVersion := config.ConfigFileVersion(h.configFilePath); errVersion == nil {
-			h.configVersion = version
-		}
-	}
+
 	h.mu.Unlock()
 }
 
@@ -485,9 +477,7 @@ func (h *Handler) configMutationLocked() func() {
 	previous := h.cfg
 	if h.configVersion == "" && previous != nil {
 		h.configVersion = previous.ConfigFileVersion
-		if h.configVersion == "" && h.configFilePath != "" {
-			h.configVersion, _ = config.ConfigFileVersion(h.configFilePath)
-		}
+
 	}
 	generation := h.reloadGeneration
 	h.cfg = previous.CloneForRuntime()

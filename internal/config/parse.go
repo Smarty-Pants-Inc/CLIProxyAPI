@@ -127,5 +127,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.SanitizeOAuthRequestScopedErrors()
 	cfg.SanitizePayloadRules()
 
+	// Authority belongs to the original bytes, not the normalized/hashed object.
+	cfg.ConfigFileVersion = configVersion(data)
 	return &cfg, nil
 }
