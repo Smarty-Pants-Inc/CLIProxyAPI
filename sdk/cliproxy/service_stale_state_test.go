@@ -132,3 +132,43 @@ func TestApplyHomeOverlayDoesNotApplyWithoutReadyClient(t *testing.T) {
 		t.Fatal("unready home overlay changed cooldown status persistence")
 	}
 }
+
+// The watcher reload path copies the existing model holds into the reloaded
+// record; the failure scope recorded with them must travel too, so a Codex
+// quota hold stays releasable by the usage re-probe after its auth file is
+// rewritten, while a credential-wide failure's scope is not forgotten.
+func TestServiceApplyCoreAuthAddOrUpdate_ReloadCarriesFailureScope(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		authWide403 bool
+		want        string
+	}{
+		{"explicit-model-quota", false, coreauth.FailureScopeModel},
+		{"auth-wide-403", true, coreauth.FailureScopeCredential},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
+			authID := "service-scope-reload-" + tc.name
+			t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(authID) })
+			fileRecord := func() *coreauth.Auth {
+				return &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"account_id": "acct"}}
+			}
+			ctx := coreauth.WithSkipPersist(context.Background())
+			service.applyCoreAuthAddOrUpdate(ctx, fileRecord())
+			reset := 72 * time.Hour
+			service.coreManager.MarkResult(ctx, coreauth.Result{AuthID: authID, Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset,
+				Error: &coreauth.Error{HTTPStatus: 429, Message: "usage_limit_reached"}})
+			if tc.authWide403 {
+				service.coreManager.MarkResult(ctx, coreauth.Result{AuthID: authID, Provider: "codex", Error: &coreauth.Error{HTTPStatus: 403, Message: "account deactivated"}})
+			}
+			service.applyCoreAuthAddOrUpdate(ctx, fileRecord())
+			reloaded, ok := service.coreManager.GetByID(authID)
+			if !ok || reloaded.ModelStates["gpt-5.5"] == nil || !reloaded.ModelStates["gpt-5.5"].Quota.Exceeded {
+				t.Fatalf("setup: reload did not carry the model hold: %+v", reloaded)
+			}
+			if reloaded.FailureScope != tc.want {
+				t.Fatalf("FailureScope after reload = %q, want %q", reloaded.FailureScope, tc.want)
+			}
+		})
+	}
+}

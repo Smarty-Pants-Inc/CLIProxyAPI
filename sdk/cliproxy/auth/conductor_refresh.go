@@ -67,6 +67,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+	go m.runCodexQuotaReprobe(ctx, codexQuotaReprobeIntervalFromEnv())
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -586,6 +587,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			current.Generation++
 			current.UpdatedAt = now
 			current.LastError = refreshErrorFromError(err)
+			widenFailureScope(current, FailureScopeCredential)
 
 			hasValidAccessToken := current.HasValidAccessToken(now)
 			if !hasValidAccessToken {
@@ -633,6 +635,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	updated.LastRefreshedAt = now
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
+	updated.FailureScope = ""
 	updated.StatusMessage = ""
 	updated.Unavailable = false
 	if updated.Status == StatusError || updated.Status == "" {

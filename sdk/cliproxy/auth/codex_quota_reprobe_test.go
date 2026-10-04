@@ -1,0 +1,970 @@
+package auth
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+)
+
+type codexUsageProbeExecutor struct {
+	codexOnlyFailureExecutor
+	mu     sync.Mutex
+	bodies map[string]string
+	seen   map[string]string // auth ID -> Chatgpt-Account-Id header
+	urls   []string
+	calls  []string
+	// pauseFirst, when set, blocks the first probe: started is closed when it
+	// begins and the probe waits for resume.
+	pauseFirst bool
+	started    chan struct{}
+	resume     chan struct{}
+}
+
+func (e *codexUsageProbeExecutor) HttpRequest(_ context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	e.mu.Lock()
+	e.seen[auth.ID] = req.Header.Get("Chatgpt-Account-Id")
+	e.urls = append(e.urls, req.URL.String())
+	e.calls = append(e.calls, auth.ID)
+	first := len(e.calls) == 1
+	body := e.bodies[auth.ID]
+	if body == "" {
+		body = e.bodies["*"]
+	}
+	e.mu.Unlock()
+	if e.pauseFirst && first {
+		close(e.started)
+		<-e.resume
+	}
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+func (e *codexUsageProbeExecutor) probedIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.calls...)
+}
+
+func newPausingUsageExecutor(body string) *codexUsageProbeExecutor {
+	return &codexUsageProbeExecutor{
+		bodies:     map[string]string{"*": body},
+		seen:       map[string]string{},
+		pauseFirst: true,
+		started:    make(chan struct{}),
+		resume:     make(chan struct{}),
+	}
+}
+
+func heldCodexAuth(id string, holdUntil time.Time) *Auth {
+	return &Auth{
+		ID: id, Provider: "codex", Status: StatusError, Metadata: map[string]any{"account_id": "acct-" + id},
+		Unavailable: true, NextRetryAfter: holdUntil,
+		LastError:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+		FailureScope: FailureScopeCredentialQuota,
+		Quota:        QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: holdUntil},
+	}
+}
+
+func TestCodexUsageAllows(t *testing.T) {
+	cases := map[string]bool{
+		`{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":12}}}`: true,
+		`{"rate_limit":{"allowed":true}}`:                        true,
+		`{"rate_limit":{"allowed":true,"limit_reached":true}}`:   false,
+		`{"rate_limit":{"allowed":false,"limit_reached":false}}`: false,
+		// Missing, null or non-boolean "allowed" is not approval.
+		`{"rate_limit":{"limit_reached":false}}`:                  false,
+		`{"rate_limit":{"allowed":null,"limit_reached":false}}`:   false,
+		`{"rate_limit":{"allowed":"true","limit_reached":false}}`: false,
+		`{"rate_limit":{"allowed":1,"limit_reached":false}}`:      false,
+		`{"rate_limit":{}}`:   false,
+		`{"rate_limit":null}`: false,
+		`{"rate_limit":{"primary_window":{"used_percent":100}}}`: false,
+		`{"plan_type":"pro"}`: false,
+		`not json`:            false,
+		// A separately limited feature reported exhausted keeps the hold.
+		`{"rate_limit":{"allowed":true,"limit_reached":false},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"allowed":false,"limit_reached":true}}]}`: false,
+		`{"rate_limit":{"allowed":true,"limit_reached":false},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"allowed":true,"limit_reached":false}}]}`: true,
+	}
+	for body, want := range cases {
+		if got := codexUsageAllows([]byte(body)); got != want {
+			t.Errorf("codexUsageAllows(%s) = %v, want %v", body, got, want)
+		}
+	}
+}
+
+func TestReprobeHeldCodexQuotas_ReleasesOnlyAccountsUsageShowsAvailable(t *testing.T) {
+	executor := &codexUsageProbeExecutor{
+		bodies: map[string]string{
+			"codex-free":    `{"rate_limit":{"allowed":true,"limit_reached":false}}`,
+			"codex-full":    `{"rate_limit":{"allowed":false,"limit_reached":true}}`,
+			"codex-unknown": `{"rate_limit":{"limit_reached":false}}`,
+		},
+		seen: map[string]string{},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	holdUntil := time.Now().Add(72 * time.Hour)
+	for _, id := range []string{"codex-free", "codex-full", "codex-unknown", "codex-ok"} {
+		auth := heldCodexAuth(id, holdUntil)
+		if id == "codex-ok" {
+			auth = &Auth{ID: id, Provider: "codex", Status: StatusActive}
+		}
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+	}
+
+	released := manager.reprobeHeldCodexQuotas(context.Background())
+
+	if len(released) != 1 || released[0] != "codex-free" {
+		t.Fatalf("released = %v, want [codex-free]", released)
+	}
+	if _, probed := executor.seen["codex-ok"]; probed {
+		t.Fatal("an account that is not held must not be probed")
+	}
+	if got := executor.seen["codex-free"]; got != "acct-codex-free" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want acct-codex-free", got)
+	}
+	for _, u := range executor.urls {
+		if u != codexUsageURL {
+			t.Fatalf("probe URL = %q, want %q", u, codexUsageURL)
+		}
+	}
+	free, _ := manager.GetByID("codex-free")
+	if free.Quota.Exceeded || free.Unavailable || !free.Quota.NextRecoverAt.IsZero() || free.Status != StatusActive {
+		t.Fatalf("codex-free still held: quota=%+v unavailable=%v status=%s", free.Quota, free.Unavailable, free.Status)
+	}
+	for _, id := range []string{"codex-full", "codex-unknown"} {
+		kept, _ := manager.GetByID(id)
+		if !kept.Quota.Exceeded || !kept.Quota.NextRecoverAt.Equal(holdUntil) || !kept.Unavailable {
+			t.Fatalf("%s hold changed: %+v", id, kept.Quota)
+		}
+	}
+}
+
+// A usage verdict releases only the quota hold: a sibling model-support failure,
+// an operator-forced cooldown and a disabled model state stay exactly as they were.
+func TestReprobeHeldCodexQuotas_ReleasesOnlyTheQuotaHold(t *testing.T) {
+	executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	now := time.Now()
+	holdUntil := now.Add(72 * time.Hour)
+	auth := &Auth{ID: "codex-mixed", Provider: "codex", Status: StatusError, FailureScope: FailureScopeModel, ModelStates: map[string]*ModelState{
+		"gpt-5.5": {
+			Status: StatusError, Unavailable: true, NextRetryAfter: holdUntil, StatusMessage: "usage_limit_reached",
+			LastError:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+			Quota:        QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: holdUntil},
+			FailureScope: FailureScopeModelQuota,
+		},
+		"gpt-unsupported": {
+			Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(12 * time.Hour), StatusMessage: "model_not_supported",
+			LastError: &Error{HTTPStatus: http.StatusNotFound, Message: "model_not_supported"},
+		},
+		"gpt-forced": {
+			Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(2 * time.Hour), StatusMessage: "forced",
+			LastError:    &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests, Message: "forced"},
+			Quota:        QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(2 * time.Hour)},
+			FailureScope: FailureScopeModelOther,
+		},
+		"gpt-disabled": {Status: StatusDisabled, Unavailable: true},
+	}}
+	updateAggregatedAvailability(auth, now)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	before, _ := manager.GetByID("codex-mixed")
+
+	released := manager.reprobeHeldCodexQuotas(context.Background())
+	if len(released) != 1 {
+		t.Fatalf("released = %v, want [codex-mixed]", released)
+	}
+	after, _ := manager.GetByID("codex-mixed")
+	if !modelStateIsClean(after.ModelStates["gpt-5.5"]) {
+		t.Fatalf("quota-held model not released: %+v", after.ModelStates["gpt-5.5"])
+	}
+	for _, model := range []string{"gpt-unsupported", "gpt-forced", "gpt-disabled"} {
+		if !reflect.DeepEqual(before.ModelStates[model], after.ModelStates[model]) {
+			t.Fatalf("%s changed:\nbefore %+v\nafter  %+v", model, before.ModelStates[model], after.ModelStates[model])
+		}
+	}
+	if after.Unavailable {
+		t.Fatal("account must be routable again for the released model")
+	}
+	if after.Status != StatusError {
+		t.Fatalf("account status = %s, want error while model errors remain", after.Status)
+	}
+}
+
+// Pause the first probe, disable or remove every other queued account, and no
+// request may start for them.
+func TestReprobeHeldCodexQuotas_SkipsAccountsWithdrawnWhileQueued(t *testing.T) {
+	executor := newPausingUsageExecutor(`{"rate_limit":{"allowed":true,"limit_reached":false}}`)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	holdUntil := time.Now().Add(72 * time.Hour)
+	ids := []string{"codex-a", "codex-b", "codex-c"}
+	for _, id := range ids {
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth(id, holdUntil)); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+	}
+	done := make(chan []string, 1)
+	go func() { done <- manager.reprobeHeldCodexQuotas(context.Background()) }()
+	<-executor.started
+	first := executor.probedIDs()[0]
+	withdrawn := 0
+	for _, id := range ids {
+		if id == first {
+			continue
+		}
+		if withdrawn == 0 {
+			disabled, _ := manager.GetByID(id)
+			disabled.Disabled = true
+			disabled.Status = StatusDisabled
+			if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), disabled); errUpdate != nil {
+				t.Fatalf("disable %s: %v", id, errUpdate)
+			}
+		} else {
+			manager.Remove(WithSkipPersist(context.Background()), id)
+		}
+		withdrawn++
+	}
+	close(executor.resume)
+	released := <-done
+	if got := executor.probedIDs(); len(got) != 1 || got[0] != first {
+		t.Fatalf("probed %v, want only %s: withdrawn accounts must not be used", got, first)
+	}
+	if len(released) != 1 || released[0] != first {
+		t.Fatalf("released = %v, want [%s]", released, first)
+	}
+}
+
+// A successful probe of one registration must not release a hold on a
+// replacement registered under the same ID while the probe was in flight.
+func TestReprobeHeldCodexQuotas_DropsResultForReplacedCredential(t *testing.T) {
+	executor := newPausingUsageExecutor(`{"rate_limit":{"allowed":true,"limit_reached":false}}`)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth("codex-x", time.Now().Add(72*time.Hour))); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	done := make(chan []string, 1)
+	go func() { done <- manager.reprobeHeldCodexQuotas(context.Background()) }()
+	<-executor.started
+	manager.Remove(WithSkipPersist(context.Background()), "codex-x")
+	newHold := time.Now().Add(96 * time.Hour).Round(time.Second)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth("codex-x", newHold)); errRegister != nil {
+		t.Fatalf("re-register: %v", errRegister)
+	}
+	close(executor.resume)
+	if released := <-done; len(released) != 0 {
+		t.Fatalf("released = %v, want none", released)
+	}
+	replacement, _ := manager.GetByID("codex-x")
+	if !replacement.Quota.Exceeded || !replacement.Quota.NextRecoverAt.Equal(newHold) || !replacement.Unavailable {
+		t.Fatalf("replacement's hold was cleared by the old probe: %+v", replacement.Quota)
+	}
+}
+
+// A probe result that arrives after the lifecycle was cancelled is not applied.
+func TestReprobeHeldCodexQuotas_CancelledBeforeApplyKeepsHold(t *testing.T) {
+	executor := newPausingUsageExecutor(`{"rate_limit":{"allowed":true,"limit_reached":false}}`)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	holdUntil := time.Now().Add(72 * time.Hour)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth("codex-y", holdUntil)); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan []string, 1)
+	go func() { done <- manager.reprobeHeldCodexQuotas(ctx) }()
+	<-executor.started
+	cancel()
+	close(executor.resume)
+	if released := <-done; len(released) != 0 {
+		t.Fatalf("released = %v, want none after cancellation", released)
+	}
+	held, _ := manager.GetByID("codex-y")
+	if !held.Quota.Exceeded || !held.Quota.NextRecoverAt.Equal(holdUntil) {
+		t.Fatalf("hold cleared after cancellation: %+v", held.Quota)
+	}
+}
+
+// A credential-wide failure recorded on top of a quota hold (MarkResult with an
+// empty model) is an independent restriction. applyAuthFailureState folds its
+// shorter deadline into the quota deadline, so an "allowed" usage probe must
+// not take that as proof the account is only quota-held: the whole hold stays.
+func TestReprobeHeldCodexQuotas_KeepsHoldWithAuthLevelFailure(t *testing.T) {
+	quota429 := func() *Error {
+		return &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}
+	}
+	cases := []struct {
+		name            string
+		credentialScope bool
+		authErr         *Error
+	}{
+		{"credential-quota+403", true, &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}},
+		{"credential-quota+forced-cooldown", true, &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadRequest, Message: "forced"}},
+		{"model-quota+403", false, &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}},
+		{"model-quota+forced-cooldown", false, &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadRequest, Message: "forced"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			ctx := WithSkipPersist(context.Background())
+			auth := &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"account_id": "acct-held"}}
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("register: %v", errRegister)
+			}
+			reset := 72 * time.Hour
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset, CredentialScope: tc.credentialScope, Error: quota429()})
+			held, _ := manager.GetByID("codex-held")
+			if !codexQuotaHeld(held, time.Now()) {
+				t.Fatalf("setup: account not quota-held: %+v", held.Quota)
+			}
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Error: cloneError(tc.authErr)})
+			before, _ := manager.GetByID("codex-held")
+			if !codexQuotaHeld(before, time.Now()) || !before.Unavailable {
+				t.Fatalf("setup: auth-level failure removed the quota hold: quota=%+v unavailable=%v", before.Quota, before.Unavailable)
+			}
+
+			released := manager.reprobeHeldCodexQuotas(context.Background())
+
+			if len(executor.probedIDs()) != 1 {
+				t.Fatalf("probes = %v, want one probe of codex-held", executor.probedIDs())
+			}
+			if len(released) != 0 {
+				t.Fatalf("released = %v, want none: an auth-level %+v must keep the hold", released, tc.authErr)
+			}
+			after, _ := manager.GetByID("codex-held")
+			if !reflect.DeepEqual(after.LastError, tc.authErr) {
+				t.Fatalf("auth-level error cleared: LastError = %+v, want %+v", after.LastError, tc.authErr)
+			}
+			if !after.Unavailable || !after.NextRetryAfter.Equal(before.NextRetryAfter) || after.Status != StatusError {
+				t.Fatalf("account released: unavailable=%v next=%v (was %v) status=%s", after.Unavailable, after.NextRetryAfter, before.NextRetryAfter, after.Status)
+			}
+			if !reflect.DeepEqual(before.Quota, after.Quota) || !reflect.DeepEqual(before.ModelStates, after.ModelStates) {
+				t.Fatalf("hold changed:\nbefore quota=%+v states=%+v\nafter  quota=%+v states=%+v", before.Quota, before.ModelStates, after.Quota, after.ModelStates)
+			}
+		})
+	}
+}
+
+// Control for the case above: the same manager transitions without the
+// auth-level failure release the quota hold.
+func TestReprobeHeldCodexQuotas_ReleasesQuotaOnlyHoldFromMarkResult(t *testing.T) {
+	for _, credentialScope := range []bool{true, false} {
+		executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+		manager := NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		ctx := WithSkipPersist(context.Background())
+		if _, errRegister := manager.Register(ctx, &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("register: %v", errRegister)
+		}
+		reset := 72 * time.Hour
+		manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset, CredentialScope: credentialScope,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}})
+		if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 1 {
+			t.Fatalf("credentialScope=%v: released = %v, want [codex-held]", credentialScope, released)
+		}
+		after, _ := manager.GetByID("codex-held")
+		if after.Unavailable || after.Quota.Exceeded || after.LastError != nil || after.Status != StatusActive {
+			t.Fatalf("credentialScope=%v: still held: %+v", credentialScope, after)
+		}
+	}
+}
+
+// registerHeldCodexWithRegistry registers a quota-held Codex credential in the
+// manager and its model in the global registry, with the registry quota marker set.
+func registerHeldCodexWithRegistry(t *testing.T, manager *Manager, id, model string, holdUntil time.Time) {
+	t.Helper()
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+	reg.SetModelQuotaExceeded(id, model)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth(id, holdUntil)); errRegister != nil {
+		t.Fatalf("register %s: %v", id, errRegister)
+	}
+}
+
+// Security review P2: the registry publication after a release must be bound to
+// the registration of the snapshot that was probed. Pause after the manager
+// mutation and before the registry publication, replace the credential and its
+// registry entry (new epoch) and restrict the replacement; the delayed
+// publication must leave the replacement's markers and generation unchanged.
+func TestReprobeHeldCodexQuotas_DelayedRegistryPublishSparesReplacement(t *testing.T) {
+	const id, model = "codex-regbind", "gpt-5.5-regbind"
+	executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerHeldCodexWithRegistry(t, manager, id, model, time.Now().Add(72*time.Hour))
+	reg := registry.GetGlobalRegistry()
+	oldEpoch := reg.ClientRegistrationEpoch(id)
+
+	newHold := time.Now().Add(96 * time.Hour).Round(time.Second)
+	replaced := false
+	codexQuotaBeforeRegistryPublish = func(authID string) {
+		if authID != id {
+			return
+		}
+		replaced = true
+		manager.Remove(WithSkipPersist(context.Background()), id)
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth(id, newHold)); errRegister != nil {
+			t.Errorf("re-register: %v", errRegister)
+		}
+		reg.UnregisterClient(id)
+		reg.RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		reg.SetModelQuotaExceeded(id, model)
+		reg.SuspendClientModel(id, model, "replacement-restriction")
+	}
+	t.Cleanup(func() { codexQuotaBeforeRegistryPublish = nil })
+
+	released := manager.reprobeHeldCodexQuotas(context.Background())
+	if !replaced {
+		t.Fatal("the pause point before registry publication was not reached")
+	}
+	if len(released) != 1 {
+		t.Fatalf("released = %v, want the old registration's manager release", released)
+	}
+	if reg.ClientRegistrationEpoch(id) == oldEpoch {
+		t.Fatal("setup: replacement did not get a new registry epoch")
+	}
+	if !reg.IsModelQuotaExceededForClient(id, model) {
+		t.Fatal("old snapshot cleared the replacement's registry quota marker")
+	}
+	if !reg.IsModelSuspendedForClient(id, model) {
+		t.Fatal("old snapshot cleared the replacement's registry suspension")
+	}
+	// The replacement's registry generation is still 0: a generation-1 update
+	// from the replacement is accepted. Had the old snapshot's (higher)
+	// generation been installed, this would be rejected.
+	if !reg.ApplyClientModelProjections(id, reg.ClientRegistrationEpoch(id), 1, []registry.ClientModelProjection{{ModelID: model, QuotaExceeded: true}}) {
+		t.Fatal("old snapshot's generation was installed on the replacement's registry entry")
+	}
+	replacement, _ := manager.GetByID(id)
+	if !replacement.Quota.Exceeded || !replacement.Quota.NextRecoverAt.Equal(newHold) || !replacement.Unavailable {
+		t.Fatalf("replacement's manager hold changed: %+v", replacement.Quota)
+	}
+}
+
+// Control for the case above: with no replacement the same path does publish
+// the release to the registry, so the regression above is not vacuous.
+func TestReprobeHeldCodexQuotas_RegistryPublishWithoutReplacement(t *testing.T) {
+	const id, model = "codex-regpub", "gpt-5.5-regpub"
+	executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerHeldCodexWithRegistry(t, manager, id, model, time.Now().Add(72*time.Hour))
+	reg := registry.GetGlobalRegistry()
+	if !reg.IsModelQuotaExceededForClient(id, model) {
+		t.Fatal("setup: registry quota marker not set")
+	}
+	if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 1 {
+		t.Fatalf("released = %v, want [%s]", released, id)
+	}
+	if reg.IsModelQuotaExceededForClient(id, model) {
+		t.Fatal("release was not published to the registry")
+	}
+}
+
+// The interval override is clamped to the production minimum of 60s; invalid
+// and non-positive values fall back to the hourly default.
+func TestCodexQuotaReprobeIntervalFromEnv_ClampsToMinimum(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":        codexQuotaReprobeInterval,
+		"1s":      time.Minute,
+		"59s":     time.Minute,
+		"1ms":     time.Minute,
+		"60s":     time.Minute,
+		"90s":     90 * time.Second,
+		"2h":      2 * time.Hour,
+		"0":       codexQuotaReprobeInterval,
+		"-5m":     codexQuotaReprobeInterval,
+		"garbage": codexQuotaReprobeInterval,
+	}
+	if codexQuotaReprobeMinInterval != time.Minute {
+		t.Fatalf("production minimum = %s, want 1m", codexQuotaReprobeMinInterval)
+	}
+	for raw, want := range cases {
+		t.Setenv(codexQuotaReprobeIntervalEnv, raw)
+		if got := codexQuotaReprobeIntervalFromEnv(); got != want {
+			t.Errorf("%s=%q: interval = %s, want %s", codexQuotaReprobeIntervalEnv, raw, got, want)
+		}
+	}
+}
+
+// Only the in-package test hook can lower the floor.
+func TestCodexQuotaReprobeIntervalFromEnv_TestHookLowersMinimum(t *testing.T) {
+	prev := codexQuotaReprobeMinInterval
+	codexQuotaReprobeMinInterval = time.Second
+	t.Cleanup(func() { codexQuotaReprobeMinInterval = prev })
+	t.Setenv(codexQuotaReprobeIntervalEnv, "5s")
+	if got := codexQuotaReprobeIntervalFromEnv(); got != 5*time.Second {
+		t.Fatalf("interval = %s, want 5s with the test hook", got)
+	}
+	t.Setenv(codexQuotaReprobeIntervalEnv, "10ms")
+	if got := codexQuotaReprobeIntervalFromEnv(); got != time.Second {
+		t.Fatalf("interval = %s, want the hooked 1s floor", got)
+	}
+}
+
+// A cycle probes each held account at most once, and a cycle started while
+// another is running is skipped rather than overlapping it.
+func TestReprobeHeldCodexQuotas_OneProbePerAccountAndNoOverlap(t *testing.T) {
+	executor := newPausingUsageExecutor(`{"rate_limit":{"allowed":false,"limit_reached":true}}`)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	holdUntil := time.Now().Add(72 * time.Hour)
+	ids := []string{"codex-p1", "codex-p2", "codex-p3"}
+	for _, id := range ids {
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), heldCodexAuth(id, holdUntil)); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+	}
+	done := make(chan []string, 1)
+	go func() { done <- manager.reprobeHeldCodexQuotas(context.Background()) }()
+	<-executor.started
+	if released := manager.reprobeHeldCodexQuotas(context.Background()); released != nil {
+		t.Fatalf("overlapping cycle released %v", released)
+	}
+	if got := executor.probedIDs(); len(got) != 1 {
+		t.Fatalf("overlapping cycle probed: %v", got)
+	}
+	close(executor.resume)
+	<-done
+	got := executor.probedIDs()
+	counts := map[string]int{}
+	for _, id := range got {
+		counts[id]++
+	}
+	if len(got) != len(ids) {
+		t.Fatalf("probes = %v, want each of %v once", got, ids)
+	}
+	for _, id := range ids {
+		if counts[id] != 1 {
+			t.Fatalf("%s probed %d times in one cycle, want 1 (all: %v)", id, counts[id], got)
+		}
+	}
+	// The lock is released: the next cycle runs.
+	manager.reprobeHeldCodexQuotas(context.Background())
+	if n := len(executor.probedIDs()); n != 2*len(ids) {
+		t.Fatalf("next cycle probes = %d, want %d", n, 2*len(ids))
+	}
+}
+
+// Review P2 (error provenance): a sibling model carrying the very same error
+// value as an independent credential-wide failure must not make that failure
+// look model-scoped. MarkResult records the scope where each failure is
+// recorded, so the credential-wide hold and its routing block survive an
+// "allowed" usage verdict.
+func TestReprobeHeldCodexQuotas_SiblingErrorCollisionKeepsCredentialWideHold(t *testing.T) {
+	cases := []struct {
+		name            string
+		credentialScope bool
+		err             *Error
+	}{
+		{"credential-quota+sibling-403+auth-403", true, &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}},
+		{"model-quota+sibling-403+auth-403", false, &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}},
+		{"credential-quota+sibling-forced+auth-forced", true, &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadRequest, Message: "forced"}},
+		{"model-quota+sibling-forced+auth-forced", false, &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadRequest, Message: "forced"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			ctx := WithSkipPersist(context.Background())
+			if _, errRegister := manager.Register(ctx, &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive}); errRegister != nil {
+				t.Fatalf("register: %v", errRegister)
+			}
+			reset := 72 * time.Hour
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset, CredentialScope: tc.credentialScope,
+				Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}})
+			// Sibling model B records the identical error value first ...
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5-mini", Error: cloneError(tc.err)})
+			// ... then an independent credential-wide failure with the same fields.
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Error: cloneError(tc.err)})
+			before, _ := manager.GetByID("codex-held")
+			if !reflect.DeepEqual(before.ModelStates["gpt-5.5-mini"].LastError, before.LastError) {
+				t.Fatalf("setup: sibling error %+v does not collide with auth error %+v", before.ModelStates["gpt-5.5-mini"].LastError, before.LastError)
+			}
+			if before.FailureScope != FailureScopeCredential {
+				t.Fatalf("setup: FailureScope = %q, want %q", before.FailureScope, FailureScopeCredential)
+			}
+			if !codexQuotaHeld(before, time.Now()) {
+				t.Fatalf("setup: account not quota-held: %+v", before.Quota)
+			}
+
+			released := manager.reprobeHeldCodexQuotas(context.Background())
+
+			if len(executor.probedIDs()) != 1 {
+				t.Fatalf("probes = %v, want one probe of codex-held", executor.probedIDs())
+			}
+			if len(released) != 0 {
+				t.Fatalf("released = %v, want none: the credential-wide failure must keep the hold", released)
+			}
+			after, _ := manager.GetByID("codex-held")
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("hold changed:\nbefore %+v\nafter  %+v", before, after)
+			}
+			if !after.Unavailable || !after.NextRetryAfter.Equal(before.NextRetryAfter) {
+				t.Fatalf("credential-wide restriction lost: unavailable=%v next=%v", after.Unavailable, after.NextRetryAfter)
+			}
+			if blocked, _, _ := isAuthBlockedForModel(after, "gpt-5.5", time.Now()); !blocked {
+				t.Fatal("quota-held model became routable")
+			}
+		})
+	}
+}
+
+// A model-scoped failure recorded after a credential-wide one never narrows the
+// recorded scope: provenance of the earlier failure is not forgotten.
+func TestReprobeHeldCodexQuotas_LaterModelFailureDoesNotNarrowScope(t *testing.T) {
+	executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	ctx := WithSkipPersist(context.Background())
+	if _, errRegister := manager.Register(ctx, &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reset := 72 * time.Hour
+	quota := func() *Error { return &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"} }
+	manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset, Error: quota()})
+	manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Error: &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}})
+	manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5-mini", RetryAfter: &reset, Error: quota()})
+	before, _ := manager.GetByID("codex-held")
+	if before.FailureScope != FailureScopeCredential || !quotaOnlyError(before.LastError) {
+		t.Fatalf("setup: scope=%q LastError=%+v, want credential scope under a quota LastError", before.FailureScope, before.LastError)
+	}
+	if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 0 {
+		t.Fatalf("released = %v, want none", released)
+	}
+	after, _ := manager.GetByID("codex-held")
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("hold changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+// Ambiguous provenance keeps the hold: a quota hold whose auth-level error has
+// no recorded scope (legacy state), and one restored from a cooldown record
+// written without a scope.
+func TestReprobeHeldCodexQuotas_AmbiguousScopeKeepsHold(t *testing.T) {
+	allowed := `{"rate_limit":{"allowed":true,"limit_reached":false}}`
+	t.Run("no-recorded-scope", func(t *testing.T) {
+		executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": allowed}, seen: map[string]string{}}
+		manager := NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		holdUntil := time.Now().Add(72 * time.Hour)
+		auth := heldCodexAuth("codex-legacy", holdUntil)
+		auth.FailureScope = ""
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+			t.Fatalf("register: %v", errRegister)
+		}
+		if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 0 {
+			t.Fatalf("released = %v, want none for unknown scope", released)
+		}
+		if len(executor.probedIDs()) != 1 {
+			t.Fatalf("probes = %v, want the held account probed once", executor.probedIDs())
+		}
+		kept, _ := manager.GetByID("codex-legacy")
+		if !kept.Unavailable || !kept.Quota.Exceeded || !kept.Quota.NextRecoverAt.Equal(holdUntil) {
+			t.Fatalf("hold changed: %+v", kept.Quota)
+		}
+	})
+	t.Run("restored-record-without-scope", func(t *testing.T) {
+		executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": allowed}, seen: map[string]string{}}
+		manager := NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "codex-restored", Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("register: %v", errRegister)
+		}
+		now := time.Now()
+		holdUntil := now.Add(72 * time.Hour)
+		manager.mu.Lock()
+		restored := manager.restoreCooldownRecordLocked(CooldownStateRecord{
+			Provider: "codex", AuthID: "codex-restored", Status: "cooling", NextRetryAfter: holdUntil,
+			Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: holdUntil},
+			LastError: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+		}, now)
+		manager.mu.Unlock()
+		if !restored {
+			t.Fatal("setup: cooldown record not restored")
+		}
+		before, _ := manager.GetByID("codex-restored")
+		if before.FailureScope != FailureScopeUnknown {
+			t.Fatalf("setup: FailureScope = %q, want %q", before.FailureScope, FailureScopeUnknown)
+		}
+		if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 0 {
+			t.Fatalf("released = %v, want none for a restored record without scope", released)
+		}
+		after, _ := manager.GetByID("codex-restored")
+		if !after.Unavailable || !after.Quota.Exceeded || !after.NextRetryAfter.Equal(holdUntil) {
+			t.Fatalf("hold changed: unavailable=%v quota=%+v", after.Unavailable, after.Quota)
+		}
+	})
+}
+
+// Explicit model-scoped quota only: the scope is recorded as model (or as
+// credential quota for a credential-scoped 429) and the hold is released; the
+// scope survives a cooldown-record round trip.
+func TestReprobeHeldCodexQuotas_ExplicitQuotaScopeReleases(t *testing.T) {
+	for _, credentialScope := range []bool{false, true} {
+		executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+		manager := NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		ctx := WithSkipPersist(context.Background())
+		if _, errRegister := manager.Register(ctx, &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("register: %v", errRegister)
+		}
+		reset := 72 * time.Hour
+		for _, model := range []string{"gpt-5.5", "gpt-5.5-mini"} {
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: model, RetryAfter: &reset, CredentialScope: credentialScope,
+				Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}})
+		}
+		held, _ := manager.GetByID("codex-held")
+		wantScope := FailureScopeModel
+		if credentialScope {
+			wantScope = FailureScopeCredentialQuota
+		}
+		if held.FailureScope != wantScope {
+			t.Fatalf("credentialScope=%v: FailureScope = %q, want %q", credentialScope, held.FailureScope, wantScope)
+		}
+		manager.mu.RLock()
+		records := manager.cooldownStateRecordsForAuthLocked(manager.auths["codex-held"], time.Now())
+		manager.mu.RUnlock()
+		for _, record := range records {
+			if record.Model == "" && record.FailureScope != wantScope {
+				t.Fatalf("credentialScope=%v: auth-level cooldown record scope = %q, want %q", credentialScope, record.FailureScope, wantScope)
+			}
+		}
+		if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 1 {
+			t.Fatalf("credentialScope=%v: released = %v, want [codex-held]", credentialScope, released)
+		}
+		after, _ := manager.GetByID("codex-held")
+		if after.Unavailable || after.Quota.Exceeded || after.LastError != nil || after.FailureScope != "" || after.Status != StatusActive {
+			t.Fatalf("credentialScope=%v: still held: %+v", credentialScope, after)
+		}
+		for _, model := range []string{"gpt-5.5", "gpt-5.5-mini"} {
+			if blocked, _, _ := isAuthBlockedForModel(after, model, time.Now()); blocked {
+				t.Fatalf("credentialScope=%v: %s still blocked after release", credentialScope, model)
+			}
+		}
+	}
+}
+
+// An auth-file reload (Update with a record that has no runtime state) carries
+// the existing holds over; it must carry their recorded scope with them, so an
+// explicit quota hold stays releasable and a credential-wide failure is not
+// forgotten. (The isolated gateway run hits this path: the 429 persists the
+// auth file and the watcher reloads it.)
+func TestUpdateReloadCarriesFailureScopeWithHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		authWide403 bool
+		want        string
+	}{
+		{"explicit-model-quota", false, FailureScopeModel},
+		{"auth-wide-403", true, FailureScopeCredential},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			ctx := WithSkipPersist(context.Background())
+			fileRecord := func() *Auth {
+				return &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"account_id": "acct-held"}}
+			}
+			if _, errRegister := manager.Register(ctx, fileRecord()); errRegister != nil {
+				t.Fatalf("register: %v", errRegister)
+			}
+			reset := 72 * time.Hour
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset,
+				Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}})
+			if tc.authWide403 {
+				manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Error: &Error{HTTPStatus: http.StatusForbidden, Message: "account deactivated"}})
+			}
+			if _, errUpdate := manager.Update(ctx, fileRecord()); errUpdate != nil {
+				t.Fatalf("reload: %v", errUpdate)
+			}
+			reloaded, _ := manager.GetByID("codex-held")
+			if !codexQuotaHeld(reloaded, time.Now()) || reloaded.LastError != nil {
+				t.Fatalf("setup: reload should carry the model hold without an auth-level error: quota=%+v err=%+v", reloaded.Quota, reloaded.LastError)
+			}
+			if reloaded.FailureScope != tc.want {
+				t.Fatalf("FailureScope after reload = %q, want %q", reloaded.FailureScope, tc.want)
+			}
+		})
+	}
+}
+
+// Review P2 (per-model provenance): a quota refusal recorded after a
+// model-support error or a forced cooldown on the SAME model overwrites the
+// model's LastError and folds its deadlines into the quota reset. The per-model
+// scope only widens, so the model's hold survives an "allowed" usage verdict;
+// a model that only ever saw quota refusals is released (control).
+func TestReprobeHeldCodexQuotas_LaterQuotaDoesNotHideSameModelRestriction(t *testing.T) {
+	quota := func() *Error { return &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"} }
+	cases := []struct {
+		name      string
+		first     *Error // nil: quota refusal only (control)
+		wantScope string
+	}{
+		{"model-support-then-quota", &Error{HTTPStatus: http.StatusNotFound, Message: "model_not_supported"}, FailureScopeModelOther},
+		{"forced-cooldown-then-quota", &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests, Message: "forced"}, FailureScopeModelOther},
+		{"quota-only-control", nil, FailureScopeModelQuota},
+	}
+	for _, tc := range cases {
+		for _, credentialScope := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/credentialScope=%v", tc.name, credentialScope), func(t *testing.T) {
+				executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+				manager := NewManager(nil, nil, nil)
+				manager.RegisterExecutor(executor)
+				ctx := WithSkipPersist(context.Background())
+				if _, errRegister := manager.Register(ctx, &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive}); errRegister != nil {
+					t.Fatalf("register: %v", errRegister)
+				}
+				if tc.first != nil {
+					forced := 2 * time.Hour
+					manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &forced, Error: cloneError(tc.first)})
+				}
+				// A request already in flight then records a quota refusal on the same model.
+				reset := 72 * time.Hour
+				manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset, CredentialScope: credentialScope, Error: quota()})
+				before, _ := manager.GetByID("codex-held")
+				state := before.ModelStates["gpt-5.5"]
+				if state == nil || state.FailureScope != tc.wantScope {
+					t.Fatalf("setup: model state %+v, want scope %q", state, tc.wantScope)
+				}
+				if !quotaOnlyError(state.LastError) || !codexQuotaHeld(before, time.Now()) {
+					t.Fatalf("setup: want a quota LastError on a quota-held account: %+v", state)
+				}
+				// The model's scope is persisted with its cooldown record.
+				manager.mu.RLock()
+				records := manager.cooldownStateRecordsForAuthLocked(manager.auths["codex-held"], time.Now())
+				manager.mu.RUnlock()
+				for _, record := range records {
+					if record.Model == "gpt-5.5" && record.FailureScope != tc.wantScope {
+						t.Fatalf("model cooldown record scope = %q, want %q", record.FailureScope, tc.wantScope)
+					}
+				}
+
+				released := manager.reprobeHeldCodexQuotas(context.Background())
+				if len(executor.probedIDs()) != 1 {
+					t.Fatalf("probes = %v, want one", executor.probedIDs())
+				}
+				after, _ := manager.GetByID("codex-held")
+				blocked, _, _ := isAuthBlockedForModel(after, "gpt-5.5", time.Now())
+
+				if tc.first == nil {
+					if len(released) != 1 || blocked || !modelStateIsClean(after.ModelStates["gpt-5.5"]) {
+						t.Fatalf("control: released=%v blocked=%v state=%+v, want released", released, blocked, after.ModelStates["gpt-5.5"])
+					}
+					return
+				}
+				if !blocked {
+					t.Fatal("model with an independent restriction became routable")
+				}
+				if !reflect.DeepEqual(before.ModelStates["gpt-5.5"], after.ModelStates["gpt-5.5"]) {
+					t.Fatalf("model hold changed:\nbefore %+v\nafter  %+v", before.ModelStates["gpt-5.5"], after.ModelStates["gpt-5.5"])
+				}
+				if !credentialScope {
+					if len(released) != 0 || !reflect.DeepEqual(before, after) {
+						t.Fatalf("released = %v; hold changed:\nbefore %+v\nafter  %+v", released, before, after)
+					}
+				}
+			})
+		}
+	}
+}
+
+// An auth-file reload carries the model holds and their per-model scope: a
+// model-support error followed by a quota refusal keeps model_other and stays
+// held after an allowed probe; a plain quota hold keeps model_quota.
+func TestUpdateReloadCarriesModelFailureScope(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		modelSupport bool
+		wantScope    string
+	}{
+		{"model-support-then-quota", true, FailureScopeModelOther},
+		{"quota-only", false, FailureScopeModelQuota},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			ctx := WithSkipPersist(context.Background())
+			fileRecord := func() *Auth {
+				return &Auth{ID: "codex-held", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"account_id": "acct-held"}}
+			}
+			if _, errRegister := manager.Register(ctx, fileRecord()); errRegister != nil {
+				t.Fatalf("register: %v", errRegister)
+			}
+			if tc.modelSupport {
+				manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", Error: &Error{HTTPStatus: http.StatusNotFound, Message: "model_not_supported"}})
+			}
+			reset := 72 * time.Hour
+			manager.MarkResult(ctx, Result{AuthID: "codex-held", Provider: "codex", Model: "gpt-5.5", RetryAfter: &reset,
+				Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"}})
+			if _, errUpdate := manager.Update(ctx, fileRecord()); errUpdate != nil {
+				t.Fatalf("reload: %v", errUpdate)
+			}
+			reloaded, _ := manager.GetByID("codex-held")
+			if state := reloaded.ModelStates["gpt-5.5"]; state == nil || state.FailureScope != tc.wantScope {
+				t.Fatalf("model state after reload = %+v, want scope %q", state, tc.wantScope)
+			}
+			if !tc.modelSupport {
+				return
+			}
+			before := reloaded.ModelStates["gpt-5.5"].Clone()
+			if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 0 {
+				t.Fatalf("released = %v, want none", released)
+			}
+			after, _ := manager.GetByID("codex-held")
+			if blocked, _, _ := isAuthBlockedForModel(after, "gpt-5.5", time.Now()); !blocked {
+				t.Fatal("model with a model-support restriction became routable after reload + probe")
+			}
+			if !reflect.DeepEqual(before, after.ModelStates["gpt-5.5"]) {
+				t.Fatalf("model hold changed:\nbefore %+v\nafter  %+v", before, after.ModelStates["gpt-5.5"])
+			}
+		})
+	}
+}
+
+// A model cooldown record restored without a scope has unknown provenance and
+// is not released.
+func TestReprobeHeldCodexQuotas_RestoredModelRecordWithoutScopeKeepsHold(t *testing.T) {
+	executor := &codexUsageProbeExecutor{bodies: map[string]string{"*": `{"rate_limit":{"allowed":true,"limit_reached":false}}`}, seen: map[string]string{}}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "codex-restored", Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	now := time.Now()
+	holdUntil := now.Add(72 * time.Hour)
+	manager.mu.Lock()
+	restored := manager.restoreCooldownRecordLocked(CooldownStateRecord{
+		Provider: "codex", AuthID: "codex-restored", Model: "gpt-5.5", Status: "cooling", NextRetryAfter: holdUntil,
+		Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: holdUntil},
+		LastError: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+	}, now)
+	manager.mu.Unlock()
+	if !restored {
+		t.Fatal("setup: cooldown record not restored")
+	}
+	if released := manager.reprobeHeldCodexQuotas(context.Background()); len(released) != 0 {
+		t.Fatalf("released = %v, want none", released)
+	}
+	after, _ := manager.GetByID("codex-restored")
+	if blocked, _, _ := isAuthBlockedForModel(after, "gpt-5.5", time.Now()); !blocked {
+		t.Fatal("restored model hold without scope became routable")
+	}
+}
