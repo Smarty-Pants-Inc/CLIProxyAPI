@@ -10,6 +10,8 @@ import (
 
 // PrepareConfigPublication validates edited source bytes and replaces only a
 // plaintext management-key scalar with the server parser's bcrypt representation.
+// Publication intentionally preserves every non-secret source byte instead of
+// routing through the server's YAML serializer, which may normalize formatting.
 // The caller must still compare against the version of its original snapshot.
 func PrepareConfigPublication(data []byte) ([]byte, error) {
 	cfg, err := ParseConfigBytes(data)
@@ -81,6 +83,12 @@ func publicationMapValue(node *yaml.Node, name string) *yaml.Node {
 
 func publicationScalarRange(data []byte, node *yaml.Node, flow bool) (int, int, error) {
 	start := 0
+	// yaml.v3 excludes a leading UTF-8 BOM from its source columns, while the
+	// source slice still contains those three bytes. Account for them before
+	// translating the node position into a byte offset.
+	if len(data) >= 3 && bytes.Equal(data[:3], []byte{0xef, 0xbb, 0xbf}) {
+		start = 3
+	}
 	for line := 1; line < node.Line; line++ {
 		n := bytes.IndexByte(data[start:], '\n')
 		if n < 0 {
