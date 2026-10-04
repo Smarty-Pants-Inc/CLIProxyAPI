@@ -39,6 +39,80 @@ func TestGetContextWithCancelCapturesClientRequestMetadata(t *testing.T) {
 	}
 }
 
+func TestGetContextWithCancelCapturesAllowlistedCallerMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Request.Header.Set("X-Smarty-Role", "project-agent@abcdef1234567890")
+	ginCtx.Request.Header.Set("X-Smarty-Session", "018f0a31-6b4c-7d8e-9f01-23456789abcd")
+	ginCtx.Request.Header.Set("X-Smarty-Compaction", "1")
+	ginCtx.Request.Header.Set("X-Smarty-Unknown", "must-not-be-collected")
+
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+
+	metadata := logging.GetClientRequestMetadata(ctx)
+	if metadata.Role != "project-agent@abcdef1234567890" {
+		t.Fatalf("Role = %q, want allow-listed role", metadata.Role)
+	}
+	if metadata.CallerSession != "018f0a31-6b4c-7d8e-9f01-23456789abcd" {
+		t.Fatalf("CallerSession = %q, want native caller UUID", metadata.CallerSession)
+	}
+	if !metadata.HasExplicitCompaction || !metadata.ExplicitCompaction {
+		t.Fatalf("explicit compaction = (%v, %v), want (true, true)", metadata.HasExplicitCompaction, metadata.ExplicitCompaction)
+	}
+
+	ctx = EnrichContextWithSessionHierarchy(ctx, nil, []byte(`{"session_id":"routing-session"}`), nil)
+	metadata = logging.GetClientRequestMetadata(ctx)
+	if metadata.Role != "project-agent@abcdef1234567890" || metadata.CallerSession != "018f0a31-6b4c-7d8e-9f01-23456789abcd" || !metadata.HasExplicitCompaction || !metadata.ExplicitCompaction {
+		t.Fatalf("routing enrichment changed caller snapshot: %+v", metadata)
+	}
+}
+
+func TestGetContextWithCancelRejectsInvalidCallerMetadata(t *testing.T) {
+	tests := []struct {
+		name                string
+		role                string
+		caller              string
+		compaction          string
+		wantRole            string
+		wantCaller          string
+		wantCompaction      bool
+		wantCompactionValue bool
+	}{
+		{name: "role too long", role: strings.Repeat("r", 129), caller: "018f0a31-6b4c-7d8e-9f01-23456789abcd", compaction: "0", wantCaller: "018f0a31-6b4c-7d8e-9f01-23456789abcd", wantCompaction: true},
+		{name: "role control", role: "role\nvalue", caller: "018f0a31-6b4c-7d8e-9f01-23456789abcd", compaction: "0", wantCaller: "018f0a31-6b4c-7d8e-9f01-23456789abcd", wantCompaction: true},
+		{name: "caller not uuid", role: "project-agent", caller: "not-a-uuid", compaction: "0", wantRole: "project-agent", wantCompaction: true},
+		{name: "caller control", role: "project-agent", caller: "018f0a31-6b4c-7d8e-9f01-23456789abc\n", compaction: "0", wantRole: "project-agent", wantCompaction: true},
+		{name: "compaction invalid", role: "project-agent", caller: "018f0a31-6b4c-7d8e-9f01-23456789abcd", compaction: "true", wantRole: "project-agent", wantCaller: "018f0a31-6b4c-7d8e-9f01-23456789abcd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			ginCtx.Request.Header.Set("X-Smarty-Role", tt.role)
+			ginCtx.Request.Header.Set("X-Smarty-Session", tt.caller)
+			ginCtx.Request.Header.Set("X-Smarty-Compaction", tt.compaction)
+			ginCtx.Request.Header.Set("X-Smarty-Unknown", "ignored")
+
+			handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+			ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+			defer cancel()
+
+			metadata := logging.GetClientRequestMetadata(ctx)
+			if metadata.Role != tt.wantRole || metadata.CallerSession != tt.wantCaller {
+				t.Fatalf("caller metadata = (role=%q, caller_session=%q), want (%q, %q)", metadata.Role, metadata.CallerSession, tt.wantRole, tt.wantCaller)
+			}
+			if metadata.HasExplicitCompaction != tt.wantCompaction || metadata.ExplicitCompaction != tt.wantCompactionValue {
+				t.Fatalf("explicit compaction = (%v, %v), want (%v, %v)", metadata.HasExplicitCompaction, metadata.ExplicitCompaction, tt.wantCompaction, tt.wantCompactionValue)
+			}
+		})
+	}
+}
+
 func TestGetContextWithCancelCapturesResolvedClientIP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ginCtx, engine := gin.CreateTestContext(httptest.NewRecorder())
