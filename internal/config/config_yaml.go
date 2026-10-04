@@ -11,15 +11,28 @@ import (
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
+// cfg must originate from LoadConfig/Optional or ParseConfigBytes and still match
+// the destination's bytes. A successful save advances only cfg's source revision.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+	configSaveMu.Lock()
+	defer configSaveMu.Unlock()
+	if cfg == nil || !cfg.sourceRevision.tracked {
+		return ErrStaleConfig
+	}
 	if err := cfg.ValidateAPIKeyPolicies(); err != nil {
 		return err
 	}
 	persistCfg := cfg
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
+	if os.IsNotExist(err) {
+		return ErrStaleConfig
+	}
 	if err != nil {
 		return err
+	}
+	if !cfg.sourceRevision.matches(data) {
+		return ErrStaleConfig
 	}
 
 	var original yaml.Node
@@ -69,12 +82,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	}
 	normalizeCollectionNodeStyles(original.Content[0])
 
-	// Write back.
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	// Render before opening the destination, then check the revision again.
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -86,23 +94,42 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 		return err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	if err = writeConfigRevision(configFile, data, cfg.sourceRevision); err != nil {
+		return err
+	}
+	cfg.sourceRevision = sourceRevision(data)
+	return nil
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
+	_, err := saveConfigNestedScalar(configFile, path, value, nil)
+	return err
+}
+
+// expected is supplied by LoadConfig when persisting a hash of an already-read
+// plaintext key. The returned bytes are exactly what was written, not a reread.
+func saveConfigNestedScalar(configFile string, path []string, value string, expected *configSourceRevision) ([]byte, error) {
+	configSaveMu.Lock()
+	defer configSaveMu.Unlock()
 	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return err
+	if expected != nil && os.IsNotExist(err) {
+		return nil, ErrStaleConfig
 	}
+	if err != nil {
+		return nil, err
+	}
+	if expected != nil && !expected.matches(data) {
+		return nil, ErrStaleConfig
+	}
+	revision := sourceRevision(data)
 	var root yaml.Node
 	if err = yaml.Unmarshal(data, &root); err != nil {
-		return err
+		return nil, err
 	}
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return fmt.Errorf("invalid yaml document structure")
+		return nil, fmt.Errorf("invalid yaml document structure")
 	}
 	node := root.Content[0]
 	// descend mapping nodes following path
@@ -122,24 +149,21 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err = enc.Encode(&root); err != nil {
 		_ = enc.Close()
-		return err
+		return nil, err
 	}
 	if err = enc.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	if err = writeConfigRevision(configFile, data, revision); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.

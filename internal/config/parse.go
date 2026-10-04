@@ -24,6 +24,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	var cfg Config
+	cfg.sourceRevision = sourceRevision(data)
 	// Keep defaults aligned with LoadConfigOptional.
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false

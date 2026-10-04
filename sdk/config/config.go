@@ -43,6 +43,10 @@ const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
 )
 
+// ErrStaleConfig is returned when a full save is untracked or its source bytes
+// no longer match disk. Reload and reapply the change before retrying.
+var ErrStaleConfig = internalconfig.ErrStaleConfig
+
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
 
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {

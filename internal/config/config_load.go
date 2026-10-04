@@ -46,7 +46,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
-		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), sourceRevision: sourceRevision(data)}
 		cfg.NormalizePluginsConfig()
 		return cfg, nil
 	}
@@ -60,6 +60,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
+	cfg.sourceRevision = sourceRevision(data)
 	// Set defaults before unmarshal so that absent keys keep defaults.
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false
@@ -115,9 +116,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		cfg.RemoteManagement.SecretKey = hashed
 
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
+		// Persist only against the bytes that produced cfg. Never bind newer,
+		// unrelated bytes to this snapshot or overwrite a completed key rotation.
+		written, errSave := saveConfigNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed, &cfg.sourceRevision)
+		if errSave != nil {
+			return nil, fmt.Errorf("failed to persist hashed management key: %w", errSave)
+		}
+		cfg.sourceRevision = sourceRevision(written)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)

@@ -812,6 +812,7 @@ plugins:
 	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
 	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
 
+	loadHandlerConfigBaseline(t, h)
 	h.InstallPluginFromStore(c)
 
 	if rec.Code != http.StatusOK {
@@ -898,6 +899,7 @@ func TestInstallPluginFromStoreInstallsDirectArtifact(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
 	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
 
+	loadHandlerConfigBaseline(t, h)
 	h.InstallPluginFromStore(c)
 
 	if rec.Code != http.StatusOK {
@@ -961,6 +963,7 @@ func TestInstallPluginFromStoreHonorsDirectQueryVersion(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
 	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install?version=0.3.0", nil)
 
+	loadHandlerConfigBaseline(t, h)
 	h.InstallPluginFromStore(c)
 
 	if rec.Code != http.StatusOK {
@@ -1030,6 +1033,7 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 	communitySourceID := pluginstore.SourceID("https://community.example/registry.json")
 	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install?source="+communitySourceID, nil)
 
+	loadHandlerConfigBaseline(t, h)
 	h.InstallPluginFromStore(c)
 
 	if rec.Code != http.StatusOK {
@@ -1140,6 +1144,7 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
 	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
 
+	loadHandlerConfigBaseline(t, h)
 	h.InstallPluginFromStore(c)
 
 	if rec.Code != http.StatusOK {

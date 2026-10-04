@@ -18,6 +18,7 @@ func TestPatchCodexKeyUpdatesDisableCodexCloaking(t *testing.T) {
 		}}},
 		configFilePath: writeTestConfigFile(t),
 	}
+	loadHandlerConfigBaseline(t, h)
 
 	// 1. Patch to true
 	rec := httptest.NewRecorder()
