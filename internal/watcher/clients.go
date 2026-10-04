@@ -22,7 +22,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
+// SetReloadResultCallback installs a runtime callback that reports application failure.
+// Set it before starting the watcher. Legacy callbacks are assumed successful.
+func (w *Watcher) SetReloadResultCallback(callback func(*config.Config) bool) {
+	w.reloadResultCallback = callback
+}
+
+func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) bool {
 	log.Debugf("starting full client load process")
 
 	w.clientsMutex.RLock()
@@ -31,7 +37,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	if cfg == nil {
 		log.Error("config is nil, cannot reload clients")
-		return
+		return false
 	}
 
 	if len(affectedOAuthProviders) > 0 {
@@ -141,7 +147,12 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
 
-	if w.reloadCallback != nil {
+	if w.reloadResultCallback != nil {
+		if !w.reloadResultCallback(cfg) {
+			log.Error("config runtime reload failed; version remains unobserved")
+			return false
+		}
+	} else if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback before auth refresh")
 		w.reloadCallback(cfg)
 	}
@@ -160,6 +171,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		metaAPIKeyCount,
 		openAICompatCount,
 	)
+	return true
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {

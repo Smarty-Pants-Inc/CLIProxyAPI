@@ -15,6 +15,7 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 	}
 
 	return &WatcherWrapper{
+		setReloadResultCallback: w.SetReloadResultCallback,
 		start: func(ctx context.Context) error {
 			return w.Start(ctx)
 		},

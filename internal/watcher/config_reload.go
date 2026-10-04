@@ -139,7 +139,9 @@ func (w *Watcher) reloadConfig() (applied bool) {
 	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || retryConfigChanged)
 
 	log.Infof("config successfully reloaded, triggering client reload")
-	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
+	if !w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh) {
+		return false
+	}
 	w.clientsMutex.Lock()
 	w.lastConfigHash = loadedVersion
 	w.clientsMutex.Unlock()

@@ -112,6 +112,14 @@ type WatcherWrapper struct {
 	dispatchPersistedAuthWithRev func(update *watcher.AuthUpdate) (bool, uint64)
 	setPluginAuthParser          func(parser PluginAuthParser)
 	reloadConfigIfChanged        func()
+	setReloadResultCallback      func(func(*config.Config) bool)
+}
+
+// SetReloadResultCallback installs failure-aware runtime application before Start.
+func (w *WatcherWrapper) SetReloadResultCallback(callback func(*config.Config) bool) {
+	if w != nil && w.setReloadResultCallback != nil {
+		w.setReloadResultCallback(callback)
+	}
 }
 
 // Start proxies to the underlying watcher Start implementation.
