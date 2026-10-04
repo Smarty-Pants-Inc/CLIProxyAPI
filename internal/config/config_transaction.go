@@ -117,6 +117,10 @@ func AtomicWriteConfigCAS(configFile string, data []byte, expectedVersion string
 }
 
 func atomicWriteConfigUnlocked(configFile string, data []byte) error {
+	return atomicWriteConfigWithRename(configFile, data, os.Rename)
+}
+
+func atomicWriteConfigWithRename(configFile string, data []byte, rename func(string, string) error) error {
 	dir := filepath.Dir(configFile)
 	// Owner-only staging and publication are deliberately stricter than any
 	// original group/ACL grants. Never enable inherited named-user ACLs.
@@ -145,7 +149,7 @@ func atomicWriteConfigUnlocked(configFile string, data []byte) error {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	if err = os.Rename(tmpName, configFile); err != nil {
+	if err = rename(tmpName, configFile); err != nil {
 		return fmt.Errorf("atomic config publication refused (target may be a single-file bind mount or cross-device): mount a writable config directory instead; original config unchanged: %w", err)
 	}
 	return syncConfigDir(dir)

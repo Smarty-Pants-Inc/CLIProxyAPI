@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build linux
 
 package config
 
@@ -29,5 +29,9 @@ func secureConfigReplacement(file *os.File, original os.FileInfo) error {
 		}
 	}
 	// Also masks all inherited POSIX named-user/group ACL entries to no access.
-	return file.Chmod(0600)
+	mode := os.FileMode(0600)
+	if original != nil {
+		mode &= original.Mode().Perm()
+	}
+	return file.Chmod(mode)
 }

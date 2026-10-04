@@ -19,13 +19,17 @@ type bodyDeadlineKey struct{}
 // WithManagementBodyDeadline bounds inbound management body acquisition only;
 // it never installs a deadline on an upstream or streaming response.
 func WithManagementBodyDeadline(next http.Handler) http.Handler {
+	return withManagementBodyDeadline(next, managementBodyReadTimeout)
+}
+
+func withManagementBodyDeadline(next http.Handler, readTimeout time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v0/management/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 		controller := http.NewResponseController(w)
-		if err := controller.SetReadDeadline(time.Now().Add(managementBodyReadTimeout)); err != nil && err != http.ErrNotSupported {
+		if err := controller.SetReadDeadline(time.Now().Add(readTimeout)); err != nil && err != http.ErrNotSupported {
 			http.Error(w, "cannot bound management body read", http.StatusBadRequest)
 			return
 		}
