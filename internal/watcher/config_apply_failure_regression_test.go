@@ -33,8 +33,8 @@ func TestFailedRuntimeApplyDoesNotObserveVersion(t *testing.T) {
 	attempts := 0
 	setter.SetReloadResultCallback(func(*config.Config) bool { attempts++; return attempts > 1 })
 	w.reloadConfigIfChanged()
-	if w.lastConfigHash != "" {
-		t.Fatal("failed runtime application advanced observed version")
+	if w.lastConfigHash != "" || w.config != nil || len(w.oldConfigYaml) != 0 {
+		t.Fatal("failed runtime application advanced observed version or comparison snapshot")
 	}
 	w.reloadConfigIfChanged()
 	version, err := config.ConfigFileVersion(path)

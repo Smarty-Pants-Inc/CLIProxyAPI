@@ -78,10 +78,21 @@ func (w *Watcher) reloadConfigIfChanged() {
 }
 
 func (w *Watcher) reloadConfig() (applied bool) {
+	var previousConfig, attemptedConfig *config.Config
+	var previousYAML []byte
+	staged := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			log.WithField("panic", recovered).Error("config runtime reload failed; version remains unobserved")
 			applied = false
+		}
+		if !applied && staged {
+			w.clientsMutex.Lock()
+			if w.config == attemptedConfig {
+				w.config = previousConfig
+				w.oldConfigYaml = previousYAML
+			}
+			w.clientsMutex.Unlock()
 		}
 	}()
 	log.Debug("=========================== CONFIG RELOAD ============================")
@@ -106,6 +117,9 @@ func (w *Watcher) reloadConfig() (applied bool) {
 	}
 
 	w.clientsMutex.Lock()
+	previousConfig, previousYAML = w.config, w.oldConfigYaml
+	attemptedConfig = newConfig
+	staged = true
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
