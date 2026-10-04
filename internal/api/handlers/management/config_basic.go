@@ -118,6 +118,9 @@ func WriteConfig(path string, data []byte, expectedVersion ...string) error {
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	expectedVersion := strings.Trim(c.GetHeader("If-Match"), "\"")
 	if expectedVersion == "" {
 		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "config_version_required", "message": "send the ETag from GET /config.yaml as If-Match"})
@@ -220,6 +223,9 @@ func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
 	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg.UsageStatisticsEnabled})
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
@@ -230,6 +236,9 @@ func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
 }
 func (h *Handler) PutLoggingToFile(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateBoolField(c, func(v bool) { h.cfg.LoggingToFile = v })
 }
 
@@ -240,6 +249,9 @@ func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
 	c.JSON(200, gin.H{"logs-max-total-size-mb": h.cfg.LogsMaxTotalSizeMB})
 }
 func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -265,6 +277,9 @@ func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
 }
 func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -290,6 +305,9 @@ func (h *Handler) GetRequestLog(c *gin.Context) {
 	c.JSON(200, gin.H{"request-log": h.cfg.RequestLog})
 }
 func (h *Handler) PutRequestLog(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
@@ -300,6 +318,9 @@ func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
 }
 func (h *Handler) PutWebsocketAuth(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -321,6 +342,9 @@ func (h *Handler) GetRequestRetry(c *gin.Context) {
 	c.JSON(200, gin.H{"request-retry": h.cfg.RequestRetry})
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
 }
 
@@ -331,6 +355,9 @@ func (h *Handler) GetMaxRetryCredentials(c *gin.Context) {
 	c.JSON(200, gin.H{"max-retry-credentials": h.cfg.MaxRetryCredentials})
 }
 func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryCredentials = v })
 }
 
@@ -341,6 +368,9 @@ func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
 	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
 }
 func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
 }
 
@@ -351,6 +381,9 @@ func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})
 }
 func (h *Handler) PutForceModelPrefix(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateBoolField(c, func(v bool) { h.cfg.ForceModelPrefix = v })
 }
 
@@ -380,6 +413,9 @@ func (h *Handler) GetRoutingStrategy(c *gin.Context) {
 	c.JSON(200, gin.H{"strategy": strategy})
 }
 func (h *Handler) PutRoutingStrategy(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -406,6 +442,9 @@ func (h *Handler) GetProxyURL(c *gin.Context) {
 	c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL})
 }
 func (h *Handler) PutProxyURL(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.updateStringField(c, func(v string) { h.cfg.ProxyURL = v })
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {

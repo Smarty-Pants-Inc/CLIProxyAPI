@@ -50,6 +50,9 @@ func rejectInvalidFingerprintProfile(c *gin.Context, field, profile string) bool
 
 // Generic helpers for list[string]
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -77,6 +80,9 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 }
 
 func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var body struct {
@@ -180,6 +186,9 @@ func (h *Handler) GetGeminiKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"gemini-api-key": h.geminiKeysWithAuthIndex()})
 }
 func (h *Handler) PutGeminiKeys(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -209,6 +218,9 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 	h.persistLocked(c)
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`
@@ -387,6 +399,9 @@ func (h *Handler) GetInteractionsKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"interactions-api-key": h.interactionsKeysWithAuthIndex()})
 }
 func (h *Handler) PutInteractionsKeys(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, errRead := c.GetRawData()
 	if errRead != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -418,6 +433,9 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 	h.persistLocked(c)
 }
 func (h *Handler) PatchInteractionsKey(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`
@@ -621,6 +639,9 @@ func (h *Handler) GetClaudeKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"claude-api-key": h.claudeKeysWithAuthIndex()})
 }
 func (h *Handler) PutClaudeKeys(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -663,6 +684,9 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	h.persistLocked(c)
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type claudeKeyPatch struct {
 		APIKey                  *string                          `json:"api-key"`
 		Priority                *int                             `json:"priority"`
@@ -883,6 +907,9 @@ func (h *Handler) GetOpenAICompat(c *gin.Context) {
 	c.JSON(200, gin.H{"openai-compatibility": h.openAICompatibilityWithAuthIndex()})
 }
 func (h *Handler) PutOpenAICompat(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -921,6 +948,9 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	h.persistLocked(c)
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type openAICompatPatch struct {
 		Name                  *string                             `json:"name"`
 		Priority              *int                                `json:"priority"`
@@ -1056,6 +1086,9 @@ func (h *Handler) GetVertexCompatKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"vertex-api-key": h.vertexCompatKeysWithAuthIndex()})
 }
 func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -1090,6 +1123,9 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 	h.persistLocked(c)
 }
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
 		Priority       *int                        `json:"priority"`
@@ -1250,6 +1286,9 @@ func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
 }
 
 func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -1274,6 +1313,9 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 }
 
 func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -1346,6 +1388,9 @@ func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
 }
 
 func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -1370,6 +1415,9 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -1454,6 +1502,9 @@ func (h *Handler) GetOAuthRequestScopedErrors(c *gin.Context) {
 }
 
 func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -1478,6 +1529,9 @@ func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
 }
 
 func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	defer h.configMutationLocked()()
@@ -1559,6 +1613,9 @@ func (h *Handler) GetCodexKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})
 }
 func (h *Handler) PutCodexKeys(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -1596,6 +1653,9 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	h.persistLocked(c)
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type codexKeyPatch struct {
 		APIKey               *string                          `json:"api-key"`
 		Priority             *int                             `json:"priority"`
@@ -1764,6 +1824,9 @@ func (h *Handler) GetXAIKeys(c *gin.Context) {
 }
 
 func (h *Handler) PutXAIKeys(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, errRead := c.GetRawData()
 	if errRead != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -1801,6 +1864,9 @@ func (h *Handler) PutXAIKeys(c *gin.Context) {
 }
 
 func (h *Handler) PatchXAIKey(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type xaiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`
@@ -1965,6 +2031,9 @@ func (h *Handler) GetMetaKeys(c *gin.Context) {
 }
 
 func (h *Handler) PutMetaKeys(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	data, errRead := c.GetRawData()
 	if errRead != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -2002,6 +2071,9 @@ func (h *Handler) PutMetaKeys(c *gin.Context) {
 }
 
 func (h *Handler) PatchMetaKey(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	type metaKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`

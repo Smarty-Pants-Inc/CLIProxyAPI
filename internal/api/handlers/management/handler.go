@@ -196,6 +196,9 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 // saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
 // Callers must hold h.mu.
 func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
+	if !managementRequestActive(c) {
+		return configReloadSnapshot{}, false
+	}
 	if h.policyConfigFrozenLocked() {
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return configReloadSnapshot{}, false
@@ -517,6 +520,9 @@ func (h *Handler) persist(c *gin.Context) bool {
 // persistLocked saves the current in-memory config to disk.
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
+	if !managementRequestActive(c) {
+		return false
+	}
 	if h.policyConfigFrozenLocked() {
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return false
@@ -541,6 +547,9 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 
 // Helper methods for simple types
 func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -556,6 +565,9 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 }
 
 func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -571,6 +583,9 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 }
 
 func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	var body struct {
 		Value *string `json:"value"`
 	}
