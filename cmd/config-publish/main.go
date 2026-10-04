@@ -28,7 +28,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("read edited config: %w", err)
 	}
-	if _, err = config.ParseConfigBytes(data); err != nil {
+	data, err = config.PrepareConfigPublication(data)
+	if err != nil {
 		return fmt.Errorf("validate edited config: %w", err)
 	}
 	version, err := config.AtomicWriteConfigCAS(*path, data, *expected)
