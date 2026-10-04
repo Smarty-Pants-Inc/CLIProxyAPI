@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2186,70 +2187,161 @@ func TestXAIWebsockets_PingHandlerDoesNotBlockOnWriteMu(t *testing.T) {
 }
 
 func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
+	testXAIWebsocketsKeepalivePingDuringUpload(t, "xai-session-ping-test", "xai-session-ping")
+}
+
+func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
+	testXAIWebsocketsKeepalivePingDuringUpload(t, "", "xai-sessionless-ping")
+}
+
+func testXAIWebsocketsKeepalivePingDuringUpload(t *testing.T, sessionID, ping string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
+	serverConnReady := make(chan struct{})
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
-
-	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
-		select {
-		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
-			t.Error("timed out waiting for pong delivery while xai payload write was held in hook")
-		}
-	}
-	defer func() { testWebsocketWritePayloadHook = nil }()
+	var serverConn *websocket.Conn
+	var acceptOnce, holdOnce, pongOnce, pongDeliveredOnce sync.Once
+	var handlers sync.WaitGroup
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.Add(1)
+		defer handlers.Done()
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("upgrade websocket: %v", err)
 			return
 		}
-		defer func() { _ = conn.Close() }()
+		accepted := false
+		acceptOnce.Do(func() {
+			accepted = true
+			serverConn = conn
+			close(serverConnReady)
+		})
+		if !accepted {
+			_ = conn.Close()
+			t.Error("unexpected websocket reconnect during keepalive upload test")
+			return
+		}
 
 		conn.SetPongHandler(func(appData string) error {
-			serverPongCh <- appData
+			pongOnce.Do(func() { serverPongCh <- appData })
 			return nil
 		})
 
+		// This is the sole reader. It processes the pong while the payload write
+		// is held, then reports receipt of the complete application message.
+		requestRead := make(chan error, 1)
+		readerDone := make(chan struct{})
 		go func() {
-			for {
-				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
-					return
-				}
+			defer close(readerDone)
+			msgType, payload, errRead := conn.ReadMessage()
+			if errRead == nil && (msgType != websocket.TextMessage || gjson.GetBytes(payload, "type").String() != "response.create") {
+				errRead = fmt.Errorf("unexpected websocket request: type=%d payload=%s", msgType, payload)
 			}
+			requestRead <- errRead
+		}()
+		defer func() {
+			_ = conn.Close()
+			<-readerDone
 		}()
 
 		select {
 		case <-inWriteHook:
+		case <-ctx.Done():
+			return
 		case <-time.After(2 * time.Second):
-			t.Errorf("timed out waiting for client write hook")
+			t.Error("timed out waiting for client write hook")
 			return
 		}
 
-		_ = conn.WriteControl(websocket.PingMessage, []byte("xai-session-ping"), time.Now().Add(time.Second))
+		if errPing := conn.WriteControl(websocket.PingMessage, []byte(ping), time.Now().Add(time.Second)); errPing != nil {
+			t.Errorf("send keepalive ping: %v", errPing)
+			return
+		}
 
 		select {
 		case got := <-serverPongCh:
-			if got != "xai-session-ping" {
-				t.Errorf("unexpected pong payload: got %q, want xai-session-ping", got)
+			if got != ping {
+				t.Errorf("unexpected pong payload: got %q, want %q", got, ping)
 			}
-			close(pongDeliveredDuringWrite)
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		case <-ctx.Done():
+			return
 		case <-time.After(2 * time.Second):
-			t.Errorf("pong was not received while payload write was in progress")
+			t.Error("pong was not received while payload write was in progress")
+			return
+		}
+
+		// Do not respond or close the socket until the held write has reached
+		// the server. Otherwise EOF can invalidate the client connection before
+		// its writer resumes, causing a send failure (and a session retry).
+		select {
+		case errRead := <-requestRead:
+			if errRead != nil {
+				t.Errorf("read websocket request: %v", errRead)
+				return
+			}
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for websocket request")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.done","response":{"id":"resp-1","status":"completed","output":[]}}`)
-		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, respPayload); errWrite != nil {
+			t.Errorf("write websocket response: %v", errWrite)
+			return
+		}
+		<-ctx.Done()
 	}))
-	defer server.Close()
 
 	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	// Keep cleanup local to this test rather than sharing the global stores.
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	previousHook := testWebsocketWritePayloadHook
+	defer func() {
+		cancel()
+		pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+		server.Close()
+		handlers.Wait()
+		testWebsocketWritePayloadHook = previousHook
+	}()
+
+	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+		// The package-global hook also sees writes from unrelated connections.
+		if conn.RemoteAddr().String() != server.Listener.Addr().String() {
+			return
+		}
+		select {
+		case <-serverConnReady:
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for accepted websocket connection")
+			return
+		}
+		if conn.LocalAddr().String() != serverConn.RemoteAddr().String() || conn.RemoteAddr().String() != serverConn.LocalAddr().String() {
+			return
+		}
+		holdOnce.Do(func() {
+			close(inWriteHook)
+			select {
+			case <-pongDeliveredDuringWrite:
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+				t.Error("timed out waiting for pong delivery while xai payload write was held in hook")
+			}
+		})
+	}
+
 	auth := &cliproxyauth.Auth{
-		ID:       "auth-xai-session-ping",
+		ID:       "auth-" + ping,
 		Provider: "xai",
 		Attributes: map[string]string{
 			"api_key":  "xai-test-key",
@@ -2264,109 +2356,15 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		SourceFormat:   sdktranslator.FormatOpenAIResponse,
 		ResponseFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:         true,
-		Metadata: map[string]any{
-			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-session-ping-test",
-		},
+	}
+	if sessionID != "" {
+		opts.Metadata = map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: sessionID}
 	}
 
-	result, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	result, errStream := exec.ExecuteStream(ctx, auth, req, opts)
 	if errStream != nil {
 		t.Fatalf("ExecuteStream() failed: %v", errStream)
 	}
-
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("chunk error: %v", chunk.Err)
-		}
-	}
-}
-
-func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	serverPongCh := make(chan string, 1)
-	inWriteHook := make(chan struct{})
-	pongDeliveredDuringWrite := make(chan struct{})
-
-	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
-		select {
-		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
-			t.Error("timed out waiting for pong delivery while xai sessionless payload write was held in hook")
-		}
-	}
-	defer func() { testWebsocketWritePayloadHook = nil }()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade websocket: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close() }()
-
-		conn.SetPongHandler(func(appData string) error {
-			serverPongCh <- appData
-			return nil
-		})
-
-		go func() {
-			for {
-				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
-					return
-				}
-			}
-		}()
-
-		select {
-		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
-			t.Errorf("timed out waiting for client write hook")
-			return
-		}
-
-		_ = conn.WriteControl(websocket.PingMessage, []byte("xai-sessionless-ping"), time.Now().Add(time.Second))
-
-		select {
-		case got := <-serverPongCh:
-			if got != "xai-sessionless-ping" {
-				t.Errorf("unexpected pong payload: got %q, want xai-sessionless-ping", got)
-			}
-			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
-			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
-			return
-		}
-
-		respPayload := []byte(`{"type":"response.done","response":{"id":"resp-1","status":"completed","output":[]}}`)
-		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
-	}))
-	defer server.Close()
-
-	exec := NewXAIWebsocketsExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{
-		ID:       "auth-xai-sessionless-ping",
-		Provider: "xai",
-		Attributes: map[string]string{
-			"api_key":  "xai-test-key",
-			"base_url": server.URL,
-		},
-	}
-	req := cliproxyexecutor.Request{
-		Model:   "grok-4",
-		Payload: []byte(`{"model":"grok-4","input":[{"type":"message","role":"user","content":"ping test sessionless"}]}`),
-	}
-	opts := cliproxyexecutor.Options{
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
-		ResponseFormat: sdktranslator.FormatOpenAIResponse,
-		Stream:         true,
-	}
-
-	result, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
-	if errStream != nil {
-		t.Fatalf("ExecuteStream() failed: %v", errStream)
-	}
-
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("chunk error: %v", chunk.Err)
