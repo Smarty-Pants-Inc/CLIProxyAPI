@@ -49,6 +49,8 @@ func (w *Watcher) ReloadConfigIfChanged() {
 }
 
 func (w *Watcher) reloadConfigIfChanged() {
+	w.configApplyMu.Lock()
+	defer w.configApplyMu.Unlock()
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
@@ -71,15 +73,17 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
-		w.clientsMutex.Lock()
-		// Keep the hash of the loaded snapshot, not a later publication's bytes.
-		w.lastConfigHash = w.config.ConfigFileVersion
-		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
 	}
 }
 
-func (w *Watcher) reloadConfig() bool {
+func (w *Watcher) reloadConfig() (applied bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.WithField("panic", recovered).Error("config runtime reload failed; version remains unobserved")
+			applied = false
+		}
+	}()
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)
 
@@ -89,6 +93,8 @@ func (w *Watcher) reloadConfig() bool {
 		return false
 	}
 
+	// Retain this immutable value before exposing newConfig to runtime callbacks.
+	loadedVersion := newConfig.ConfigFileVersion
 	if w.mirroredAuthDir != "" {
 		newConfig.AuthDir = w.mirroredAuthDir
 	} else {
@@ -134,5 +140,8 @@ func (w *Watcher) reloadConfig() bool {
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
+	w.clientsMutex.Lock()
+	w.lastConfigHash = loadedVersion
+	w.clientsMutex.Unlock()
 	return true
 }

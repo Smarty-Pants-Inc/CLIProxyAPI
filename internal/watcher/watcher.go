@@ -36,6 +36,7 @@ type Watcher struct {
 	config            *config.Config
 	clientsMutex      sync.RWMutex
 	authRescanMu      sync.Mutex
+	configApplyMu     sync.Mutex // Serializes disk version check through runtime application.
 	configReloadMu    sync.Mutex
 	configReloadTimer *time.Timer
 	serverUpdateMu    sync.Mutex
