@@ -27,8 +27,21 @@ cp "$work/original.yaml" "$work/edited.yaml"
   --input "$work/edited.yaml" --expected-version "$version"
 ```
 
-The command prints the published version on success. It performs the same
-complete, side-effect-free validation as the server's loader before publishing.
+The command prints the hash of the published bytes on success. It performs the
+same complete, side-effect-free validation as the server's loader before
+publishing. A plaintext `remote-management.secret-key` is replaced with the
+server's bcrypt representation before publication; all other edited bytes are
+retained, including comments, unknown options and formatting. Empty and already
+hashed keys are not rewritten. The edited input file is never modified, so it
+may still contain plaintext and must remain private. The CAS check still uses
+the original snapshot's hash, not a hash of normalized or edited bytes.
+
+Plain, quoted (including multiline quoted), and block management-key scalars
+are supported. For plaintext keys supplied through aliases, anchors, merge keys,
+explicit tags, or multiline plain scalars, the command refuses publication
+rather than risking a partial credential rewrite. Use an explicit unanchored
+quoted scalar in the edited input for those cases.
+
 An invalid config or a missing/stale version exits nonzero without replacing the
 live file. A CAS conflict requires a **fresh snapshot and reapplication of the
 edit**. Never attach today's disk hash to yesterday's replacement bytes: that
@@ -64,6 +77,8 @@ A legacy single-file bind mount or cross-device/non-renameable destination is
 **refused with a clear error**, not truncated in place. Migrate and recreate the
 container; there is intentionally no non-atomic fallback. Startup with a
 plaintext management key also refuses if its secure rewrite cannot be published.
+The operator publisher hashes plaintext before the same locked atomic CAS
+publication; it does not publish plaintext and then perform a second rewrite.
 
 ## Security and scope
 

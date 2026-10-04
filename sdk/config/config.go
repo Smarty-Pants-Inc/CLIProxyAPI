@@ -56,6 +56,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.ParseConfigBytes(data) }
 
+// PrepareConfigPublication validates bytes and hashes only the management-key scalar.
+func PrepareConfigPublication(data []byte) ([]byte, error) {
+	return internalconfig.PrepareConfigPublication(data)
+}
+
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	return internalconfig.SaveConfigPreserveComments(configFile, cfg)
 }
