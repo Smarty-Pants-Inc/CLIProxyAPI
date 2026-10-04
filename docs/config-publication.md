@@ -31,7 +31,11 @@ The command prints the hash of the published bytes on success. It performs the
 same complete, side-effect-free validation as the server's loader before
 publishing. A plaintext `remote-management.secret-key` is replaced with the
 server's bcrypt representation before publication; all other edited bytes are
-retained, including comments, unknown options and formatting. Empty and already
+retained byte-for-byte, including comments, unknown options, line endings and
+formatting. This byte-preserving contract is intentional: the publisher does not
+route through the server's YAML serializer, which may normalize quotes or CRLF
+line endings. Consumers should compare decoded credentials plus non-secret byte
+preservation, not literal equality with serializer output. Empty and already
 hashed keys are not rewritten. The edited input file is never modified, so it
 may still contain plaintext and must remain private. The CAS check still uses
 the original snapshot's hash, not a hash of normalized or edited bytes.
