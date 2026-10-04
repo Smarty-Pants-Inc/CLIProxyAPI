@@ -146,7 +146,7 @@ func atomicWriteConfigUnlocked(configFile string, data []byte) error {
 		return err
 	}
 	if err = os.Rename(tmpName, configFile); err != nil {
-		return err
+		return fmt.Errorf("atomic config publication refused (target may be a single-file bind mount or cross-device): mount a writable config directory instead; original config unchanged: %w", err)
 	}
 	return syncConfigDir(dir)
 }
