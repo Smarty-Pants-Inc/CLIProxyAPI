@@ -85,10 +85,14 @@ func (e *arbitrationExecutor) ExecuteStream(ctx context.Context, a *auth.Auth, r
 // arbitrationOptions extends the harness: snapshot is a frame the primary sends between
 // response.created and its refusal; httpStarted/httpRelease make the secondary an HTTP/SSE
 // credential (websockets off) whose response waits for the release.
+// httpSSE makes every fallback credential HTTP/SSE and serves this body ($MODEL replaced);
+// tertiary adds a third such credential.
 type arbitrationOptions struct {
 	snapshot    string
 	httpStarted chan<- struct{}
 	httpRelease <-chan struct{}
+	httpSSE     string
+	tertiary    bool
 }
 
 func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan struct{}) (*websocket.Conn, *arbitrationExecutor, *atomic.Int32) {
@@ -106,6 +110,11 @@ func arbitrationClientWith(t *testing.T, refusal string, fallback bool, gate <-c
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			attempts.Add(1)
+			if o.httpSSE != "" {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, strings.ReplaceAll(o.httpSSE, "$MODEL", model))
+				return
+			}
 			close(o.httpStarted)
 			<-o.httpRelease
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -159,12 +168,16 @@ func arbitrationClientWith(t *testing.T, refusal string, fallback bool, gate <-c
 	if fallback {
 		tokens = append(tokens, "secondary")
 	}
+	if o.tertiary {
+		tokens = append(tokens, "tertiary")
+	}
+	httpFallback := o.httpStarted != nil || o.httpSSE != ""
 	for i, token := range tokens {
 		id := fmt.Sprintf("%s-%d", t.Name(), i)
 		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 		_, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive,
-			Attributes: map[string]string{"api_key": token, "base_url": upstream.URL, "websockets": fmt.Sprint(i == 0 || o.httpStarted == nil)}, Metadata: map[string]any{"disable_cooling": false}})
+			Attributes: map[string]string{"api_key": token, "base_url": upstream.URL, "websockets": fmt.Sprint(i == 0 || !httpFallback)}, Metadata: map[string]any{"disable_cooling": false}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -421,5 +434,47 @@ func TestCodexWebsocketHTTPFallbackOutlivesDecisionHold(t *testing.T) {
 	}
 	if attempts.Load() != 1 {
 		t.Fatalf("fallback attempts = %d", attempts.Load())
+	}
+}
+
+// CLIProxyAPI#64 security round 4, P2: the same rule on the HTTP/SSE fallback path. The primary
+// WS quota refusal fails over to an HTTP-only credential; its SSE stream sends output, then a
+// quota refusal. The client gets the output, the refusal, then a close; no further credential.
+func TestCodexWebsocketHTTPFallbackOutputQuotaRefusal(t *testing.T) {
+	snapshots := map[string]string{
+		"in_progress_server_tool": `{"type":"response.in_progress","response":{"id":"fallback","model":"$MODEL","output":[{"id":"ws_1","type":"web_search_call","status":"in_progress"}]}}`,
+		"in_progress_text":        `{"type":"response.in_progress","response":{"id":"fallback","model":"$MODEL","output":[{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"partial answer"}]}]}}`,
+	}
+	for name, snapshot := range snapshots {
+		for _, code := range []string{"usage_limit_reached", "insufficient_quota"} {
+			t.Run(name+"/"+code, func(t *testing.T) {
+				sse := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"fallback\",\"model\":\"$MODEL\",\"output\":[]}}\n\n" +
+					"event: response.in_progress\ndata: " + snapshot + "\n\n" +
+					"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"fallback\",\"model\":\"$MODEL\",\"status\":\"failed\",\"error\":{\"code\":\"" + code + "\",\"message\":\"fallback refusal\"}}}\n\n"
+				c, _, attempts := arbitrationClientWith(t, "usage_limit_reached", true, nil, arbitrationOptions{httpSSE: sse, tertiary: true})
+				var payload []byte
+				var err error
+				sawOutput := false
+				for {
+					_, payload, err = c.ReadMessage()
+					if err != nil || gjson.GetBytes(payload, "type").String() == "error" {
+						break
+					}
+					sawOutput = sawOutput || (gjson.GetBytes(payload, "type").String() == "response.in_progress" && gjson.GetBytes(payload, "response.id").String() == "fallback")
+				}
+				if !sawOutput {
+					t.Error("fallback output did not reach the client before the refusal")
+				}
+				if err != nil || !strings.Contains(string(payload), code) || !strings.Contains(string(payload), "fallback refusal") {
+					t.Fatalf("fallback refusal before close = %s, %v", payload, err)
+				}
+				if _, _, err := c.ReadMessage(); err == nil {
+					t.Fatal("refusal did not close downstream")
+				}
+				if attempts.Load() != 1 {
+					t.Fatalf("credential attempts after primary = %d, want 1 (no replay after output)", attempts.Load())
+				}
+			})
+		}
 	}
 }
