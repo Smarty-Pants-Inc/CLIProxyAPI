@@ -216,7 +216,8 @@ func TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped(t *testing.T
 	}))
 	defer server.Close()
 
-	executor := NewCodexExecutor(&config.Config{})
+	// Exercise in-stream failure delivery after the matching model releases passthrough.
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: new(false)}})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"base_url": server.URL,
 		"api_key":  "test",
@@ -359,7 +360,8 @@ func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T
 				}, nil
 			}))
 
-			executor := NewCodexExecutor(&config.Config{})
+			// Exercise in-stream failure delivery after the matching model releases passthrough.
+			executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: new(false)}})
 			auth := &cliproxyauth.Auth{Attributes: map[string]string{
 				"base_url": "http://codex.test",
 				"api_key":  "test",

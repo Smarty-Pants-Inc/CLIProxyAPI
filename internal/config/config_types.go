@@ -200,8 +200,9 @@ type CodexConfig struct {
 	// reasoning phase instead of ending at the first keepalive: a clean end with no terminal event
 	// is request-scoped on SSE and stops there, while a websocket close or a transport error on
 	// either transport is not, so the request may be retried on another credential.
-	// Default is false.
-	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
+	// Default is true. Explicit false disables only the optional post-identity hold;
+	// model identity verification always buffers unverified frames.
+	StreamBootstrapBuffering *bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// StreamBootstrapTimeout specifies an optional maximum duration to hold back uncommitted response
 	// headers during bootstrap buffering before releasing the stream to the client.
 	// Defaults to "0" (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
@@ -220,6 +221,12 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
+}
+
+// StreamBootstrapBufferingEnabled reports whether to hold bootstrap frames after model verification.
+// An unset option preserves the default buffered behavior.
+func (c *CodexConfig) StreamBootstrapBufferingEnabled() bool {
+	return c == nil || c.StreamBootstrapBuffering == nil || *c.StreamBootstrapBuffering
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.

@@ -236,7 +236,7 @@ func TestCodexExecutorExecuteStream_BufferingPartialDeltasIncompleteResponseIsSu
 
 	executor := NewCodexExecutor(&config.Config{
 		Codex: config.CodexConfig{
-			StreamBootstrapBuffering: true,
+			StreamBootstrapBuffering: new(true),
 		},
 	})
 	auth := &cliproxyauth.Auth{

@@ -744,6 +744,11 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 			t.Errorf("read upstream websocket message: %v", errRead)
 			return
 		}
+		// Passthrough starts only after the model-integrity guard verifies this handshake.
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5-codex"}}`)); errWrite != nil {
+			t.Errorf("write verified handshake: %v", errWrite)
+			return
+		}
 		if errWrite := conn.WriteMessage(websocket.TextMessage, errorPayload); errWrite != nil {
 			t.Errorf("write error websocket message: %v", errWrite)
 			return
@@ -751,7 +756,7 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 	}))
 	defer server.Close()
 
-	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: new(false)}, SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
@@ -766,6 +771,11 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 	result, err := exec.ExecuteStream(ctx, auth, req, opts)
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	handshake, ok := <-result.Chunks
+	if !ok || handshake.Err != nil || !bytes.Contains(handshake.Payload, []byte(`"type":"response.created"`)) {
+		t.Fatalf("expected verified handshake before in-stream error, got %+v", handshake)
 	}
 
 	select {
@@ -972,6 +982,11 @@ func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 			t.Errorf("read upstream websocket message: %v", errRead)
 			return
 		}
+		// Passthrough starts only after the model-integrity guard verifies this handshake.
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5-codex"}}`)); errWrite != nil {
+			t.Errorf("write verified handshake: %v", errWrite)
+			return
+		}
 		deadline := time.Now().Add(time.Second)
 		closeMessage := websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "message too big")
 		if errWrite := conn.WriteControl(websocket.CloseMessage, closeMessage, deadline); errWrite != nil {
@@ -981,7 +996,7 @@ func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: new(false)}, SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
@@ -995,6 +1010,11 @@ func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	handshake, ok := <-result.Chunks
+	if !ok || handshake.Err != nil || !bytes.Contains(handshake.Payload, []byte(`"type":"response.created"`)) {
+		t.Fatalf("expected verified handshake before in-stream error, got %+v", handshake)
 	}
 
 	select {
@@ -2646,7 +2666,7 @@ func TestCodexWebsocketZeroTokenIncompleteReleasesSessionRequestLock(t *testing.
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{
 		Codex: config.CodexConfig{
-			StreamBootstrapBuffering: true,
+			StreamBootstrapBuffering: new(true),
 		},
 		SDKConfig: config.SDKConfig{
 			DisableImageGeneration: config.DisableImageGenerationAll,
@@ -3091,7 +3111,7 @@ func TestCodexWebsockets_SessionlessBufferingImmediateTerminalClosesConnection(t
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{
 		Codex: config.CodexConfig{
-			StreamBootstrapBuffering: true,
+			StreamBootstrapBuffering: new(true),
 		},
 		SDKConfig: config.SDKConfig{
 			DisableImageGeneration: config.DisableImageGenerationAll,

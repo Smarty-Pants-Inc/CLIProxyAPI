@@ -344,8 +344,8 @@ codex:
   # wait. Neither is made worse by this option - with it off the same stalled line stalls the
   # conductor instead, which waits on the same context - but a client-side request timeout, not
   # proxy_read_timeout, is what bounds them.
-  # Default: false
-  stream-bootstrap-buffering: false
+  # Default: true. Explicit false disables the optional hold after model identity is verified.
+  stream-bootstrap-buffering: true
   # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
   # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
   # the stream is released to the client and further in-stream overloads are delivered rather
