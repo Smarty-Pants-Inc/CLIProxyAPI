@@ -126,7 +126,7 @@ func AtomicWriteConfigCASContext(ctx context.Context, configFile string, data []
 		if configVersion(current) != expectedVersion {
 			return ErrConfigConflict
 		}
-		if errWrite := atomicWriteConfigWithContext(ctx, configFile, data, os.Rename); errWrite != nil {
+		if errWrite := atomicWriteConfigWithContext(ctx, configFile, data, replaceConfigFile); errWrite != nil {
 			return errWrite
 		}
 		published, errPublished := os.ReadFile(configFile)
@@ -140,7 +140,7 @@ func AtomicWriteConfigCASContext(ctx context.Context, configFile string, data []
 }
 
 func atomicWriteConfigUnlocked(configFile string, data []byte) error {
-	return atomicWriteConfigWithRename(configFile, data, os.Rename)
+	return atomicWriteConfigWithRename(configFile, data, replaceConfigFile)
 }
 
 func atomicWriteConfigWithRename(configFile string, data []byte, rename func(string, string) error) error {
@@ -152,13 +152,13 @@ func atomicWriteConfigWithContext(ctx context.Context, configFile string, data [
 		return err
 	}
 	dir := filepath.Dir(configFile)
-	// Owner-only staging and publication are deliberately stricter than any
-	// original group/ACL grants. Never enable inherited named-user ACLs.
+	// Stage privately, retaining only policy-approved existing group readers.
+	// Never enable inherited named-user ACLs.
 	info, errStat := os.Stat(configFile)
 	if errStat != nil && !os.IsNotExist(errStat) {
 		return errStat
 	}
-	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	tmp, err := createConfigStaging(dir)
 	if err != nil {
 		return err
 	}
@@ -172,6 +172,10 @@ func atomicWriteConfigWithContext(ctx context.Context, configFile string, data [
 		return err
 	}
 	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = preserveConfigReadAccess(tmp, info); err != nil {
 		_ = tmp.Close()
 		return err
 	}

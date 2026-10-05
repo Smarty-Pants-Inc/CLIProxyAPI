@@ -129,7 +129,7 @@ func saveConfigPreserveCommentsUnlockedContext(ctx context.Context, configFile s
 	if err = enc.Close(); err != nil {
 		return err
 	}
-	return atomicWriteConfigWithContext(ctx, configFile, NormalizeCommentIndentation(buf.Bytes()), os.Rename)
+	return atomicWriteConfigWithContext(ctx, configFile, NormalizeCommentIndentation(buf.Bytes()), replaceConfigFile)
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]

@@ -97,14 +97,43 @@ publication; it does not publish plaintext and then perform a second rewrite.
 
 ## Security and scope
 
-Linux staging and replacements preserve the original owner/group and use
-owner-only mode bits no broader than the original (`0600` for new configs),
-masking inherited POSIX ACL group/named-user grants. This can remove existing
-group-read access; the server must run as the owner. If ownership cannot be retained, publication is
-refused before writing credentials. Windows and other non-Linux publication
-are currently refused: numeric mode bits alone cannot preserve their native
-ACLs safely. Native security-descriptor support needs platform-hosted validation.
-Failed owner-private staging files may remain in the config directory for diagnosis.
+Linux and macOS create staging files at `0600`, preserve the original owner/group,
+and restore only existing policy-approved mode bits before sync and replacement:
+original permissions intersected with `0640` (owner read/write plus group read).
+New configs remain `0600`; group write/execute and all other-user access are never
+added. If ownership cannot be retained, publication refuses before writing
+credentials. This keeps a normal `0640` restricted-group reader working across
+startup key hashing and subsequent publications.
+
+Linux must keep inherited named POSIX ACL entries masked. If staging has named
+user/group entries, the allowed mode is instead `0600` intersected with the
+original: enabling the group-read mask would enable unrelated inherited readers.
+Restricted-group retention is deliberately conditional on that safety decision;
+deployments needing group read should use a config directory without inherited
+named-reader ACLs. The existing owner-only inherited-ACL regression remains
+unchanged. Linux SELinux label preservation remains enforced before writing.
+
+macOS removes inherited ACLs using `/bin/chmod -N` against the open staging
+descriptor (`/dev/fd/3`), before writing credentials; mode bits alone do not mask
+Darwin ACL grants. Failure refuses publication. The file is synced before an
+atomic same-directory rename, followed by directory sync.
+
+Windows uses the installed `golang.org/x/sys/windows` APIs to create the empty
+staging file with an owner-only protected DACL, not a post-write numeric chmod.
+The descriptor is verified before writing, and an existing config must have the
+same owning account. After file sync, one native `FileRenameInfoEx` POSIX
+replacement commits; there is no copy/truncate fallback. Unsupported Windows
+versions/filesystems refuse without changing the original. The DACL remains
+owner-only and cannot inherit broad parent grants.
+
+Other native platforms remain fail-closed. Failed staging files are retained for
+diagnosis with no permissions beyond this policy. Native Windows/macOS runtime
+acceptance is the manual hosted `config-native-publication` workflow's
+`native-publication` matrix jobs (`windows-latest` and `macos-latest`): exact-base
+public-path RED, then head GREEN for creation privacy, atomic replacement/refusal,
+plaintext management-key startup and ordinary config save. Cross-compilation is
+not runtime proof. The integrator must obtain hosted-spend authorization before
+dispatch and retain exact-head job receipts; no automatic paid trigger is added.
 
 Only the successfully runtime-applied version is marked observed by the watcher;
 load or runtime-apply failures are reported and remain eligible for retry.

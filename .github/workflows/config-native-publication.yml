@@ -1,0 +1,86 @@
+name: config-native-publication
+
+# Native candidate proof needs disposable runners. This workflow is manual only:
+# the integrator must obtain the product owner's hosted-spend authorization before
+# dispatch, and retain the exact definition/source SHA and native run receipts.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-publication:
+    if: github.repository == 'Smarty-Pants-Inc/CLIProxyAPI'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Native exact-base RED and published-head GREEN
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export TMPDIR=$(mktemp -d)
+          # Windows Go uses TMP/TEMP, not TMPDIR. None of these override HOME.
+          if [ "$TARGET" = windows ]; then
+            export TMP="$(cygpath -w "$TMPDIR")" TEMP="$(cygpath -w "$TMPDIR")"
+          fi
+          test "$(go env GOOS)" = "$TARGET"
+          proof="$RUNNER_TEMP/config-native-proof"
+          mkdir -p "$proof/base"
+          git --no-optional-locks rev-parse HEAD > "$proof/head.txt"
+          go version > "$proof/toolchain.txt"
+          printf 'native=%s runner=%s arch=%s\n' "$TARGET" "$RUNNER_OS" "$RUNNER_ARCH" >> "$proof/toolchain.txt"
+          base=67aa1f246c0865b23ab6e47981234616e0045e3b
+          files='config_transaction.go config_lock_identity_other.go config_security_label_other.go'
+          if [ "$TARGET" = windows ]; then
+            files="$files config_lock_windows.go config_security_windows.go"
+          else
+            files="$files config_lock_unix.go config_security_other.go"
+          fi
+          for file in $files; do
+            git --no-optional-locks show "$base:internal/config/$file" > "$proof/base/$file"
+          done
+          cp "internal/config/config_native_publication_${TARGET}_test.go" "$proof/base/"
+          # Explicit file list compiles only the exact-base publication path and
+          # unchanged current public-path test, avoiding unrelated unsafe fixtures.
+          set +e
+          go test -work -v "$proof/base/"*.go -run '^TestNativePrivatePublication$' -count=1 > "$proof/red.log" 2>&1
+          red=$?
+          set -e
+          test "$red" -ne 0
+          grep -F 'publication refused' "$proof/red.log"
+          go test -work -v ./internal/config -run '^(TestNativePrivatePublication|TestNativeStagingPrivateAtCreation|TestNativeInheritedACLDoesNotGrantReader|TestReplacementPermissionDecision|TestRestrictedGroupReadSurvivesPublication|TestManagementKeyStartupAndSavePublication)$' -count=1 > "$proof/green.log" 2>&1
+          grep -F -- '--- PASS: TestNativePrivatePublication' "$proof/green.log"
+          grep -F -- '--- PASS: TestManagementKeyStartupAndSavePublication' "$proof/green.log"
+          if [ "$TARGET" = windows ]; then
+            grep -F -- '--- PASS: TestNativeStagingPrivateAtCreation' "$proof/green.log"
+          else
+            grep -F -- '--- PASS: TestNativeInheritedACLDoesNotGrantReader' "$proof/green.log"
+            grep -F -- '--- PASS: TestRestrictedGroupReadSurvivesPublication' "$proof/green.log"
+          fi
+          cat "$proof/red.log" "$proof/green.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: config-native-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/config-native-proof/
+          if-no-files-found: error
