@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -53,6 +54,13 @@ func canonicalConfigFile(configFile string) (string, error) {
 }
 
 func withConfigFileLock(configFile string, fn func(string) error) error {
+	return withConfigFileLockContext(context.Background(), configFile, fn)
+}
+
+func withConfigFileLockContext(ctx context.Context, configFile string, fn func(string) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	configFile, err := canonicalConfigFile(configFile)
 	if err != nil {
 		return err
@@ -66,7 +74,7 @@ func withConfigFileLock(configFile string, fn func(string) error) error {
 			log.WithError(errClose).Error("failed to close config lock")
 		}
 	}()
-	if err = lockConfigFile(lockFile); err != nil {
+	if err = lockConfigFileContext(ctx, lockFile); err != nil {
 		return err
 	}
 	defer func() {
@@ -74,6 +82,9 @@ func withConfigFileLock(configFile string, fn func(string) error) error {
 			log.WithError(errUnlock).Error("failed to release config lock")
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return fn(configFile)
 }
 
@@ -91,8 +102,13 @@ func AtomicWriteConfig(configFile string, data []byte) error {
 
 // AtomicWriteConfigCAS publishes bytes only if the file still has expectedVersion.
 func AtomicWriteConfigCAS(configFile string, data []byte, expectedVersion string) (string, error) {
+	return AtomicWriteConfigCASContext(context.Background(), configFile, data, expectedVersion)
+}
+
+// AtomicWriteConfigCASContext cancels queued publication before the rename boundary.
+func AtomicWriteConfigCASContext(ctx context.Context, configFile string, data []byte, expectedVersion string) (string, error) {
 	var version string
-	err := withConfigFileLock(configFile, func(configFile string) error {
+	err := withConfigFileLockContext(ctx, configFile, func(configFile string) error {
 		if expectedVersion == "" {
 			return ErrConfigVersionRequired
 		}
@@ -103,7 +119,7 @@ func AtomicWriteConfigCAS(configFile string, data []byte, expectedVersion string
 		if configVersion(current) != expectedVersion {
 			return ErrConfigConflict
 		}
-		if errWrite := atomicWriteConfigUnlocked(configFile, data); errWrite != nil {
+		if errWrite := atomicWriteConfigWithContext(ctx, configFile, data, os.Rename); errWrite != nil {
 			return errWrite
 		}
 		published, errPublished := os.ReadFile(configFile)
@@ -121,6 +137,13 @@ func atomicWriteConfigUnlocked(configFile string, data []byte) error {
 }
 
 func atomicWriteConfigWithRename(configFile string, data []byte, rename func(string, string) error) error {
+	return atomicWriteConfigWithContext(context.Background(), configFile, data, rename)
+}
+
+func atomicWriteConfigWithContext(ctx context.Context, configFile string, data []byte, rename func(string, string) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dir := filepath.Dir(configFile)
 	// Owner-only staging and publication are deliberately stricter than any
 	// original group/ACL grants. Never enable inherited named-user ACLs.
@@ -150,6 +173,10 @@ func atomicWriteConfigWithRename(configFile string, data []byte, rename func(str
 		return err
 	}
 	if err = tmp.Close(); err != nil {
+		return err
+	}
+	// Once rename commits, cancellation cannot roll back a published file.
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 	if err = rename(tmpName, configFile); err != nil {

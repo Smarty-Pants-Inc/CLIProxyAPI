@@ -391,7 +391,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	rollback := h.configMutationLocked()
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
-		if errSave := h.saveConfigLocked(); errSave != nil {
+		if errSave := h.saveConfigLockedContext(managementRequestContext(c)); errSave != nil {
 			rollback()
 			h.mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{

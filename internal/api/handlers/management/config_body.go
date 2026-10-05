@@ -85,6 +85,13 @@ func prepareManagementBodyMode(c *gin.Context, requireJSON bool) bool {
 	return true
 }
 
+func managementRequestContext(c *gin.Context) context.Context {
+	if c != nil && c.Request != nil {
+		return c.Request.Context()
+	}
+	return context.Background()
+}
+
 func managementRequestActive(c *gin.Context) bool {
 	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": "request cancelled before publication"})

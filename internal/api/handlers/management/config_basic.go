@@ -143,7 +143,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	if !managementRequestActive(c) {
 		return
 	}
-	version, errWrite := config.AtomicWriteConfigCAS(h.configFilePath, prepared, expectedVersion)
+	version, errWrite := config.AtomicWriteConfigCASContext(c.Request.Context(), h.configFilePath, prepared, expectedVersion)
 	if errWrite != nil {
 		if errWrite == config.ErrConfigConflict {
 			c.JSON(http.StatusConflict, gin.H{"error": "config_changed", "message": "config changed since it was read"})

@@ -327,7 +327,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		})
 		return
 	}
-	if errSave := h.saveConfigLocked(); errSave != nil {
+	if errSave := h.saveConfigLockedContext(managementRequestContext(c)); errSave != nil {
 		rollback()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{

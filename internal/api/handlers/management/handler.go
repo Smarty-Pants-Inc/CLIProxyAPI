@@ -205,7 +205,7 @@ func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnaps
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return configReloadSnapshot{}, false
 	}
-	if errSave := h.saveConfigLocked(); errSave != nil {
+	if errSave := h.saveConfigLockedContext(managementRequestContext(c)); errSave != nil {
 		if errSave == config.ErrConfigConflict {
 			c.JSON(http.StatusConflict, gin.H{"error": "config changed since it was read"})
 		} else {
@@ -500,10 +500,14 @@ func (h *Handler) configMutationLocked() func() {
 }
 
 func (h *Handler) saveConfigLocked() error {
+	return h.saveConfigLockedContext(context.Background())
+}
+
+func (h *Handler) saveConfigLockedContext(ctx context.Context) error {
 	if h.configFilePath == "" {
 		return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
 	}
-	version, errSave := config.SaveConfigPreserveCommentsCAS(h.configFilePath, h.cfg, h.configVersion)
+	version, errSave := config.SaveConfigPreserveCommentsCASContext(ctx, h.configFilePath, h.cfg, h.configVersion)
 	if errSave == nil {
 		h.configVersion = version
 	}
@@ -527,7 +531,7 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return false
 	}
-	if err := h.saveConfigLocked(); err != nil {
+	if err := h.saveConfigLockedContext(managementRequestContext(c)); err != nil {
 		if err == config.ErrConfigConflict {
 			c.JSON(http.StatusConflict, gin.H{"error": "config changed since it was read"})
 		} else {

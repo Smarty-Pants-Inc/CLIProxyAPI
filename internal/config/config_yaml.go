@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -21,11 +22,16 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 // SaveConfigPreserveCommentsCAS publishes cfg only when configFile still has expectedVersion.
 func SaveConfigPreserveCommentsCAS(configFile string, cfg *Config, expectedVersion string) (string, error) {
+	return SaveConfigPreserveCommentsCASContext(context.Background(), configFile, cfg, expectedVersion)
+}
+
+// SaveConfigPreserveCommentsCASContext retains request ownership through lock waiting and staging.
+func SaveConfigPreserveCommentsCASContext(ctx context.Context, configFile string, cfg *Config, expectedVersion string) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("config is nil")
 	}
 	var version string
-	err := withConfigFileLock(configFile, func(configFile string) error {
+	err := withConfigFileLockContext(ctx, configFile, func(configFile string) error {
 		if expectedVersion == "" {
 			return ErrConfigVersionRequired
 		}
@@ -36,7 +42,7 @@ func SaveConfigPreserveCommentsCAS(configFile string, cfg *Config, expectedVersi
 		if configVersion(current) != expectedVersion {
 			return ErrConfigConflict
 		}
-		if errSave := saveConfigPreserveCommentsUnlocked(configFile, cfg); errSave != nil {
+		if errSave := saveConfigPreserveCommentsUnlockedContext(ctx, configFile, cfg); errSave != nil {
 			return errSave
 		}
 		published, errPublished := os.ReadFile(configFile)
@@ -51,6 +57,10 @@ func SaveConfigPreserveCommentsCAS(configFile string, cfg *Config, expectedVersi
 }
 
 func saveConfigPreserveCommentsUnlocked(configFile string, cfg *Config) error {
+	return saveConfigPreserveCommentsUnlockedContext(context.Background(), configFile, cfg)
+}
+
+func saveConfigPreserveCommentsUnlockedContext(ctx context.Context, configFile string, cfg *Config) error {
 	if err := cfg.ValidateAPIKeyPolicies(); err != nil {
 		return err
 	}
@@ -119,7 +129,7 @@ func saveConfigPreserveCommentsUnlocked(configFile string, cfg *Config) error {
 	if err = enc.Close(); err != nil {
 		return err
 	}
-	return atomicWriteConfigUnlocked(configFile, NormalizeCommentIndentation(buf.Bytes()))
+	return atomicWriteConfigWithContext(ctx, configFile, NormalizeCommentIndentation(buf.Bytes()), os.Rename)
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
