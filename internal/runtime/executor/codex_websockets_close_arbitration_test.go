@@ -81,6 +81,7 @@ func (e *arbitrationExecutor) ExecuteStream(ctx context.Context, a *auth.Auth, r
 func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan struct{}) (*websocket.Conn, *arbitrationExecutor, *atomic.Int32) {
 	t.Helper()
 	model := "arbitration-" + strings.ReplaceAll(t.Name(), "/", "-")
+	rawTerminal, isRaw := strings.CutPrefix(refusal, "raw:")
 	explicitStatus := strings.HasPrefix(refusal, "explicit:")
 	refusal = strings.TrimPrefix(refusal, "explicit:")
 	attempts := &atomic.Int32{}
@@ -99,6 +100,9 @@ func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan 
 			terminal := fmt.Sprintf(`{"type":"response.failed","response":{"id":"primary","model":%q,"status":"failed","error":{"code":%q,"message":"original refusal"}}}`, model, refusal)
 			if explicitStatus {
 				terminal = fmt.Sprintf(`{"type":"error","status":429,"error":{"code":%q,"message":"original refusal"}}`, refusal)
+			}
+			if isRaw {
+				terminal = strings.ReplaceAll(rawTerminal, "$MODEL", model)
 			}
 			_ = c.WriteMessage(websocket.TextMessage, []byte(terminal))
 			return // quota followed immediately by EOF
@@ -202,6 +206,55 @@ func TestCodexWebsocketCloseArbitrationFinalRefusal(t *testing.T) {
 			}
 			if attempts.Load() != 0 {
 				t.Fatal("unexpected fallback")
+			}
+		})
+	}
+}
+
+// CLIProxyAPI#64 security P2: the final refusal written to the client is built
+// from an allowlist; upstream credential and account fields never reach it.
+func TestCodexWebsocketFinalRefusalRedactsUpstreamSecrets(t *testing.T) {
+	const secrets = `"access_token":"canary-access-tok","refresh_token":"canary-refresh-tok","id_token":"eyJcanaryhdr.eyJcanarybody.canarysig","account_id":"canary-account-id","email":"canary@example.com","authorization":"Bearer canary-auth-hdr"`
+	const message = `original refusal; Authorization: Bearer canary-bearer-msg account_id=canary-acct-msg for canary-mail@example.com token eyJcanaryjwt1.eyJcanaryjwt2.sig`
+	bodies := map[string]string{
+		"error_event":     `{"type":"error","status":429,` + secrets + `,"error":{"type":"usage_limit_reached","code":"usage_limit_reached","param":"model","resets_in_seconds":120,"message":"` + message + `",` + secrets + `}}`,
+		"response_failed": `{"type":"response.failed",` + secrets + `,"response":{"id":"primary","model":"$MODEL","status":"failed",` + secrets + `,"error":{"type":"usage_limit_reached","code":"usage_limit_reached","param":"model","resets_in_seconds":120,"message":"` + message + `",` + secrets + `}}}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			c, _, attempts := arbitrationClient(t, "raw:"+body, false, nil)
+			var payload []byte
+			var err error
+			for {
+				_, payload, err = c.ReadMessage()
+				if err != nil || gjson.GetBytes(payload, "type").String() == "error" {
+					break
+				}
+			}
+			if err != nil {
+				t.Fatalf("no final refusal: %v", err)
+			}
+			for _, leak := range []string{"canary", `"access_token"`, `"refresh_token"`, `"id_token"`, `"account_id"`, `"email"`, `"authorization"`, "eyJ", "@example.com"} {
+				if strings.Contains(string(payload), leak) {
+					t.Errorf("client refusal leaks %q: %s", leak, payload)
+				}
+			}
+			if got := gjson.GetBytes(payload, "status").Int(); got != http.StatusTooManyRequests {
+				t.Errorf("status = %d: %s", got, payload)
+			}
+			for key, want := range map[string]string{"error.type": "usage_limit_reached", "error.code": "usage_limit_reached", "error.param": "model", "error.resets_in_seconds": "120"} {
+				if got := gjson.GetBytes(payload, key).String(); got != want {
+					t.Errorf("%s = %q, want %q: %s", key, got, want, payload)
+				}
+			}
+			if msg := gjson.GetBytes(payload, "error.message").String(); !strings.HasPrefix(msg, "original refusal") {
+				t.Errorf("error.message = %q", msg)
+			}
+			if _, _, err := c.ReadMessage(); err == nil {
+				t.Error("final refusal did not close downstream")
+			}
+			if attempts.Load() != 0 {
+				t.Error("unexpected fallback")
 			}
 		})
 	}
