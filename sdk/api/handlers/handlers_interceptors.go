@@ -227,6 +227,11 @@ func cloneByteSlices(src [][]byte) [][]byte {
 }
 
 func nextStreamChunk(ctx context.Context, pending *[]coreexecutor.StreamChunk, closed *bool, chunks <-chan coreexecutor.StreamChunk) (coreexecutor.StreamChunk, bool, bool) {
+	// Producer cancellation can close chunks before this consumer observes Done.
+	// A canceled request must not report successful EOF (or deliver pending data).
+	if ctx != nil && ctx.Err() != nil {
+		return coreexecutor.StreamChunk{}, false, true
+	}
 	if pending != nil && len(*pending) > 0 {
 		chunk := (*pending)[0]
 		(*pending)[0] = coreexecutor.StreamChunk{}
@@ -246,6 +251,9 @@ func nextStreamChunk(ctx context.Context, pending *[]coreexecutor.StreamChunk, c
 		}
 	} else {
 		chunk, ok = <-chunks
+	}
+	if !ok && ctx != nil && ctx.Err() != nil {
+		return coreexecutor.StreamChunk{}, false, true
 	}
 	if !ok && closed != nil {
 		*closed = true

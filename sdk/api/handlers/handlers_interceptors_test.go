@@ -500,6 +500,27 @@ func TestHandlerLifecycleCompletesSuccessfulStreamOnce(t *testing.T) {
 	}
 }
 
+func TestNextStreamChunkCancellationBeforeEOF(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	chunks := make(chan coreexecutor.StreamChunk)
+	close(chunks)
+	for _, alreadyClosed := range []bool{false, true} {
+		closed := alreadyClosed
+		if _, ok, canceled := nextStreamChunk(ctx, nil, &closed, chunks); ok || !canceled {
+			t.Fatalf("closed=%v: ok=%v canceled=%v", alreadyClosed, ok, canceled)
+		}
+	}
+	pending := []coreexecutor.StreamChunk{{Payload: []byte(`{"chunk":true}`)}}
+	if _, ok, canceled := nextStreamChunk(ctx, &pending, nil, chunks); ok || !canceled {
+		t.Fatalf("pending canceled stream: ok=%v canceled=%v", ok, canceled)
+	}
+	closed := true
+	if _, ok, canceled := nextStreamChunk(context.Background(), nil, &closed, chunks); ok || canceled {
+		t.Fatalf("ordinary EOF: ok=%v canceled=%v", ok, canceled)
+	}
+}
+
 func TestHandlerLifecycleCompletesCanceledStream(t *testing.T) {
 	model := "handler-interceptor-lifecycle-canceled-stream"
 	chunks := make(chan coreexecutor.StreamChunk, 1)
