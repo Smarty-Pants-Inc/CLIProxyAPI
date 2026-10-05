@@ -114,10 +114,13 @@ original bytes and ACL intact; no owner-only migration is performed implicitly.
 Linux must keep inherited named POSIX ACL entries masked. If staging has named
 user/group entries, the allowed mode is instead `0600` intersected with the
 original: enabling the group-read mask would enable unrelated inherited readers.
-Restricted-group retention is deliberately conditional on that safety decision;
-deployments needing group read should use a config directory without inherited
-named-reader ACLs. The existing owner-only inherited-ACL regression remains
-unchanged. Linux SELinux label preservation remains enforced before writing.
+If the original has an authorized owning-group reader but staging inherits named
+entries, publication refuses before replacement: masking them would lose that
+reader, while unmasking them would grant access to unrelated readers. Refusal
+retains the original bytes, inode and effective group grant. Owner-only originals
+can still publish with every inherited grant masked. The owner-only security
+regression and the separate restricted-reader refusal regression cover both
+boundaries. Linux SELinux label preservation remains enforced before writing.
 
 macOS removes inherited ACLs using `/bin/chmod -N` against the open staging
 descriptor (`/dev/fd/3`), before writing credentials; mode bits alone do not mask
