@@ -49,7 +49,7 @@ func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
 	if err == nil {
 		var actual *windows.SECURITY_DESCRIPTOR
 		actual, err = windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-		if err == nil && actual.String() != sd.String() {
+		if err == nil && !hasPrivateConfigDACL(actual, sd) {
 			err = fmt.Errorf("protected private config DACL was not established")
 		}
 	}
@@ -61,6 +61,38 @@ func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
 		return nil, fmt.Errorf("secure config file: %w", err)
 	}
 	return file, nil
+}
+
+// hasPrivateConfigDACL validates the actual access policy, not the whole SDDL
+// representation. GetSecurityInfo can return auto-inheritance bookkeeping that
+// differs from the input template. Owner/group fields are not DACL grants.
+func hasPrivateConfigDACL(actual, expected *windows.SECURITY_DESCRIPTOR) bool {
+	if actual == nil || expected == nil || !actual.IsValid() || !expected.IsValid() {
+		return false
+	}
+	control, _, err := actual.Control()
+	if err != nil {
+		return false
+	}
+	dacl, _, err := actual.DACL()
+	if err != nil || dacl == nil {
+		return false
+	}
+	// Build a descriptor containing only the unchanged DACL and the protection
+	// flag. This strips descriptor metadata, never ACEs or ACE inheritance flags.
+	projection, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return false
+	}
+	if err = projection.SetDACL(dacl, true, false); err != nil {
+		return false
+	}
+	if err = projection.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		return false
+	}
+	matches := privateConfigDACLMatches(uint16(control), true, projection.String(), expected.String())
+	runtime.KeepAlive(actual)
+	return matches
 }
 
 func openConfigPublicationLock(path string) (*os.File, error) {

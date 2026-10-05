@@ -53,9 +53,46 @@ func TestWindowsPrivateAtomicConfigPublication(t *testing.T) {
 		if errSecurity != nil {
 			t.Fatal(errSecurity)
 		}
-		if sd.String() != expected.String() {
+		if !hasPrivateConfigDACL(sd, expected) {
 			t.Fatalf("publication file lacks protected private DACL: %s", file)
 		}
+	}
+}
+
+func TestWindowsPrivateConfigDACLMetadata(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	expected, err := privateConfigSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, sddl string
+		want       bool
+	}{
+		{"exact", "D:P(A;;FA;;;" + sid + ")", true},
+		{"auto inherited metadata", "D:PAI(A;;FA;;;" + sid + ")", true},
+		{"owner and group metadata", "O:BAG:BAD:PAI(A;;FA;;;" + sid + ")", true},
+		{"unprotected", "D:(A;;FA;;;" + sid + ")", false},
+		{"null", "D:PNO_ACCESS_CONTROL", false},
+		{"empty", "D:P", false},
+		{"extra trustee", "D:P(A;;FA;;;" + sid + ")(A;;FA;;;WD)", false},
+		{"inherited ACE", "D:P(A;ID;FA;;;" + sid + ")", false},
+		{"inheritable ACE", "D:P(A;OI;FA;;;" + sid + ")", false},
+		{"partial access", "D:P(A;;FR;;;" + sid + ")", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actual, errParse := windows.SecurityDescriptorFromString(tc.sddl)
+			if errParse != nil {
+				t.Fatal(errParse)
+			}
+			if got := hasPrivateConfigDACL(actual, expected); got != tc.want {
+				t.Fatalf("private DACL = %t, want %t (descriptor: %s)", got, tc.want, actual.String())
+			}
+		})
 	}
 }
 

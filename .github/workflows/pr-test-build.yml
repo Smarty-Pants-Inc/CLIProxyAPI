@@ -41,6 +41,17 @@ jobs:
           for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
+      - name: Test private Windows DACL policy on Linux
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -v ./internal/config -run '^TestPrivateConfigDACLMatches$' -count=1 | tee "$RUNNER_TEMP/config-private-dacl.log"
+          grep -Fqx '=== RUN   TestPrivateConfigDACLMatches' "$RUNNER_TEMP/config-private-dacl.log"
+      - name: Compile Windows config publication regressions
+        timeout-minutes: 5
+        shell: bash
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/windows-amd64-config.test.exe" ./internal/config
       - name: Test full Go suite with explicit known-failure quarantine
         timeout-minutes: 20
         shell: bash
