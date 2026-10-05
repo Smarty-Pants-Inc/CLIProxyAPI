@@ -20,7 +20,8 @@ matches again.
 
 All in-repo file-backed config writers (full/SDK saves, raw YAML upload, nested
 scalar persistence and load-time management-key hashing) publish under an
-exclusive flock on `<canonical-config-path>.lock`. Canonicalization resolves
+exclusive platform lock on `<canonical-config-path>.lock` (Unix flock; Windows
+LockFileEx on byte zero). Canonicalization resolves
 symlinks, including parent directories, before selecting the sibling lock. This
 is the same lock name and protocol as the operator `cmd/config-publish` path in
 sibling PR #51. Never lock the config inode: atomic rename replaces that inode.
@@ -33,13 +34,22 @@ releasing the lock. There is no unlocked final-check/publication gap for
 cooperating writers. The directory must be writable. Single-file bind mounts or
 other non-renameable destinations fail; there is no in-place/truncating fallback.
 The watcher watches the canonical parent directory, not the replaceable config
-inode. It retains the triggering hash after runtime apply instead of marking a
-later reread of disk observed; a newer publication remains eligible for reload.
+inode. It parses the same captured bytes it hashes, invalidates the prior
+observation before apply, and records only those bytes after successful apply.
+The final equality check and record share the publication lock; mismatches or
+failures leave the revision unrecorded, including a concurrent revert. It never
+marks a later disk reread observed. Reload applications are serialized.
 Failed private staging files may remain for diagnosis. A failure after rename
 (such as directory fsync failure) can mean bytes were published; reload before
-retrying. Windows publication is refused pending durable native hosted validation.
+retrying. On Windows, staging and lock handles are created with a protected
+current-user-only native DACL; the resulting DACL is checked before secret bytes
+are written. Native MoveFileEx uses REPLACE_EXISTING and WRITE_THROUGH after
+staging-file Sync. It never allows copy-across-volume or truncation fallback.
+Failure to create/verify private security or acquire the native lock refuses
+publication. Native Windows regressions are registered in the existing Windows
+release matrix; Linux cross-compilation does not substitute for that execution.
 
-External writer contract: take the same canonical sibling exclusive flock
+External writer contract: take the same canonical sibling exclusive platform lock
 before reading the current revision and hold it through publication and directory
 fsync. Use a source-snapshot CAS when replacing an edited snapshot. Direct editor,
 `cp`, or `sed -i` writes to the live file without the lock are unsupported; an
@@ -59,6 +69,20 @@ save paths return a fixed secret-free HTTP 409 for `ErrStaleConfig`. They do not
 roll back mutations already made to handler memory. Plugin install/delete can
 also have changed plugin files before a config conflict. Refusal of a config save
 is not complete-operation rollback.
+
+## Compose directory migration
+
+The shipped Compose file mounts `${CLI_PROXY_CONFIG_DIR:-./config}` at
+`/CLIProxyAPI/config` and selects `/CLIProxyAPI/config/config.yaml` using
+`--config`. Provision the directory and put the configuration inside it before
+starting the deployment. Keep it restricted to the deployment identity; that
+identity must be able to create the stable lock and owner-private staging files.
+`CLI_PROXY_CONFIG_PATH` is no longer used by the shipped Compose file.
+
+Do not bind-mount only the YAML file: plaintext management-key initialization
+requires atomic hash persistence, and a mounted file cannot be replaced using
+rename. Already-bcrypt and empty management keys remain supported. This is a
+deployment migration, not permission to use lock-ignoring live editors.
 
 ## Remaining scope of smarty-dev#3101
 

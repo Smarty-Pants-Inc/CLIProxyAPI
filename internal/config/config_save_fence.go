@@ -56,6 +56,24 @@ func writeConfigRevisionWithRead(path string, data []byte, expected configSource
 	})
 }
 
+// RecordConfigObservation records an applied source snapshot only while the
+// cooperating publication boundary proves it is still current. The callback
+// must only update observer metadata; it must not publish configuration.
+func RecordConfigObservation(path string, source []byte, record func()) error {
+	expected := sourceRevision(source)
+	return withConfigPublicationLock(path, func(path string) error {
+		current, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !expected.matches(current) {
+			return ErrStaleConfig
+		}
+		record()
+		return nil
+	})
+}
+
 // WriteConfigAtomic is an authoritative raw replacement, not a snapshot save.
 // It shares the lock and atomic publication protocol with revision-checked saves.
 func WriteConfigAtomic(path string, data []byte) error {
@@ -93,7 +111,7 @@ func withConfigPublicationLock(path string, fn func(string) error) error {
 	if err != nil {
 		return err
 	}
-	gate, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	gate, err := openConfigPublicationLock(path + ".lock")
 	if err != nil {
 		return err
 	}
@@ -115,7 +133,7 @@ func withConfigPublicationLock(path string, fn func(string) error) error {
 
 func publishConfigLocked(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	file, err := os.CreateTemp(dir, ".config-*.tmp")
+	file, err := createConfigPublicationStage(dir)
 	if err != nil {
 		return err
 	}
@@ -139,7 +157,7 @@ func publishConfigLocked(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(name, path); err != nil {
+	if err = replaceConfigPublication(name, path); err != nil {
 		return fmt.Errorf("atomic config publication refused; use a writable config directory (not a single-file bind mount): %w", err)
 	}
 	return syncConfigPublicationDir(dir)

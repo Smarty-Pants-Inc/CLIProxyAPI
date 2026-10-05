@@ -3,6 +3,7 @@
 package watcher
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -49,7 +50,14 @@ func (w *Watcher) ReloadConfigIfChanged() {
 }
 
 func (w *Watcher) reloadConfigIfChanged() {
-	data, err := os.ReadFile(w.configPath)
+	w.reloadConfigIfChangedWithRead(os.ReadFile)
+}
+
+// A per-call read seam allows deterministic observation/publication tests.
+func (w *Watcher) reloadConfigIfChangedWithRead(read func(string) ([]byte, error)) {
+	w.configApplyMu.Lock()
+	defer w.configApplyMu.Unlock()
+	data, err := read(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
 		return
@@ -70,23 +78,45 @@ func (w *Watcher) reloadConfigIfChanged() {
 		return
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
-	if w.reloadConfig() {
-		// Do not mark a later publication observed by rereading after runtime
-		// apply. A writer may have changed disk while the callback was running.
-		// Keeping the triggering hash is conservative: load-time hashing or a
-		// concurrent publication remains eligible for the next reload event.
-		w.clientsMutex.Lock()
-		w.lastConfigHash = newHash
-		w.clientsMutex.Unlock()
+	// Once apply begins, a prior observation may no longer describe runtime.
+	// Clear it first so a concurrent revert cannot be skipped after apply.
+	w.clientsMutex.Lock()
+	w.lastConfigHash = ""
+	w.clientsMutex.Unlock()
+	if w.reloadConfig(data) {
+		// A publication during apply invalidates this observation. Leave the
+		// revision unrecorded so the newer event is retried.
+		current, errCurrent := read(w.configPath)
+		if errCurrent != nil || !bytes.Equal(current, data) {
+			log.Debug("config changed during reload; leaving revision unrecorded")
+			return
+		}
+		// Close the final read/record gap under the same stable lock as
+		// cooperating writers. Never assign the hash of a later disk reread.
+		errRecord := config.RecordConfigObservation(w.configPath, data, func() {
+			w.clientsMutex.Lock()
+			w.lastConfigHash = newHash
+			w.clientsMutex.Unlock()
+		})
+		if errRecord != nil {
+			log.Debug("config observation invalidated; leaving revision unrecorded")
+			return
+		}
 		w.persistConfigAsync()
 	}
 }
 
-func (w *Watcher) reloadConfig() bool {
+func (w *Watcher) reloadConfig(snapshots ...[]byte) bool {
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)
 
-	newConfig, errLoadConfig := config.LoadConfig(w.configPath)
+	var newConfig *config.Config
+	var errLoadConfig error
+	if len(snapshots) > 0 {
+		newConfig, errLoadConfig = config.LoadConfigBytes(snapshots[0], w.configPath, false)
+	} else {
+		newConfig, errLoadConfig = config.LoadConfig(w.configPath)
+	}
 	if errLoadConfig != nil {
 		log.Errorf("failed to reload config: %v", errLoadConfig)
 		return false
