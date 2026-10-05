@@ -66,6 +66,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	}
 
 	oauthServer := codex.NewOAuthServer(callbackPort)
+	oauthServer.SetExpectedState(state)
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
 			return nil, codex.NewAuthenticationError(codex.ErrPortInUse, err)
