@@ -55,6 +55,20 @@ func TestPluginConfigRoutesBoundJSONBeforeDecoding(t *testing.T) {
 	}
 }
 
+func TestPluginInstallVersionBodyBoundBeforeRead(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/plugins/test-plugin/install", nil)
+	body := &configCountingBody{Reader: strings.NewReader(`{"version":"` + strings.Repeat("x", managementBodyLimit) + `"}`)}
+	c.Request.Body = body
+	if _, err := pluginInstallRequestedVersion(c); err == nil {
+		t.Error("over-limit install body accepted")
+	}
+	if body.bytes > managementBodyLimit+1 {
+		t.Fatalf("unbounded install read: %d", body.bytes)
+	}
+}
+
 func TestManagementRawConfigBodyBoundBeforeRead(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)

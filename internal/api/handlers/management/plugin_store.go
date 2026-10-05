@@ -452,7 +452,7 @@ func pluginInstallRequestedVersion(c *gin.Context) (string, error) {
 	if c == nil || c.Request == nil || c.Request.Body == nil || c.Request.Body == http.NoBody {
 		return requestedVersion, nil
 	}
-	body, errRead := io.ReadAll(c.Request.Body)
+	body, errRead := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, managementBodyLimit))
 	if errRead != nil {
 		return "", fmt.Errorf("read install request: %w", errRead)
 	}
