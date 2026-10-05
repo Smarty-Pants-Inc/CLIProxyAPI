@@ -215,6 +215,9 @@ func (h *Handler) GetPluginConfig(c *gin.Context) {
 
 // PatchPluginEnabled updates plugins.configs.<id>.enabled without touching plugins.enabled.
 func (h *Handler) PatchPluginEnabled(c *gin.Context) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	id, okID := pluginIDFromRequest(c)
 	if !okID {
 		return
@@ -517,6 +520,9 @@ func pluginIDFromRequest(c *gin.Context) (string, bool) {
 }
 
 func readPluginConfigObject(c *gin.Context) (map[string]any, bool) {
+	if !prepareManagementBody(c) {
+		return nil, false
+	}
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.UseNumber()
 	var body map[string]any
