@@ -6,6 +6,17 @@ and atomic replacement. All cooperating writers must use these entry points;
 editing the live file with an editor, `cp`, or `sed -i` bypasses coordination.
 The directory must be writable so the lock and staging files can be created.
 
+On Linux, the sibling lock is kept at `0600` and owned by the config
+file's owner/group, independently of which cooperating writer creates it first.
+A privileged container writer retains that host identity on the lock before
+acquiring it; a host-first lock keeps the same identity when the container writes.
+The lock inode is never unlinked or replaced, even during an ownership repair.
+The host operator must own the config, or use a deployment identity authorized
+to preserve that ownership. If a legacy root-owned lock prevents the host from
+opening it, a fixed privileged writer will repair it on its next publication,
+or a deployment administrator can adjust that existing inode's owner/group to
+match the config. Do not delete/recreate the lock or make it world-writable.
+
 ## Operator workflow
 
 Build the entry point from the repository root:

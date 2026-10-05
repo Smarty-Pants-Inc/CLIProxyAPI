@@ -65,7 +65,7 @@ func withConfigFileLockContext(ctx context.Context, configFile string, fn func(s
 	if err != nil {
 		return err
 	}
-	lockFile, err := os.OpenFile(configFile+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lockFile, err := openConfigFileLock(configFile + ".lock")
 	if err != nil {
 		return err
 	}
@@ -74,6 +74,13 @@ func withConfigFileLockContext(ctx context.Context, configFile string, fn func(s
 			log.WithError(errClose).Error("failed to close config lock")
 		}
 	}()
+	info, errStat := os.Stat(configFile)
+	if errStat != nil && !os.IsNotExist(errStat) {
+		return errStat
+	}
+	if err = secureConfigLockIdentity(lockFile, info); err != nil {
+		return err
+	}
 	if err = lockConfigFileContext(ctx, lockFile); err != nil {
 		return err
 	}
