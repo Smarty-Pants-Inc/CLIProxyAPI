@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"golang.org/x/sys/unix"
 )
+
+type observedConfigLockContext struct {
+	context.Context
+	queried chan struct{}
+	once    sync.Once
+}
+
+func (c *observedConfigLockContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.queried) })
+	return c.Context.Done()
+}
 
 func TestCanceledConfigMutationDoesNotPublishAfterFileLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -52,29 +64,16 @@ func TestCanceledConfigMutationDoesNotPublishAfterFileLock(t *testing.T) {
 	defer cancel()
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPut, "/debug", strings.NewReader(`{"value":true}`)).WithContext(ctx)
+	waiting := &observedConfigLockContext{Context: ctx, queried: make(chan struct{})}
+	c.Request = httptest.NewRequest(http.MethodPut, "/debug", strings.NewReader(`{"value":true}`)).WithContext(waiting)
 	done := make(chan struct{})
 	go func() { defer close(done); h.PutDebug(c) }()
-	// Observe the mutation owning h.mu while the external publication lock is held.
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	queued := false
-	timeout := time.NewTimer(2 * time.Second)
-	defer timeout.Stop()
-	for !queued {
-		if h.mu.TryLock() {
-			h.mu.Unlock()
-		} else {
-			queued = true
-			break
-		}
-		select {
-		case <-ticker.C:
-		case <-timeout.C:
-			release()
-			<-done
-			t.Fatal("mutation did not queue at file lock")
-		}
+	// Done is consulted only by the cancellation-aware held-lock wait. This
+	// proves cancellation occurs after acquisition was actually attempted.
+	select {
+	case <-waiting.queried:
+	case <-time.After(2 * time.Second):
+		t.Error("publication lock wait did not observe request ownership")
 	}
 	cancel()
 	select {
