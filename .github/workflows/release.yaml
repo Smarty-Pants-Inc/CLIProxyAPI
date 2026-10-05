@@ -134,7 +134,7 @@ jobs:
       - name: Test native Windows config publication
         if: runner.os == 'Windows'
         shell: bash
-        run: go test -v ./internal/config -run '^TestWindows(ConfigPublicationLockExcludesOtherHandle|PrivateAtomicConfigPublication|AtomicPublicationRefusesReadOnlyDestination)$' -count=1
+        run: go test -v ./internal/config -run '^TestWindows(ConfigPublicationLockExcludesOther(Handle|Process)|PrivateAtomicConfigPublication|AtomicPublicationRefusesReadOnlyDestination)$' -count=1
       - name: Refresh models catalog
         shell: bash
         run: bash .github/scripts/refresh-model-catalogs.sh

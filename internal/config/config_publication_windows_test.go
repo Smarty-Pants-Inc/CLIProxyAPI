@@ -4,6 +4,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -39,7 +40,11 @@ func TestWindowsPrivateAtomicConfigPublication(t *testing.T) {
 	if err != nil || cfg.RequestRetry != 4 {
 		t.Fatalf("raw publication: %v", err)
 	}
-	expected, err := privateConfigSecurityDescriptor()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + user.User.Sid.String() + ")")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,13 +85,59 @@ func TestWindowsAtomicPublicationRefusesReadOnlyDestination(t *testing.T) {
 	}
 }
 
+func TestWindowsConfigPublicationLockExcludesOtherProcess(t *testing.T) {
+	if path := os.Getenv("WINDOWS_CONFIG_LOCK_CHILD"); path != "" {
+		file, err := os.OpenFile(path, os.O_RDWR, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if errClose := file.Close(); errClose != nil {
+				t.Error(errClose)
+			}
+		}()
+		err = windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, new(windows.Overlapped))
+		if err != windows.ERROR_LOCK_VIOLATION {
+			t.Fatalf("child lock = %v, want lock violation", err)
+		}
+		return
+	}
+	dir, err := os.MkdirTemp("", "config-windows-process-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
+	if err = lockConfigPublication(file); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if errUnlock := unlockConfigPublication(file); errUnlock != nil {
+			t.Error(errUnlock)
+		}
+	}()
+	child := exec.Command(os.Args[0], "-test.run=^TestWindowsConfigPublicationLockExcludesOtherProcess$")
+	child.Env = append(os.Environ(), "WINDOWS_CONFIG_LOCK_CHILD="+path)
+	if output, errRun := child.CombinedOutput(); errRun != nil {
+		t.Fatalf("child process: %v: %s", errRun, output)
+	}
+}
+
 func TestWindowsConfigPublicationLockExcludesOtherHandle(t *testing.T) {
 	dir, err := os.MkdirTemp("", "config-windows-lock-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "config.yaml.lock")
-	first, err := openConfigPublicationLock(path)
+	first, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +146,7 @@ func TestWindowsConfigPublicationLockExcludesOtherHandle(t *testing.T) {
 			t.Error(errClose)
 		}
 	}()
-	second, err := openConfigPublicationLock(path)
+	second, err := os.OpenFile(path, os.O_RDWR, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
