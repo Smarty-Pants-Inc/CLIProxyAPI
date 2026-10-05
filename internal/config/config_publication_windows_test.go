@@ -44,17 +44,17 @@ func TestWindowsPrivateAtomicConfigPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + user.User.Sid.String() + ")")
+	expected, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "D:P(A;;FA;;;" + user.User.Sid.String() + ")")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, file := range []string{path, path + ".lock"} {
-		sd, errSecurity := windows.GetNamedSecurityInfo(file, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		sd, errSecurity := windows.GetNamedSecurityInfo(file, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if errSecurity != nil {
 			t.Fatal(errSecurity)
 		}
 		if !hasPrivateConfigDACL(sd, expected) {
-			t.Fatalf("publication file lacks protected private DACL: %s", file)
+			t.Fatalf("publication file lacks current-user owner and protected private DACL: %s", file)
 		}
 	}
 }
@@ -73,9 +73,15 @@ func TestWindowsPrivateConfigDACLMetadata(t *testing.T) {
 		name, sddl string
 		want       bool
 	}{
-		{"exact", "D:P(A;;FA;;;" + sid + ")", true},
-		{"auto inherited metadata", "D:PAI(A;;FA;;;" + sid + ")", true},
-		{"owner and group metadata", "O:BAG:BAD:PAI(A;;FA;;;" + sid + ")", true},
+		{"exact", "O:" + sid + "D:P(A;;FA;;;" + sid + ")", true},
+		{"auto inherited metadata", "O:" + sid + "D:PAI(A;;FA;;;" + sid + ")", true},
+		{"matching owner and group metadata", "O:" + sid + "G:BAD:PAI(A;;FA;;;" + sid + ")", true},
+		{"Administrators owner", "O:BAG:BAD:PAI(A;;FA;;;" + sid + ")", false},
+		{"another-user owner", "O:S-1-5-21-1-2-3-1009D:P(A;;FA;;;" + sid + ")", false},
+		{"missing owner", "G:BAD:P(A;;FA;;;" + sid + ")", false},
+		{"wrong user ACE", "D:P(A;;FA;;;S-1-5-21-1-2-3-1009)", false},
+		{"system trustee", "D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)", false},
+		{"deny ACE", "D:P(D;;FA;;;" + sid + ")", false},
 		{"unprotected", "D:(A;;FA;;;" + sid + ")", false},
 		{"null", "D:PNO_ACCESS_CONTROL", false},
 		{"empty", "D:P", false},
@@ -85,7 +91,13 @@ func TestWindowsPrivateConfigDACLMetadata(t *testing.T) {
 		{"partial access", "D:P(A;;FR;;;" + sid + ")", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			actual, errParse := windows.SecurityDescriptorFromString(tc.sddl)
+			sddl := tc.sddl
+			// All DACL refusal cases have a matching owner so they still test
+			// the DACL, rather than failing early on missing ownership.
+			if len(sddl) > 0 && sddl[0] == 'D' {
+				sddl = "O:" + sid + sddl
+			}
+			actual, errParse := windows.SecurityDescriptorFromString(sddl)
 			if errParse != nil {
 				t.Fatal(errParse)
 			}

@@ -41,13 +41,14 @@ jobs:
           for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
-      - name: Test private Windows DACL policy on Linux
+      - name: Test private Windows owner and DACL policy on Linux
         timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
-          go test -race -v ./internal/config -run '^TestPrivateConfigDACLMatches$' -count=1 | tee "$RUNNER_TEMP/config-private-dacl.log"
+          go test -race -v ./internal/config -run '^TestPrivateConfig(DACLMatches|OwnerAndDACLMatches)$' -count=1 | tee "$RUNNER_TEMP/config-private-dacl.log"
           grep -Fqx '=== RUN   TestPrivateConfigDACLMatches' "$RUNNER_TEMP/config-private-dacl.log"
+          grep -Fqx '=== RUN   TestPrivateConfigOwnerAndDACLMatches' "$RUNNER_TEMP/config-private-dacl.log"
       - name: Compile Windows config publication regressions
         timeout-minutes: 5
         shell: bash

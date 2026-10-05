@@ -21,7 +21,8 @@ func privateConfigSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	if err != nil {
 		return nil, err
 	}
-	return windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + user.User.Sid.String() + ")")
+	sid := user.User.Sid.String()
+	return windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")")
 }
 
 func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
@@ -35,22 +36,30 @@ func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
 	}
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
 	// No FILE_SHARE_DELETE: an open stable lock cannot be replaced underneath
-	// another cooperating publisher. Existing locks are secured by handle.
+	// another cooperating publisher. Existing locks must already have our owner.
 	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, &sa, disposition, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	runtime.KeepAlive(sd)
 	if err != nil {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(handle), path)
-	dacl, _, err := sd.DACL()
+	// Creation establishes ownership through the security attributes. Never
+	// repair a pre-existing file's incompatible owner, even if its DACL matches.
+	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err == nil && !hasPrivateConfigOwner(actual, sd) {
+		err = fmt.Errorf("config file owner is not the current user")
+	}
+	var dacl *windows.ACL
+	if err == nil {
+		dacl, _, err = sd.DACL()
+	}
 	if err == nil {
 		err = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 	}
 	if err == nil {
-		var actual *windows.SECURITY_DESCRIPTOR
-		actual, err = windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		actual, err = windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if err == nil && !hasPrivateConfigDACL(actual, sd) {
-			err = fmt.Errorf("protected private config DACL was not established")
+			err = fmt.Errorf("current-user owner and protected private config DACL were not established")
 		}
 	}
 	runtime.KeepAlive(sd)
@@ -65,9 +74,13 @@ func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
 
 // hasPrivateConfigDACL validates the actual access policy, not the whole SDDL
 // representation. GetSecurityInfo can return auto-inheritance bookkeeping that
-// differs from the input template. Owner/group fields are not DACL grants.
+// differs from the input template. The owner must still match the current user;
+// group and auto-inheritance bookkeeping are not additional DACL grants.
 func hasPrivateConfigDACL(actual, expected *windows.SECURITY_DESCRIPTOR) bool {
 	if actual == nil || expected == nil || !actual.IsValid() || !expected.IsValid() {
+		return false
+	}
+	if !hasPrivateConfigOwner(actual, expected) {
 		return false
 	}
 	control, _, err := actual.Control()
@@ -90,9 +103,44 @@ func hasPrivateConfigDACL(actual, expected *windows.SECURITY_DESCRIPTOR) bool {
 	if err = projection.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		return false
 	}
-	matches := privateConfigDACLMatches(uint16(control), true, projection.String(), expected.String())
+	expectedDACL, _, err := expected.DACL()
+	if err != nil || expectedDACL == nil {
+		return false
+	}
+	expectedProjection, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return false
+	}
+	if err = expectedProjection.SetDACL(expectedDACL, true, false); err != nil {
+		return false
+	}
+	if err = expectedProjection.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		return false
+	}
+	owner, _, err := actual.Owner()
+	if err != nil || owner == nil {
+		return false
+	}
+	expectedOwner, _, err := expected.Owner()
+	if err != nil || expectedOwner == nil {
+		return false
+	}
+	matches := privateConfigOwnerAndDACLMatches(uint16(control), true, owner.String(), expectedOwner.String(), projection.String(), expectedProjection.String())
 	runtime.KeepAlive(actual)
 	return matches
+}
+
+// Missing ownership or an API error is a refusal, not harmless metadata.
+func hasPrivateConfigOwner(actual, expected *windows.SECURITY_DESCRIPTOR) bool {
+	if actual == nil || expected == nil || !actual.IsValid() || !expected.IsValid() {
+		return false
+	}
+	owner, _, err := actual.Owner()
+	if err != nil || owner == nil {
+		return false
+	}
+	user, _, err := expected.Owner()
+	return err == nil && user != nil && owner.Equals(user)
 }
 
 func openConfigPublicationLock(path string) (*os.File, error) {
