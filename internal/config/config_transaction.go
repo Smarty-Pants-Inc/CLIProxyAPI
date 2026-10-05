@@ -134,7 +134,10 @@ func atomicWriteConfigWithRename(configFile string, data []byte, rename func(str
 	}
 	tmpName := tmp.Name()
 	// Failed private staging files are retained for diagnosis, never unlinked.
-	if err = secureConfigReplacement(tmp, info); err != nil {
+	if err = secureConfigMAC(tmp, configFile, info); err == nil {
+		err = secureConfigReplacement(tmp, info)
+	}
+	if err != nil {
 		_ = tmp.Close()
 		return err
 	}
