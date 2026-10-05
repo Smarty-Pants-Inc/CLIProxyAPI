@@ -28,7 +28,7 @@ func TestApplyCustomHeadersFromAttrs_StaticHeaders(t *testing.T) {
 
 // smarty-dev#3203 (F27): a client-expanded Host must never set the egress authority.
 func TestApplyCustomHeadersFromAttrs_DynamicHostDropped(t *testing.T) {
-	for _, val := range []string{"$X-Route", "$CPA-SESSION-ID", "t-$CPA-SESSION-ID.example"} {
+	for _, val := range []string{"$X-Route", "$CPA-SESSION-ID", "t-$CPA-SESSION-ID.example", "t-$cpa-session-id.example"} {
 		req := httptest.NewRequest(http.MethodPost, "https://api.example.com", nil)
 		ctx := WithSessionID(context.Background(), "other-tenant")
 		req = req.WithContext(ctx)
@@ -39,6 +39,16 @@ func TestApplyCustomHeadersFromAttrs_DynamicHostDropped(t *testing.T) {
 		if got := req.Header.Get("X-Route"); got != "other-tenant.example" {
 			t.Errorf("%s: non-Host dynamic header X-Route = %q, want expanded", val, got)
 		}
+	}
+}
+
+// A static Host with an embedded literal "$" is not expanded, so it is kept.
+func TestApplyCustomHeadersFromAttrs_StaticHostWithLiteralDollarKept(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.com", nil)
+	req = req.WithContext(WithSessionID(context.Background(), "other-tenant"))
+	ApplyCustomHeadersFromAttrs(req, map[string]string{"header:Host": "tenant-$literal.example"}, http.Header{"Literal.example": {"evil.example"}})
+	if req.Host != "tenant-$literal.example" {
+		t.Errorf("Host = %q, want tenant-$literal.example", req.Host)
 	}
 }
 

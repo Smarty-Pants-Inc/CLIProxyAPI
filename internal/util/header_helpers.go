@@ -154,8 +154,9 @@ func extractCustomHeaders(attrs map[string]string, clientHeaders http.Header, ct
 		}
 		// The egress authority comes only from the credential's static config:
 		// a client-expanded Host would route the credential to a client-chosen
-		// virtual host (smarty-dev#3203, F27). Drop every dynamic Host form.
-		if http.CanonicalHeaderKey(name) == "Host" && strings.Contains(val, "$") {
+		// virtual host (smarty-dev#3203, F27). Drop exactly the forms expanded
+		// below (a leading "$" or any $CPA-SESSION-ID); keep a static literal "$".
+		if http.CanonicalHeaderKey(name) == "Host" && (strings.HasPrefix(val, "$") || strings.Contains(strings.ToUpper(val), "$CPA-SESSION-ID")) {
 			continue
 		}
 		if strings.HasPrefix(val, "$") && strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(val, "$")), "CPA-SESSION-ID") {
