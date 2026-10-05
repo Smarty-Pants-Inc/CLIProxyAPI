@@ -12,11 +12,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// A directory default ACL must never make the replacement readable to a named user.
+// A directory default ACL must never make an owner-only replacement readable to
+// a named user. The separate restricted-group regression requires retention or refusal.
 func TestPublicationNeverWidensAccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("debug: false\n"), 0640); err != nil {
+	if err := os.WriteFile(path, []byte("debug: false\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Stat(path)

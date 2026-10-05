@@ -35,5 +35,8 @@ func preserveConfigReadAccess(file *os.File, original os.FileInfo) error {
 			}
 		}
 	}
+	if named && original != nil && original.Mode().Perm()&0040 != 0 {
+		return fmt.Errorf("publication refused: cannot preserve restricted group reader without enabling inherited named POSIX ACL grants")
+	}
 	return file.Chmod(replacementConfigMode(original, named))
 }
