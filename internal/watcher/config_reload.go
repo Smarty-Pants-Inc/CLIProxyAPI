@@ -88,6 +88,9 @@ func (w *Watcher) reloadConfig() (applied bool) {
 		}
 		if !applied && staged {
 			w.clientsMutex.Lock()
+			// Runtime callbacks may have applied partial side effects. Neither the
+			// attempted bytes nor the previous bytes are an observed runtime state.
+			w.lastConfigHash = ""
 			if w.config == attemptedConfig {
 				w.config = previousConfig
 				w.oldConfigYaml = previousYAML

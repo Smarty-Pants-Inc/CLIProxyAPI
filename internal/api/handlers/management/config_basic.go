@@ -128,8 +128,14 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
 		return
 	}
-	if _, errValidate := config.ParseConfigBytes(body); errValidate != nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errValidate.Error()})
+	prepared, errPrepare := config.PrepareConfigPublication(config.NormalizeCommentIndentation(body))
+	if errPrepare != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errPrepare.Error()})
+		return
+	}
+	newCfg, errParse := config.ParseConfigBytes(prepared)
+	if errParse != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errParse.Error()})
 		return
 	}
 	h.mu.Lock()
@@ -137,7 +143,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	if !managementRequestActive(c) {
 		return
 	}
-	version, errWrite := config.AtomicWriteConfigCAS(h.configFilePath, config.NormalizeCommentIndentation(body), expectedVersion)
+	version, errWrite := config.AtomicWriteConfigCAS(h.configFilePath, prepared, expectedVersion)
 	if errWrite != nil {
 		if errWrite == config.ErrConfigConflict {
 			c.JSON(http.StatusConflict, gin.H{"error": "config_changed", "message": "config changed since it was read"})
@@ -146,15 +152,11 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		}
 		return
 	}
-	h.configVersion = version
-	// Reload into handler to keep memory in sync
-	newCfg, err := config.LoadConfig(h.configFilePath)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
-		return
-	}
+	// All fallible parsing and key hashing happened before publication. Install
+	// the prepared snapshot and its published CAS authority as one locked pair.
+	newCfg.ConfigFileVersion = version
 	h.cfg = newCfg
-	h.configVersion = newCfg.ConfigFileVersion
+	h.configVersion = version
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
