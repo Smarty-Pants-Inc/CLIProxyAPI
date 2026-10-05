@@ -769,6 +769,29 @@ func (s *codexWebsocketSession) expireDisconnectHold(generation uint64) {
 	s.notifyUpstreamDisconnect(context.DeadlineExceeded)
 }
 
+// cancelDisconnectHold ends the decision wait for opts' execution session. The hold bounds only the
+// wait for the retry/final decision: once a fallback attempt starts, over WebSocket or HTTP, that
+// attempt's own lifecycle governs the downstream socket (CLIProxyAPI#64 security round 3).
+func (e *CodexWebsocketsExecutor) cancelDisconnectHold(opts cliproxyexecutor.Options) {
+	id := executionSessionIDFromOptions(opts)
+	if e == nil || id == "" {
+		return
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	store.mu.Lock()
+	sess := store.sessions[id]
+	store.mu.Unlock()
+	if sess == nil {
+		return
+	}
+	sess.connMu.Lock()
+	sess.stopDisconnectHoldLocked()
+	sess.connMu.Unlock()
+}
+
 func (s *codexWebsocketSession) stopDisconnectHoldLocked() {
 	if s.disconnectHold != nil {
 		s.disconnectHold.Stop()

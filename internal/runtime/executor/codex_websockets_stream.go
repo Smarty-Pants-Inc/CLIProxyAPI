@@ -417,7 +417,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				reporter.PublishFailure(ctx, wsErr)
 				if timeoutReached || !replaySafe {
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, timeout=%t replay_safe=%t; delivering in-stream", bufferedFrames, timeSinceStart, timeoutReached, replaySafe)
-					bootstrapTerminalErr = wsErr
+					bootstrapTerminalErr = markCodexQuotaRefusal(wsErr, payload)
 					break
 				}
 				if isCodexUsageLimitError(payload) {
@@ -461,7 +461,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					}
 					return nil, newCodexBootstrapOverloadErr(terminalBody)
 				}
-				bootstrapTerminalErr = streamErr
+				bootstrapTerminalErr = markCodexQuotaRefusal(streamErr, terminalBody)
 				break
 			}
 
@@ -737,7 +737,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
-				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
+				_ = send(cliproxyexecutor.StreamChunk{Err: markCodexQuotaRefusal(wsErr, payload)})
 				return
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
@@ -755,7 +755,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
 				reporter.PublishFailure(ctx, streamErr)
-				_ = send(cliproxyexecutor.StreamChunk{Err: streamErr})
+				_ = send(cliproxyexecutor.StreamChunk{Err: markCodexQuotaRefusal(streamErr, terminalBody)})
 				return
 			}
 

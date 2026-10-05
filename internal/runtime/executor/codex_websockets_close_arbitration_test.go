@@ -39,6 +39,7 @@ type arbitrationExecutor struct {
 	lifecycle    *arbitrationLifecycle
 	decisionGate <-chan struct{}
 	session      chan *codexWebsocketSession
+	auto         *CodexAutoExecutor
 }
 
 func (e *arbitrationExecutor) ExecuteStream(ctx context.Context, a *auth.Auth, req execution.Request, opts execution.Options) (*execution.StreamResult, error) {
@@ -75,10 +76,27 @@ func (e *arbitrationExecutor) ExecuteStream(ctx context.Context, a *auth.Auth, r
 			}
 		}
 	}
+	if e.auto != nil {
+		return e.auto.ExecuteStream(ctx, a, req, opts)
+	}
 	return e.CodexWebsocketsExecutor.ExecuteStream(ctx, a, req, opts)
 }
 
+// arbitrationOptions extends the harness: snapshot is a frame the primary sends between
+// response.created and its refusal; httpStarted/httpRelease make the secondary an HTTP/SSE
+// credential (websockets off) whose response waits for the release.
+type arbitrationOptions struct {
+	snapshot    string
+	httpStarted chan<- struct{}
+	httpRelease <-chan struct{}
+}
+
 func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan struct{}) (*websocket.Conn, *arbitrationExecutor, *atomic.Int32) {
+	t.Helper()
+	return arbitrationClientWith(t, refusal, fallback, gate, arbitrationOptions{})
+}
+
+func arbitrationClientWith(t *testing.T, refusal string, fallback bool, gate <-chan struct{}, o arbitrationOptions) (*websocket.Conn, *arbitrationExecutor, *atomic.Int32) {
 	t.Helper()
 	model := "arbitration-" + strings.ReplaceAll(t.Name(), "/", "-")
 	rawTerminal, isRaw := strings.CutPrefix(refusal, "raw:")
@@ -86,6 +104,14 @@ func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan 
 	refusal = strings.TrimPrefix(refusal, "explicit:")
 	attempts := &atomic.Int32{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			attempts.Add(1)
+			close(o.httpStarted)
+			<-o.httpRelease
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"replacement\",\"model\":%q,\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"full http answer\"}]}]}}\n\n", model)
+			return
+		}
 		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 		if err != nil {
 			t.Error(err)
@@ -97,6 +123,9 @@ func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan 
 		}
 		if r.Header.Get("Authorization") == "Bearer primary" {
 			_ = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.created","response":{"id":"primary","model":%q,"output":[]}}`, model)))
+			if o.snapshot != "" {
+				_ = c.WriteMessage(websocket.TextMessage, []byte(strings.ReplaceAll(o.snapshot, "$MODEL", model)))
+			}
 			terminal := fmt.Sprintf(`{"type":"response.failed","response":{"id":"primary","model":%q,"status":"failed","error":{"code":%q,"message":"original refusal"}}}`, model, refusal)
 			if explicitStatus {
 				terminal = fmt.Sprintf(`{"type":"error","status":429,"error":{"code":%q,"message":"original refusal"}}`, refusal)
@@ -120,6 +149,7 @@ func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan 
 	exec := &arbitrationExecutor{CodexWebsocketsExecutor: NewCodexWebsocketsExecutor(cfg), t: t,
 		lifecycle: &arbitrationLifecycle{done: make(chan struct{})}, decisionGate: gate, session: make(chan *codexWebsocketSession, 1)}
 	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.auto = &CodexAutoExecutor{httpExec: NewCodexExecutor(cfg), wsExec: exec.CodexWebsocketsExecutor}
 	t.Cleanup(func() { exec.CloseExecutionSession(auth.CloseAllExecutionSessionsID) })
 	manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
 	manager.SetConfig(cfg)
@@ -134,7 +164,7 @@ func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan 
 		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 		_, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive,
-			Attributes: map[string]string{"api_key": token, "base_url": upstream.URL, "websockets": "true"}, Metadata: map[string]any{"disable_cooling": false}})
+			Attributes: map[string]string{"api_key": token, "base_url": upstream.URL, "websockets": fmt.Sprint(i == 0 || o.httpStarted == nil)}, Metadata: map[string]any{"disable_cooling": false}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -313,5 +343,83 @@ func TestCodexWebsocketDisconnectHoldTimerAndStaleCallback(t *testing.T) {
 	case <-s.upstreamDisconnectCh:
 		t.Fatal("stale callback closed replacement session")
 	default:
+	}
+}
+
+// CLIProxyAPI#64 security round 3, P1 #1: an in_progress snapshot that already carries
+// output has reached the client, so a later quota refusal + close must not replay the
+// request on another credential. The client gets the refusal, then a close.
+func TestCodexWebsocketOutputSnapshotQuotaNoReplay(t *testing.T) {
+	snapshots := map[string]string{
+		"in_progress_server_tool": `{"type":"response.in_progress","response":{"id":"primary","model":"$MODEL","output":[{"id":"ws_1","type":"web_search_call","status":"in_progress"}]}}`,
+		"in_progress_text":        `{"type":"response.in_progress","response":{"id":"primary","model":"$MODEL","output":[{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"partial answer"}]}]}}`,
+	}
+	for name, snapshot := range snapshots {
+		for _, code := range []string{"usage_limit_reached", "insufficient_quota"} {
+			t.Run(name+"/"+code, func(t *testing.T) {
+				c, _, attempts := arbitrationClientWith(t, code, true, nil, arbitrationOptions{snapshot: snapshot})
+				var payload []byte
+				var err error
+				sawSnapshot := false
+				for {
+					_, payload, err = c.ReadMessage()
+					if err != nil || gjson.GetBytes(payload, "type").String() == "error" {
+						break
+					}
+					sawSnapshot = sawSnapshot || gjson.GetBytes(payload, "type").String() == "response.in_progress"
+				}
+				if !sawSnapshot {
+					t.Error("output snapshot did not reach the client before the refusal")
+				}
+				if err != nil || !strings.Contains(string(payload), code) {
+					t.Fatalf("refusal before close = %s, %v", payload, err)
+				}
+				if _, _, err := c.ReadMessage(); err == nil {
+					t.Fatal("refusal did not close downstream")
+				}
+				if attempts.Load() != 0 {
+					t.Fatalf("replayed on another credential after output reached the client: attempts=%d", attempts.Load())
+				}
+			})
+		}
+	}
+}
+
+// CLIProxyAPI#64 security round 3, P1 #2: the hold bounds only the wait for the decision.
+// Once the HTTP fallback has started, expiry of the old hold must not close the socket;
+// the client gets the fallback's full answer.
+func TestCodexWebsocketHTTPFallbackOutlivesDecisionHold(t *testing.T) {
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	c, exec, attempts := arbitrationClientWith(t, "usage_limit_reached", true, gate, arbitrationOptions{httpStarted: started, httpRelease: release})
+	var sess *codexWebsocketSession
+	select {
+	case sess = <-exec.session:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no teardown receipt")
+	}
+	sess.connMu.Lock()
+	hold := sess.disconnectHold
+	generation := sess.disconnectHoldGeneration
+	sess.connMu.Unlock()
+	if hold == nil {
+		t.Fatal("no decision hold while waiting for the decision")
+	}
+	close(gate)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTP fallback did not start")
+	}
+	// The fallback outlives the bound: fire the old timer's callback deterministically.
+	sess.expireDisconnectHold(generation)
+	close(release)
+	_, payload, err := c.ReadMessage()
+	if err != nil || gjson.GetBytes(payload, "response.id").String() != "replacement" || !strings.Contains(string(payload), "full http answer") {
+		t.Fatalf("HTTP fallback answer = %s, %v", payload, err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("fallback attempts = %d", attempts.Load())
 	}
 }

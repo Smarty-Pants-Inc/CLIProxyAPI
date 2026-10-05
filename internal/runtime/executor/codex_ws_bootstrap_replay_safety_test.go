@@ -298,3 +298,29 @@ func TestWSReplayUnsafeVerifiedExplicitStatus(t *testing.T) {
 	}
 	codexSSEReplayAssertQuota(t, streamErr, true, time.Hour)
 }
+
+// CLIProxyAPI#64 security round 3: a response.created/in_progress snapshot is judged by the
+// output it carries. Output closes the replay latch; an empty output list keeps it open.
+func TestWSReplaySnapshotOutputQuota(t *testing.T) {
+	for _, quota := range []string{"usage_limit_reached", "insufficient_quota"} {
+		for _, tc := range []struct {
+			name, snapshot string
+			secondary      int32
+		}{
+			{"in_progress_server_tool", `{"type":"response.in_progress","response":{"id":"resp_replay","model":"gpt-5.6-terra","output":[{"id":"ws_1","type":"web_search_call","status":"in_progress"}]}}`, 0},
+			{"created_server_tool", `{"type":"response.created","response":{"id":"resp_replay","model":"gpt-5.6-terra","output":[{"id":"ws_1","type":"web_search_call","status":"in_progress"}]}}`, 0},
+			{"in_progress_text", `{"type":"response.in_progress","response":{"id":"resp_replay","model":"gpt-5.6-terra","output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}}`, 0},
+			{"in_progress_empty_output", `{"type":"response.in_progress","response":{"id":"resp_replay","model":"gpt-5.6-terra","output":[]}}`, 1},
+		} {
+			t.Run(quota+"/"+tc.name, func(t *testing.T) {
+				terminal := fmt.Sprintf(`{"type":"response.failed","response":{"id":"resp_replay","status":"failed","error":{"code":%q,"message":"fixture quota exhausted"}}}`, quota)
+				fixture := WSReplayNewFixture(t, false, []string{WSReplayPreamble, tc.snapshot, terminal})
+				result, err := fixture.WSReplayExecute(t)
+				if err == nil && result != nil {
+					_, _ = drainChunks(result)
+				}
+				fixture.WSReplayAssertAttempts(t, tc.secondary)
+			})
+		}
+	}
+}

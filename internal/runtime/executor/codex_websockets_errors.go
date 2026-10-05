@@ -221,3 +221,12 @@ func closeHTTPResponseBody(resp *http.Response, logPrefix string) {
 		log.Errorf("%s: %v", logPrefix, errClose)
 	}
 }
+
+// markCodexQuotaRefusal marks a quota refusal so the downstream websocket client receives it
+// before the close, including after output was committed and replay is no longer allowed.
+func markCodexQuotaRefusal(err error, body []byte) error {
+	if err != nil && isCodexUsageLimitError(body) {
+		return codexWebsocketQuotaRefusal{err}
+	}
+	return err
+}
