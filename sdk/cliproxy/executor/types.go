@@ -27,6 +27,12 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// CompactionAffinityValidatorMetadataKey carries an optional func(authID string, payload []byte) error.
+// The Manager captures the request's local signer store; duplex executors invoke
+// the callback with the socket's actual auth and final payload before each write.
+// Absence preserves requests whose origin has no local compaction affinity.
+const CompactionAffinityValidatorMetadataKey = "compaction_affinity_validator"
+
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"
@@ -197,6 +203,10 @@ type WebSocketResponseObserver func(context.Context, WebSocketResponseEvent)
 type Options struct {
 	// Stream toggles streaming mode.
 	Stream bool
+	// StreamResultValidation opts into consumer acknowledgement via StreamResult.Complete.
+	// The consumer must acknowledge every returned stream before canceling its producer:
+	// true only after draining and validating all chunks; false on any abandonment.
+	StreamResultValidation bool
 	// Alt carries optional alternate format hint (e.g. SSE JSON key).
 	Alt string
 	// Headers are forwarded to the provider request builder.
@@ -264,6 +274,12 @@ type StreamResult struct {
 	Headers http.Header
 	// Chunks is the channel of streaming payload units.
 	Chunks <-chan StreamChunk
+	// Complete is an optional idempotent consumer acknowledgement, supplied only
+	// when Options.StreamResultValidation is true. Complete(false) synchronously
+	// retires the response's connection before returning; Complete(true) permits
+	// reuse only after a valid producer terminal boundary. Chunks closes before
+	// the producer waits for acknowledgement. Call before canceling the producer.
+	Complete func(accepted bool)
 }
 
 // StatusError represents an error that carries an HTTP-like status code.

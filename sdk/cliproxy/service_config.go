@@ -2,10 +2,14 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -29,13 +33,15 @@ type routingRuntimeState struct {
 	strategy                 string
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
+	statePath                string
+	statePathUnavailable     bool
 	sessionAffinitySubagents bool
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
 		strategy:                 "round-robin",
-		sessionAffinityTTL:       time.Hour,
+		sessionAffinityTTL:       coreauth.DefaultSessionAffinityTTL,
 		sessionAffinitySubagents: true,
 	}
 	if cfg == nil {
@@ -49,6 +55,22 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
+	if state.sessionAffinity && !cfg.Home.Enabled && strings.TrimSpace(cfg.AuthDir) != "" {
+		authDir, errResolve := util.ResolveAuthDir(cfg.AuthDir)
+		if errResolve == nil {
+			authDir, errResolve = filepath.Abs(authDir)
+		}
+		if errResolve == nil {
+			authDir, errResolve = resolveAffinityStateDir(authDir)
+		}
+		if errResolve != nil {
+			// Do not write runtime state to an unresolved or unintended directory.
+			log.WithError(errResolve).Error("failed to resolve session affinity state directory; routing will fail closed")
+			state.statePathUnavailable = true
+		} else {
+			state.statePath = filepath.Join(authDir, "session-affinity.state")
+		}
+	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -63,7 +85,29 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	return state
 }
 
-func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
+// resolveAffinityStateDir receives an absolute path. Resolve its longest existing
+// ancestor so creating missing directories cannot change the cache ownership key.
+func resolveAffinityStateDir(path string) (string, error) {
+	ancestor := path
+	missing := ""
+	for {
+		realDir, errReal := filepath.EvalSymlinks(ancestor)
+		if errReal == nil {
+			return filepath.Join(realDir, missing), nil
+		}
+		if !errors.Is(errReal, os.ErrNotExist) {
+			return "", errReal
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", errReal
+		}
+		missing = filepath.Join(filepath.Base(ancestor), missing)
+		ancestor = parent
+	}
+}
+
+func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCache) coreauth.Selector {
 	var selector coreauth.Selector
 	switch state.strategy {
 	case "weighted-round-robin":
@@ -75,10 +119,21 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	}
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
+		var initializationError error
+		if state.statePathUnavailable {
+			initializationError = errors.New("session affinity state directory is unavailable")
+		}
+		var sharedCache *coreauth.SessionCache
+		if len(cache) > 0 {
+			sharedCache = cache[0]
+		}
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-			Fallback:         selector,
-			TTL:              state.sessionAffinityTTL,
-			SubagentAffinity: &subagents,
+			Fallback:            selector,
+			TTL:                 state.sessionAffinityTTL,
+			StatePath:           state.statePath,
+			InitializationError: initializationError,
+			SubagentAffinity:    &subagents,
+			Cache:               sharedCache,
 		})
 	}
 	return selector
@@ -225,9 +280,33 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
+	// Adopt the builder-created cache before any replacement, including a switch
+	// to disabled affinity or Home. Never retarget an old cache: in-flight requests
+	// may still write to it after SetSelector stops the old selector.
+	if oldState := s.appliedRoutingState; oldState != nil && oldState.statePath != "" {
+		if oldSelector, ok := s.coreManager.Selector().(*coreauth.SessionAffinitySelector); ok {
+			if s.affinityCaches == nil {
+				s.affinityCaches = make(map[string]*coreauth.SessionCache)
+			}
+			if s.affinityCaches[oldState.statePath] == nil {
+				s.affinityCaches[oldState.statePath] = oldSelector.Cache()
+			}
+		}
+	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		var sharedCache *coreauth.SessionCache
+		if routingState.statePath != "" {
+			sharedCache = s.affinityCaches[routingState.statePath]
+		}
+		selector := newRoutingSelector(routingState, sharedCache)
+		if routingState.statePath != "" {
+			if s.affinityCaches == nil {
+				s.affinityCaches = make(map[string]*coreauth.SessionCache)
+			}
+			s.affinityCaches[routingState.statePath] = selector.(*coreauth.SessionAffinitySelector).Cache()
+		}
+		s.coreManager.SetSelector(selector)
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

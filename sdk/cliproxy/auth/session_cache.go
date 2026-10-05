@@ -2,6 +2,8 @@ package auth
 
 import (
 	"container/list"
+	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,7 @@ type sessionEntry struct {
 	authID    string
 	expiresAt time.Time
 	aliases   []string
+	protected bool
 }
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
@@ -30,6 +33,10 @@ type SessionCache struct {
 	ttl              time.Duration
 	stopCh           chan struct{}
 	stopOnce         sync.Once
+	selectorRefs     int
+	persistencePath  string
+	persistenceErr   error
+	persistenceDirty bool
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -103,6 +110,7 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 		return entry.authID, true
 	}
 	c.removeAliasGroupLocked(entry)
+	c.persistLocked()
 	return "", false
 }
 
@@ -122,11 +130,13 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	now := time.Now()
 	if !now.Before(entry.expiresAt) {
 		c.removeAliasGroupLocked(entry)
+		c.persistLocked()
 		return "", false
 	}
 
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
 	c.replaceAliasGroupsLocked(entry.authID, now.Add(c.ttl), aliases, entry)
+	c.persistLocked()
 	return entry.authID, true
 }
 
@@ -141,17 +151,139 @@ func (c *SessionCache) Set(sessionID, authID string) {
 
 // SetAliases binds multiple identifiers for one logical session to an auth ID.
 func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
+	_ = c.setAliases(authID, false, sessionIDs...)
+}
+
+// SetProtectedAliases atomically registers and protects one alias group, then
+// publishes one complete snapshot. Callers register each compaction digest as
+// its own group, separately from mutable routing aliases.
+func (c *SessionCache) SetProtectedAliases(authID string, sessionIDs ...string) error {
+	return c.setAliases(authID, true, sessionIDs...)
+}
+
+// SetProtectedBindings registers independent bindings in one synchronous snapshot.
+// Existing alias groups stay separate; unlike SetProtectedAliases, the supplied
+// identifiers do not become aliases of one another.
+func (c *SessionCache) SetProtectedBindings(ctx context.Context, authID string, sessionIDs ...string) error {
+	return c.mutateProtectedBindings(ctx, authID, false, sessionIDs...)
+}
+
+// touchProtectedBindings refreshes only live, protected evidence for this signer.
+func (c *SessionCache) touchProtectedBindings(ctx context.Context, authID string, sessionIDs ...string) error {
+	return c.mutateProtectedBindings(ctx, authID, true, sessionIDs...)
+}
+
+func (c *SessionCache) mutateProtectedBindings(ctx context.Context, authID string, requireExisting bool, sessionIDs ...string) error {
 	if c == nil || authID == "" {
-		return
+		return errors.New("session cache: requires cache and auth ID")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.persistenceErr != nil {
+		return c.persistenceErr
+	}
+	c.ensureInitializedLocked()
+	requested := mergeSessionAliases(nil, sessionIDs...)
+	if len(requested) == 0 {
+		return nil
+	}
+	now := time.Now()
+	previous := make(map[string]sessionEntry, len(requested))
+	planned := make(map[string]bool, len(requested))
+	groups := make([]sessionEntry, 0, len(requested))
+	retainedAliases := 0
+	// Preflight every conflict and the capacity of the complete batch before
+	// changing any group. Do not acknowledge a partially retained output event.
+	for _, key := range requested {
+		entry, exists := c.entries[key]
+		live := exists && now.Before(entry.expiresAt)
+		if requireExisting && (!live || entry.authID != authID || !entry.protected) {
+			return errors.New("session cache: signer binding unavailable")
+		}
+		if live && (entry.protected || hasCompactionSessionAlias(entry.aliases)) && entry.authID != authID {
+			return errors.New("session cache: protected alias account conflict")
+		}
+		aliases := []string{key}
+		if exists {
+			previous[entry.aliases[0]] = entry
+			if live {
+				aliases = entry.aliases
+			}
+		}
+		primary := aliases[0]
+		if planned[primary] {
+			continue
+		}
+		planned[primary] = true
+		retainedAliases += len(aliases)
+		groups = append(groups, sessionEntry{
+			authID: authID, expiresAt: now.Add(c.ttl),
+			aliases: append([]string(nil), aliases...), protected: true,
+		})
+	}
+	if c.maxEntries > 0 && retainedAliases > c.maxEntries {
+		return errors.New("session cache: registration not retained")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Remove all target groups first, then install them newest. Capacity may
+	// evict other groups, but cannot evict any part of this admitted batch.
+	for _, entry := range previous {
+		c.removeAliasGroupLocked(entry)
+	}
+	for _, group := range groups {
+		c.replaceAliasGroupsLocked(authID, group.expiresAt, group.aliases, group)
+	}
+	c.persistLocked()
+	if c.persistenceErr != nil {
+		return c.persistenceErr
+	}
+	now = time.Now()
+	for _, key := range requested {
+		entry, retained := c.entries[key]
+		if !retained || entry.authID != authID || !entry.protected || !now.Before(entry.expiresAt) {
+			return errors.New("session cache: registration not retained")
+		}
+	}
+	return nil
+}
+
+func (c *SessionCache) setAliases(authID string, protect bool, sessionIDs ...string) error {
+	if c == nil || authID == "" {
+		return errors.New("session cache: requires cache and auth ID")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.persistenceErr != nil {
+		return c.persistenceErr
+	}
 	c.ensureInitializedLocked()
 	now := time.Now()
+	requested := mergeSessionAliases(nil, sessionIDs...)
+	if len(requested) == 0 {
+		return errors.New("session cache: requires aliases")
+	}
 
-	aliases := mergeSessionAliases(nil, sessionIDs...)
-	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
-	for _, sessionID := range sessionIDs {
+	// Check every live group before changing memory or publishing a snapshot.
+	for _, sessionID := range requested {
+		if entry, ok := c.entries[sessionID]; ok && now.Before(entry.expiresAt) &&
+			(entry.protected || hasCompactionSessionAlias(entry.aliases)) && entry.authID != authID {
+			return errors.New("session cache: protected alias account conflict")
+		}
+	}
+	aliases := requested
+	previousGroups := make([]sessionEntry, 0, len(requested))
+	for _, sessionID := range requested {
 		entry, ok := c.entries[sessionID]
 		if !ok {
 			continue
@@ -164,13 +296,41 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 		aliases = mergeSessionAliases(aliases, entry.aliases...)
 	}
 	aliases = compactSessionAliases(aliases)
-	if len(aliases) == 0 {
-		return
+	if protect {
+		// Protection is supplied to replacement before any entry is installed.
+		previousGroups = append(previousGroups, sessionEntry{authID: authID, protected: true})
 	}
 	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, previousGroups...)
+	c.persistLocked()
+	if c.persistenceErr != nil {
+		return c.persistenceErr
+	}
+	for _, alias := range requested {
+		entry, ok := c.entries[alias]
+		if !ok || entry.authID != authID || !time.Now().Before(entry.expiresAt) || (protect && !entry.protected) {
+			return errors.New("session cache: registration not retained")
+		}
+	}
+	return nil
+}
+
+func hasCompactionSessionAlias(aliases []string) bool {
+	for _, alias := range aliases {
+		if strings.HasPrefix(alias, "compaction::") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, previousGroups ...sessionEntry) {
+	protected := hasCompactionSessionAlias(aliases)
+	for _, previous := range previousGroups {
+		if (previous.protected || hasCompactionSessionAlias(previous.aliases)) && previous.authID != authID {
+			return
+		}
+		protected = protected || previous.protected || hasCompactionSessionAlias(previous.aliases)
+	}
 	for _, previous := range previousGroups {
 		c.removeAliasGroupLocked(previous)
 	}
@@ -181,7 +341,8 @@ func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Ti
 	if existing, ok := c.groups[primaryKey]; ok {
 		c.removeAliasGroupLocked(existing)
 	}
-	entry := sessionEntry{authID: authID, expiresAt: expiresAt, aliases: append([]string(nil), aliases...)}
+	entry := sessionEntry{authID: authID, expiresAt: expiresAt, aliases: append([]string(nil), aliases...), protected: protected}
+	c.persistenceDirty = true
 	c.groups[primaryKey] = entry
 	for _, alias := range aliases {
 		c.entries[alias] = entry
@@ -193,20 +354,20 @@ func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Ti
 }
 
 func (c *SessionCache) evictExcessLocked() {
-	for len(c.entries) > c.maxEntries {
-		oldest := c.evictionOrder.Front()
-		if oldest == nil {
-			break
-		}
-		primaryKey, _ := oldest.Value.(string)
+	for elem := c.evictionOrder.Front(); elem != nil && len(c.entries) > c.maxEntries; {
+		next := elem.Next()
+		primaryKey, _ := elem.Value.(string)
 		group, ok := c.groups[primaryKey]
 		if !ok {
-			c.evictionOrder.Remove(oldest)
+			c.evictionOrder.Remove(elem)
 			delete(c.evictionElements, primaryKey)
-			continue
+		} else {
+			c.removeAliasGroupLocked(group)
 		}
-		c.removeAliasGroupLocked(group)
+		elem = next
 	}
+	// Protection prevents account migration, not capacity eviction. A signed
+	// compaction alias cold miss must require recompaction in the selector.
 }
 
 func (c *SessionCache) removeAliasGroupLocked(entry sessionEntry) {
@@ -215,6 +376,7 @@ func (c *SessionCache) removeAliasGroupLocked(entry sessionEntry) {
 	}
 	primaryKey := entry.aliases[0]
 	if currentGroup, ok := c.groups[primaryKey]; ok && sameSessionEntryGroup(currentGroup, entry) {
+		c.persistenceDirty = true
 		delete(c.groups, primaryKey)
 		if elem, ok := c.evictionElements[primaryKey]; ok {
 			c.evictionOrder.Remove(elem)
@@ -223,16 +385,16 @@ func (c *SessionCache) removeAliasGroupLocked(entry sessionEntry) {
 	}
 	for _, alias := range entry.aliases {
 		current, ok := c.entries[alias]
-		if !ok || current.authID != entry.authID || !current.expiresAt.Equal(entry.expiresAt) ||
-			!equalSessionAliases(current.aliases, entry.aliases) {
+		if !ok || !sameSessionEntryGroup(current, entry) {
 			continue
 		}
+		c.persistenceDirty = true
 		delete(c.entries, alias)
 	}
 }
 
 func sameSessionEntryGroup(left, right sessionEntry) bool {
-	return left.authID == right.authID && left.expiresAt.Equal(right.expiresAt) &&
+	return left.authID == right.authID && left.protected == right.protected && left.expiresAt.Equal(right.expiresAt) &&
 		equalSessionAliases(left.aliases, right.aliases)
 }
 
@@ -324,10 +486,12 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	}
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
 	c.replaceAliasGroupsLocked(expectedAuthID, now.Add(c.ttl), aliases, entry)
+	c.persistLocked()
 	return true
 }
 
-// CompareAndDelete removes the session binding only if it is currently bound to expectedAuthID.
+// CompareAndDelete removes an unprotected session binding only if it is
+// currently bound to expectedAuthID.
 func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 	if c == nil || sessionID == "" || expectedAuthID == "" {
 		return false
@@ -336,7 +500,7 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
 	entry, ok := c.entries[sessionID]
-	if !ok || entry.authID != expectedAuthID {
+	if !ok || entry.authID != expectedAuthID || entry.protected {
 		return false
 	}
 	c.removeAliasGroupLocked(entry)
@@ -348,8 +512,9 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 		}
 	}
 	if len(surviving) > 0 {
-		c.replaceAliasGroupsLocked(entry.authID, entry.expiresAt, surviving)
+		c.replaceAliasGroupsLocked(entry.authID, entry.expiresAt, surviving, entry)
 	}
+	c.persistLocked()
 	return true
 }
 
@@ -375,12 +540,13 @@ func (c *SessionCache) Invalidate(sessionID string) {
 		}
 	}
 	if len(surviving) > 0 {
-		c.replaceAliasGroupsLocked(entry.authID, entry.expiresAt, surviving)
+		c.replaceAliasGroupsLocked(entry.authID, entry.expiresAt, surviving, entry)
 	}
+	c.persistLocked()
 }
 
-// InvalidateAuth removes all sessions bound to a specific auth ID.
-// Used when an auth becomes unavailable.
+// InvalidateAuth removes unprotected sessions bound to a specific auth ID.
+// Protected groups keep their binding when an auth becomes unavailable.
 func (c *SessionCache) InvalidateAuth(authID string) {
 	if c == nil || authID == "" {
 		return
@@ -389,13 +555,94 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
 	for _, group := range c.groups {
-		if group.authID == authID {
+		if group.authID == authID && !group.protected {
 			c.removeAliasGroupLocked(group)
 		}
 	}
+	c.persistLocked()
 }
 
-// Stop terminates the background cleanup goroutine.
+// Protect pins a live alias group to its current auth ID without refreshing TTL.
+// Expiration, capacity eviction, and explicit Invalidate calls remain allowed.
+func (c *SessionCache) Protect(sessionID string) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	entry, ok := c.entries[sessionID]
+	if !ok || entry.protected {
+		return
+	}
+	if !time.Now().Before(entry.expiresAt) {
+		c.removeAliasGroupLocked(entry)
+	} else {
+		entry.protected = true
+		c.groups[entry.aliases[0]] = entry
+		for _, alias := range entry.aliases {
+			c.entries[alias] = entry
+		}
+		c.persistenceDirty = true
+	}
+	c.persistLocked()
+}
+
+// IsProtected reports whether a session belongs to a live protected group.
+func (c *SessionCache) IsProtected(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[sessionID]
+	return ok && entry.protected && time.Now().Before(entry.expiresAt)
+}
+
+// SetTTL changes the TTL used by future registrations and touches. Existing
+// expiration timestamps, including restored snapshots, are not changed.
+func (c *SessionCache) SetTTL(ttl time.Duration) {
+	if c == nil || ttl <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ttl = ttl
+}
+
+// retainSelector shares this cache across selector reloads. Overlapping
+// selectors retain before releasing the old reference. A service may also
+// borrow a stopped cache after disabling affinity or switching paths: retain
+// does not restart cleanup, but lookups still enforce expiry and registrations
+// enforce capacity. The service keeps the same owner for each persistence path.
+func (c *SessionCache) retainSelector() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.selectorRefs++
+}
+
+// releaseSelector stops cleanup only after the last selector releases the cache.
+// Each selector must release once (guarded by its own sync.Once).
+func (c *SessionCache) releaseSelector() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.selectorRefs == 0 {
+		return
+	}
+	c.selectorRefs--
+	if c.selectorRefs == 0 {
+		c.Stop()
+	}
+}
+
+// Stop permanently terminates background cleanup, not cache operations.
+// Reused caches continue to enforce expiry lazily and capacity on registration.
 func (c *SessionCache) Stop() {
 	if c == nil {
 		return
@@ -408,7 +655,9 @@ func (c *SessionCache) Stop() {
 }
 
 func (c *SessionCache) cleanupLoop() {
+	c.mu.RLock()
 	interval := c.ttl / 2
+	c.mu.RUnlock()
 	if interval < time.Millisecond {
 		interval = time.Millisecond
 	}
@@ -444,4 +693,5 @@ func (c *SessionCache) cleanup() {
 			c.removeAliasGroupLocked(group)
 		}
 	}
+	c.persistLocked()
 }

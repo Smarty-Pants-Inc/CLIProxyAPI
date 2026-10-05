@@ -359,11 +359,14 @@ type RoutingConfig struct {
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
 	// execution or derived session identity, and the existing message-content hash fallback.
-	// Automatic failover is always enabled when bound auth becomes unavailable.
+	// Unavailable bindings may fail over unless the request contains compacted
+	// context that is unsafe to replay on another credential. Those requests fail closed.
+	// Standalone gateways persist bindings in auth-dir/session-affinity.state;
+	// Home owns routing and does not use this local state file.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
-	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
+	// Default: 6h. Accepts duration strings like "30m", "1h", "6h".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
 
 	// SessionAffinitySubagents controls whether subagents (child sessions with parent references)

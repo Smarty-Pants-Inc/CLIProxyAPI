@@ -28,6 +28,32 @@ func (e *codexDuplexConnectionError) Error() string         { return e.cause.Err
 func (e *codexDuplexConnectionError) Unwrap() error         { return e.cause }
 func (e *codexDuplexConnectionError) IsRequestScoped() bool { return true }
 
+// codexDuplexAffinityError is a local admission refusal, not an upstream or
+// credential failure. Preserve its status and cause without rotating the socket.
+type codexDuplexAffinityError struct{ cause error }
+
+func (e *codexDuplexAffinityError) Error() string         { return e.cause.Error() }
+func (e *codexDuplexAffinityError) Unwrap() error         { return e.cause }
+func (e *codexDuplexAffinityError) IsRequestScoped() bool { return true }
+func (e *codexDuplexAffinityError) StatusCode() int {
+	var status interface{ StatusCode() int }
+	if errors.As(e.cause, &status) {
+		return status.StatusCode()
+	}
+	return http.StatusConflict
+}
+
+func validateCodexDuplexCompaction(opts cliproxyexecutor.Options, authID string, payload []byte) error {
+	validate, _ := opts.Metadata[cliproxyexecutor.CompactionAffinityValidatorMetadataKey].(func(string, []byte) error)
+	if validate == nil {
+		return nil
+	}
+	if err := validate(authID, payload); err != nil {
+		return &codexDuplexAffinityError{cause: err}
+	}
+	return nil
+}
+
 // streamCodexDuplex owns the already authenticated socket until downstream
 // disconnect. A response terminal event is not a connection terminal event:
 // accepted steering may produce a successor or wait for client tool results.
@@ -201,6 +227,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return false
 			}
 			payload = buildCodexWebsocketRequestBody(prepared.upstreamBody)
+			// Preparation can merge signed input. Validate the actual submission,
+			// on the actual socket account, before logging or writing any bytes.
+			if errAffinity := validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
+				fail(errAffinity)
+				return false
+			}
 			metadataMu.Lock()
 			if len(pending) >= 16 {
 				metadataMu.Unlock()
@@ -277,6 +309,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.steer":
+					if errAffinity := validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
+						fail(errAffinity)
+						return
+					}
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
 					metadataMu.Lock()
 					settings := responseSettings[parent]
@@ -296,7 +332,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					}
 					metadataMu.Unlock()
 					// Control frames bypass ALL response.create translations and defaults.
-					// Unknown fields and unsupported input are left to upstream validation.
+					// Preserve the raw frame after local compaction affinity validation.
 					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
 						fail(fmt.Errorf("websocket credential is no longer enabled"))
 						return
@@ -396,6 +432,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				default:
 				}
 				if ctx.Err() == nil {
+					var affinityErr *codexDuplexAffinityError
+					if errors.As(errRead, &affinityErr) {
+						send(cliproxyexecutor.StreamChunk{Err: affinityErr})
+						return
+					}
 					connectionErr := &codexDuplexConnectionError{cause: errRead}
 					reporter.PublishFailure(ctx, connectionErr)
 					send(cliproxyexecutor.StreamChunk{Err: connectionErr})
