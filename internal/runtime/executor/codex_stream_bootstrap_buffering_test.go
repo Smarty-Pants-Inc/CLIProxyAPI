@@ -46,12 +46,12 @@ func codexTestAuth(baseURL string) *cliproxyauth.Auth {
 
 func codexTestRequest() (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	return cliproxyexecutor.Request{
-		Model:   "gpt-5.6-terra",
-		Payload: []byte(`{"model":"gpt-5.6-terra","input":"hello"}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-		Stream:       true,
-	}
+			Model:   "gpt-5.6-terra",
+			Payload: []byte(`{"model":"gpt-5.6-terra","input":"hello"}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Stream:       true,
+		}
 }
 
 // codexSSEServer streams the supplied event payloads as an HTTP 200 SSE response.
@@ -92,11 +92,11 @@ func codexWebsocketServer(t *testing.T, frames ...string) *httptest.Server {
 
 func codexWebsocketRequest() (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	return cliproxyexecutor.Request{
-		Model:   "gpt-5.6-terra",
-		Payload: []byte(`{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":"hello"}]}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-	}
+			Model:   "gpt-5.6-terra",
+			Payload: []byte(`{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+		}
 }
 
 // drainChunks collects every payload and the first error from a stream result.
@@ -1302,6 +1302,7 @@ func executeWebsocketStreamInSession(t *testing.T, frames ...string) (notified b
 
 	exec := NewCodexWebsocketsExecutor(codexBufferingConfig(true))
 	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	t.Cleanup(func() { exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID) })
 
 	const sessionID = "bootstrap-session"
 	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
@@ -1335,16 +1336,16 @@ func TestCodexWebsocketsExecutor_BootstrapOverload_DoesNotNotifyDownstreamDiscon
 	}
 }
 
-// A non-overload terminal failure is delivered in-stream and genuinely ends the session, so it
-// must keep signalling the disconnect exactly as it did before buffering existed.
-func TestCodexWebsocketsExecutor_BootstrapNonOverload_StillNotifiesDownstreamDisconnect(t *testing.T) {
+// The final refusal also belongs to the request: the handler must write it before
+// closing, without racing an out-of-band disconnect publication.
+func TestCodexWebsocketsExecutor_BootstrapNonOverload_RequestOwnsDisconnect(t *testing.T) {
 	notified, err := executeWebsocketStreamInSession(t, codexCreatedEvent, codexInProgressEvent, codexInvalidEvent)
 
 	if err != nil {
 		t.Fatalf("non-overload failures stay in-stream, got err = %v", err)
 	}
-	if !notified {
-		t.Fatal("a terminal failure that is delivered in-stream must still signal the downstream disconnect")
+	if notified {
+		t.Fatal("out-of-band disconnect raced delivery of the final refusal")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -252,14 +253,21 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Only request-shape failures are exposed: the client can act on them and no
-// credential rotation or retry can make the request succeed. Credential, quota
-// and transport failures stay silent so the client simply reconnects and retries;
+// Request-shape failures and explicitly marked final refusals are exposed.
+// Other credential, quota and transport failures stay silent so the client
+// simply reconnects and retries;
 // a fresh connection carries no server-side transcript, so reconnecting already
 // implies a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
+	}
+	// Codex steering-off bootstrap failover retains the original quota refusal.
+	// Expose it only after the Manager has exhausted retry; unmarked providers
+	// (including xai) keep their existing silent credential-error close path.
+	var refusal interface{ ExposeWebsocketRefusal() bool }
+	if errors.As(errMsg.Error, &refusal) && refusal.ExposeWebsocketRefusal() {
+		return true
 	}
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
