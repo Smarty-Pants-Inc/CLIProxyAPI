@@ -16,6 +16,7 @@ import (
 
 const cacheTTL = 5 * time.Minute
 const maxBodyBytes = 64 << 10
+const upstreamRequestTimeout = 15 * time.Second
 
 // Credential resolves tokens and transport inside the cache's single-flight operation.
 // The transport must not capture request headers or bodies in request logs.
@@ -33,17 +34,18 @@ type cachedQuota struct {
 
 // OAuth is an in-process quota provider for Codex and Claude credentials.
 type OAuth struct {
-	resolve Resolver
-	now     func() time.Time
-	mu      sync.Mutex
-	cache   map[string]cachedQuota
-	flights singleflight.Group
+	resolve        Resolver
+	requestTimeout time.Duration
+	now            func() time.Time
+	mu             sync.Mutex
+	cache          map[string]cachedQuota
+	flights        singleflight.Group
 }
 
 var _ pluginapi.QuotaProvider = (*OAuth)(nil)
 
 func New(resolve Resolver) *OAuth {
-	return &OAuth{resolve: resolve, now: time.Now, cache: make(map[string]cachedQuota)}
+	return &OAuth{resolve: resolve, requestTimeout: upstreamRequestTimeout, now: time.Now, cache: make(map[string]cachedQuota)}
 }
 func (*OAuth) Identifier() string { return "oauth-usage" }
 func (*OAuth) DescribeQuota(context.Context, pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
@@ -56,6 +58,9 @@ func unknown() pluginapi.QuotaFetchResponse { return pluginapi.QuotaFetchRespons
 
 // FetchQuota caches successes AND failures; an upstream failure never becomes a numeric quota.
 func (p *OAuth) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return unknown(), err
+	}
 	id := req.AuthID
 	if id == "" {
 		id = req.AuthIndex
@@ -79,7 +84,10 @@ func (p *OAuth) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest)
 			}
 		}
 		p.mu.Unlock()
-		response := p.fetch(ctx, req)
+		// Preserve context values, but no caller owns the shared operation's lifetime.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.requestTimeout)
+		defer cancel()
+		response := p.fetch(fetchCtx, req)
 		p.mu.Lock()
 		p.cache[key] = cachedQuota{response: response, expires: p.now().Add(cacheTTL)}
 		p.mu.Unlock()
@@ -87,8 +95,11 @@ func (p *OAuth) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest)
 	})
 	select {
 	case <-ctx.Done():
-		return unknown(), nil
+		return unknown(), ctx.Err()
 	case value := <-result:
+		if err := ctx.Err(); err != nil {
+			return unknown(), err
+		}
 		response := value.Val.(pluginapi.QuotaFetchResponse)
 		// Do not let a consumer mutate the shared cache.
 		response.Groups = append([]pluginapi.QuotaGroup(nil), response.Groups...)
@@ -124,7 +135,7 @@ func (p *OAuth) fetch(ctx context.Context, req pluginapi.QuotaFetchRequest) plug
 		request.Header.Set("Chatgpt-Account-Id", credential.AccountID)
 	}
 	// Deliberately bypass HostHTTPClient's request capture: OAuth tokens must never reach logs.
-	client := &http.Client{Transport: credential.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Timeout: p.requestTimeout, Transport: credential.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
 		return unknown()
