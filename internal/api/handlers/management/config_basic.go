@@ -27,13 +27,12 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cfg == nil {
+	cfg := h.configResponseSnapshot()
+	if cfg == nil {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, new(*h.cfg))
+	c.JSON(200, new(*cfg))
 }
 
 type releaseInfo struct {
@@ -182,17 +181,15 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 
 // Debug
 func (h *Handler) GetDebug(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"debug": h.cfg.Debug})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"debug": cfg.Debug})
 }
 func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) { h.cfg.Debug = v }) }
 
 // UsageStatisticsEnabled
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg.UsageStatisticsEnabled})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"usage-statistics-enabled": cfg.UsageStatisticsEnabled})
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -203,9 +200,8 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 
 // UsageStatisticsEnabled
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"logging-to-file": cfg.LoggingToFile})
 }
 func (h *Handler) PutLoggingToFile(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -216,9 +212,8 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 
 // LogsMaxTotalSizeMB
 func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"logs-max-total-size-mb": h.cfg.LogsMaxTotalSizeMB})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"logs-max-total-size-mb": cfg.LogsMaxTotalSizeMB})
 }
 func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -244,9 +239,8 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 
 // ErrorLogsMaxFiles
 func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"error-logs-max-files": cfg.ErrorLogsMaxFiles})
 }
 func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -272,9 +266,8 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 
 // Request log
 func (h *Handler) GetRequestLog(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"request-log": h.cfg.RequestLog})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"request-log": cfg.RequestLog})
 }
 func (h *Handler) PutRequestLog(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -285,9 +278,8 @@ func (h *Handler) PutRequestLog(c *gin.Context) {
 
 // Websocket auth
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"ws-auth": cfg.WebsocketAuth})
 }
 func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -309,9 +301,8 @@ func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 
 // Request retry
 func (h *Handler) GetRequestRetry(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"request-retry": h.cfg.RequestRetry})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"request-retry": cfg.RequestRetry})
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -322,9 +313,8 @@ func (h *Handler) PutRequestRetry(c *gin.Context) {
 
 // Max retry credentials
 func (h *Handler) GetMaxRetryCredentials(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"max-retry-credentials": h.cfg.MaxRetryCredentials})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"max-retry-credentials": cfg.MaxRetryCredentials})
 }
 func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -335,9 +325,8 @@ func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
 
 // Max retry interval
 func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"max-retry-interval": cfg.MaxRetryInterval})
 }
 func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -348,9 +337,8 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 
 // ForceModelPrefix
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"force-model-prefix": cfg.ForceModelPrefix})
 }
 func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 	if !prepareManagementBody(c) {
@@ -375,11 +363,10 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 
 // RoutingStrategy
 func (h *Handler) GetRoutingStrategy(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
+	cfg := h.configResponseSnapshot()
+	strategy, ok := normalizeRoutingStrategy(cfg.Routing.Strategy)
 	if !ok {
-		c.JSON(200, gin.H{"strategy": strings.TrimSpace(h.cfg.Routing.Strategy)})
+		c.JSON(200, gin.H{"strategy": strings.TrimSpace(cfg.Routing.Strategy)})
 		return
 	}
 	c.JSON(200, gin.H{"strategy": strategy})
@@ -409,9 +396,8 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 
 // Proxy URL
 func (h *Handler) GetProxyURL(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"proxy-url": cfg.ProxyURL})
 }
 func (h *Handler) PutProxyURL(c *gin.Context) {
 	if !prepareManagementBody(c) {

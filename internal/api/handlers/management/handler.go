@@ -127,6 +127,16 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager)
 }
 
+// configResponseSnapshot detaches every map and slice before a client write.
+func (h *Handler) configResponseSnapshot() *config.Config {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cfg.CloneForRuntime()
+}
+
 // SetConfig updates the in-memory config reference when the server hot-reloads.
 func (h *Handler) SetConfig(cfg *config.Config) {
 	if h == nil {

@@ -158,9 +158,8 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"api-keys": cfg.APIKeys})
 }
 
 const errAPIKeysWriteDisabled = "api-keys are managed only in config.yaml; management PUT/PATCH/DELETE /api-keys is disabled"
@@ -1280,9 +1279,8 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 
 // oauth-excluded-models: map[string][]string
 func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)})
 }
 
 func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
@@ -1382,9 +1380,8 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 
 // oauth-model-alias: map[string][]OAuthModelAlias
 func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(h.cfg.OAuthModelAlias)})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(cfg.OAuthModelAlias)})
 }
 
 func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
@@ -1496,9 +1493,8 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 
 // oauth-request-scoped-errors: map[string][]RequestScopedErrorRule
 func (h *Handler) GetOAuthRequestScopedErrors(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.JSON(200, gin.H{"oauth-request-scoped-errors": sanitizedOAuthRequestScopedErrors(h.cfg.OAuthRequestScopedErrors)})
+	cfg := h.configResponseSnapshot()
+	c.JSON(200, gin.H{"oauth-request-scoped-errors": sanitizedOAuthRequestScopedErrors(cfg.OAuthRequestScopedErrors)})
 }
 
 func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
