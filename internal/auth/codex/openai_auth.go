@@ -34,6 +34,7 @@ const (
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
 	httpClient *http.Client
+	tokenURL   string
 }
 
 var codexRefreshGroup singleflight.Group
@@ -42,6 +43,19 @@ var codexRefreshGroup singleflight.Group
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCodexAuth(cfg *config.Config) *CodexAuth {
 	return NewCodexAuthWithProxyURL(cfg, "")
+}
+
+// NewCodexAuthWithHTTPClient creates a Codex auth service with injectable HTTP
+// transport and token endpoint for callers that need a controlled OAuth server.
+func NewCodexAuthWithHTTPClient(cfg *config.Config, client *http.Client, tokenURL string) *CodexAuth {
+	auth := NewCodexAuthWithProxyURL(cfg, "")
+	if client != nil {
+		auth.httpClient = client
+	}
+	if strings.TrimSpace(tokenURL) != "" {
+		auth.tokenURL = strings.TrimSpace(tokenURL)
+	}
+	return auth
 }
 
 // NewCodexAuthWithProxyURL creates a new CodexAuth service instance.
@@ -58,6 +72,7 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
 		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
+		tokenURL:   TokenURL,
 	}
 }
 
@@ -113,7 +128,11 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	tokenURL := o.tokenURL
+	if strings.TrimSpace(tokenURL) == "" {
+		tokenURL = TokenURL
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}

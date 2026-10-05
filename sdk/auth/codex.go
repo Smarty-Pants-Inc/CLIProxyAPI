@@ -20,6 +20,10 @@ import (
 // CodexAuthenticator implements the OAuth login flow for Codex accounts.
 type CodexAuthenticator struct {
 	CallbackPort int
+	// HTTPClient overrides the proxy-configured client for authorization-code exchange.
+	// Nil keeps the production client; TokenURL defaults to the OpenAI endpoint.
+	HTTPClient *http.Client
+	TokenURL   string
 }
 
 // NewCodexAuthenticator constructs a Codex authenticator with default settings.
@@ -81,7 +85,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		}
 	}()
 
-	authSvc := codex.NewCodexAuth(cfg)
+	authSvc := codex.NewCodexAuthWithHTTPClient(cfg, a.HTTPClient, a.TokenURL)
 
 	authURL, err := authSvc.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
