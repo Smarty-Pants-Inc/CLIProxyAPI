@@ -90,6 +90,9 @@ func unwrapUpstreamExecutionAttempt(err error) error {
 }
 
 func unwrapExecutionBoundaryError(err error) error {
+	if IsLocalCompactionAffinityStop(err) {
+		return err
+	}
 	err = unwrapRequestStopError(err)
 	return unwrapUpstreamExecutionAttempt(err)
 }
@@ -119,7 +122,33 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if m.MissingKeyPolicy(ctx) {
+		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
+	}
+	if op := KeyPolicyFromContext(ctx); op != nil {
+		a, exec, opts, err := op.selectWithCompaction(ctx, req, opts)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+		resp, err := exec.Execute(ctx, a, req, opts)
+		if err != nil {
+			return resp, err
+		}
+		// Publish signer evidence before delivery; withhold output on failure.
+		if errSave := m.RecordCompactionOutput(a.ID, opts, resp.Payload); errSave != nil {
+			return cliproxyexecutor.Response{}, wrapRequestStopError(errSave)
+		}
+		return resp, nil
+	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = req.Payload
+	}
+	var errOrigin error
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	if errOrigin != nil {
+		return cliproxyexecutor.Response{}, errOrigin
+	}
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -179,7 +208,18 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if m.MissingKeyPolicy(ctx) || KeyPolicyFromContext(ctx) != nil {
+		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
+	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = req.Payload
+	}
+	var errOrigin error
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	if errOrigin != nil {
+		return cliproxyexecutor.Response{}, errOrigin
+	}
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -232,7 +272,92 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if m.MissingKeyPolicy(ctx) {
+		return nil, policyError("api_key_policy_unavailable", 503)
+	}
+	if op := KeyPolicyFromContext(ctx); op != nil {
+		a, exec, opts, err := op.selectWithCompaction(ctx, req, opts)
+		if err != nil {
+			return nil, err
+		}
+		producerCtx, cancelProducer := context.WithCancel(ctx)
+		result, err := exec.ExecuteStream(producerCtx, a, req, opts)
+		if err != nil {
+			cancelProducer()
+			return nil, err
+		}
+		if result == nil || result.Chunks == nil {
+			cancelProducer()
+			return nil, policyError("api_key_policy_unavailable", 503)
+		}
+		// Same signer publication as unrestricted streams: save before release.
+		var observer *compactionOutputStream
+		format := cliproxyexecutor.ResponseFormatOrSource(opts)
+		if format == sdktranslator.FormatOpenAIResponse || format == sdktranslator.FormatCodex || format == sdktranslator.FormatClaude {
+			if record := m.newCompactionOutputRecorder(ctx, a.ID, opts); record != nil {
+				observer = &compactionOutputStream{native: format == sdktranslator.FormatClaude, ctx: ctx, record: record}
+			}
+		}
+		chunks := make(chan cliproxyexecutor.StreamChunk)
+		done := make(chan struct{})
+		op.streamDone = done
+		go func() {
+			defer close(done)
+			defer close(chunks)
+			defer cancelProducer()
+			stopped := false
+			send := func(chunk cliproxyexecutor.StreamChunk) {
+				select {
+				case chunks <- chunk:
+				case <-ctx.Done():
+				}
+			}
+			// flush releases observer-approved bytes; a save failure withholds
+			// them, stops the producer and drains it without further delivery.
+			flush := func(payloads [][]byte, errSave error) {
+				if errSave != nil {
+					stopped = true
+					cancelProducer()
+					send(cliproxyexecutor.StreamChunk{Err: wrapRequestStopError(errSave)})
+					return
+				}
+				for _, payload := range payloads {
+					if len(payload) > 0 {
+						send(cliproxyexecutor.StreamChunk{Payload: payload})
+					}
+				}
+			}
+			for chunk := range result.Chunks {
+				if stopped {
+					continue
+				}
+				if observer != nil && len(chunk.Payload) > 0 {
+					flush(observer.pushChunks(chunk.Payload))
+					chunk.Payload = nil
+				}
+				if observer != nil && chunk.Err != nil && !stopped {
+					flush(observer.finishChunks())
+				}
+				if !stopped && (len(chunk.Payload) > 0 || chunk.Err != nil) {
+					send(chunk)
+					stopped = chunk.Err != nil
+				}
+			}
+			if observer != nil && !stopped {
+				flush(observer.finishChunks())
+			}
+		}()
+		return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: chunks}, nil
+	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = req.Payload
+	}
+	var errOrigin error
+	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	if errOrigin != nil {
+		return nil, errOrigin
+	}
 	req, opts = cliproxysession.Enrich(req, opts)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
@@ -327,8 +452,13 @@ func isRequestTerminatedError(err error) bool {
 	return errors.As(err, &terminated) && terminated != nil
 }
 
-func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string, selectedAuthIDs ...string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if opts.RequestAfterAuthInterceptor == nil {
+		if len(selectedAuthIDs) > 0 {
+			if errValidate := validateCompactionSelectedAuth(ctx, selectedAuthIDs[0], opts); errValidate != nil {
+				return req, opts, errValidate
+			}
+		}
 		return req, opts, nil
 	}
 	toFormat := requestToFormat(provider, executor, req, opts)
@@ -352,6 +482,11 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 			HTTPStatus: resp.StatusCode,
 			Header:     cloneRequestHeaders(resp.ResponseHeaders),
 			Body:       bytes.Clone(resp.ResponseBody),
+		}
+	}
+	if len(selectedAuthIDs) > 0 {
+		if errValidate := validateCompactionSelectedAuth(ctx, selectedAuthIDs[0], opts); errValidate != nil {
+			return req, opts, errValidate
 		}
 	}
 	if len(resp.ClearHeaders) > 0 || len(resp.Body) > 0 {
@@ -569,7 +704,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel), auth.ID)
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
 			}
@@ -648,6 +783,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					break
 				}
 				continue
+			}
+			if errSave := m.RecordCompactionOutput(auth.ID, execOpts, resp.Payload); errSave != nil {
+				// Local persistence failure is not an upstream credential failure.
+				// Stop retries without publishing success or cooling this account.
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errSave)
 			}
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
@@ -785,7 +925,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel), auth.ID)
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
 			}
@@ -1166,6 +1306,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
+			if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
+				if selection != nil {
+					releaseAttempt()
+					selection.End("local_request_stop")
+				}
+				return nil, errStream
+			}
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
 			}
@@ -1983,6 +2130,9 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 // If the registered executor for the auth provider implements RequestPreparer,
 // it will be invoked to modify the request (e.g., add headers).
 func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
+	if req != nil && (m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(req.Context()) != nil) {
+		return policyError("api_key_policy_unavailable", 503)
+	}
 	if req == nil || authID == "" {
 		return nil
 	}
@@ -2012,6 +2162,9 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	}
 	if req == nil {
 		return &Error{Code: "invalid_request", Message: "http request is nil"}
+	}
+	if m.MissingKeyPolicy(ctx) || m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(ctx) != nil || KeyPolicyFromContext(req.Context()) != nil {
+		return policyError("api_key_policy_unavailable", 503)
 	}
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
@@ -2059,6 +2212,9 @@ func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, target
 
 // HttpRequest injects provider credentials into the supplied HTTP request and executes it.
 func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	if m.MissingKeyPolicy(ctx) || KeyPolicyFromContext(ctx) != nil || (req != nil && (m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(req.Context()) != nil)) {
+		return nil, policyError("api_key_policy_unavailable", 503)
+	}
 	if m == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "manager is nil"}
 	}

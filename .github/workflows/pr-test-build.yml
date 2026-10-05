@@ -12,7 +12,8 @@ jobs:
     needs: test
     # Public fork on a self-hosted pool: never run an outside fork's PR code (smarty-dev#1246, Light 5941520806).
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
+    # Mergify queue drafts and PRs labelled priority-ci use the reserved smarty-priority Forge pool (org 2026-10-02 15:38Z, smarty-dev#3257).
+    runs-on: ${{ (startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'smarty-priority' || 'smarty-linux-x64' }}  # our Forge ephemeral pools, not GitHub-hosted (smarty-dev#1246)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +42,14 @@ jobs:
           for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
+      - name: Test full Go suite with explicit known-failure quarantine
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          # smarty-dev#3555: exact names only; newly added tests must run, even in quarantined packages.
+          skip=$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' .github/scripts/go-test-known-failures.txt | paste -sd '|')
+          go test ./... -count=1 -skip "^(${skip})$"
       - name: Build
         run: |
           go build -o test-output ./cmd/server

@@ -206,6 +206,9 @@ func bearerToken(request *http.Request) string {
 
 // CreateClientSecret creates a short-lived credential scoped to this proxy.
 func (h *Handler) CreateClientSecret(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.clientSecrets == nil {
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Realtime client secret service unavailable", "server_error", "realtime_client_secret_unavailable")
 		return
@@ -231,6 +234,9 @@ func (h *Handler) CreateClientSecret(c *gin.Context) {
 
 // CreateLegacySession implements the deprecated Realtime session credential endpoint.
 func (h *Handler) CreateLegacySession(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.clientSecrets == nil {
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Realtime client secret service unavailable", "server_error", "realtime_client_secret_unavailable")
 		return

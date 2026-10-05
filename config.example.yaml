@@ -49,6 +49,20 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional client-key policies (SHA256 of the configured key; exact runtime auth IDs).
+# Codex Responses HTTP/SSE only; other paths, Home/plugins, redirects/retries fail closed.
+# ws-auth must stay true. Nil models/caps are unlimited; [] models/auths and 0 caps deny.
+# Policy additions/removals/changes on existing keys take effect only after restart.
+# New keys added together with a policy take effect on reload.
+# UTC daily counters survive reload, NOT restart. One active operation per key:
+# request overshoot 0; token overshoot <= one operation's input+output. Missing usage exhausts.
+# api-key-policies:
+#   - key-sha256: "<64 lowercase hex characters>"
+#     allowed-models: [gpt-6.1-sol]
+#     allowed-auths: ["<verified runtime credential ID>"]
+#     daily-token-cap: 100000
+#     daily-request-cap: 100
+
 # Enable debug logging
 debug: false
 
@@ -255,13 +269,17 @@ routing:
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
   # execution or derived session identity, and the existing first-message hash fallback.
-  # Automatic failover is always enabled when bound auth becomes unavailable.
+  # Unavailable bindings may fail over, except when compacted context is unsafe to replay
+  # on another credential; those requests fail closed instead of switching credentials.
+  # Standalone gateways persist bindings in auth-dir/session-affinity.state (not an auth JSON).
+  # Home owns routing and does not create this local affinity state file.
+  # SDK configs with an empty auth-dir keep bindings in memory only.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
-  # How long session-to-auth bindings are retained. Default: 1h
-  session-affinity-ttl: "1h"
+  # How long session-to-auth bindings are retained. Default: 6h
+  session-affinity-ttl: "6h"
   # When true (default), subagents (child sessions with parent references) inherit and bind
   # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
   # maximizing Prompt/KV Cache reuse and minimizing TTFT.
@@ -362,7 +380,8 @@ codex:
   # Default: false
   model-level-cooling: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
-  # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
+  # This requires inbound UDP reachability. While disabled, Codex Live WebRTC calls are refused
+  # (503 api_key_policy_requires_media_relay): direct provider media cannot be ended by the gateway.
   live-media-relay:
     enabled: false
     # Maximum concurrent media sessions. Zero uses the default of 32.

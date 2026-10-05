@@ -203,6 +203,9 @@ func (b *Builder) Build() (*Service, error) {
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
 	}
+	if errValidate := b.cfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		return nil, fmt.Errorf("cliproxy: validate API key policies: %w", errValidate)
+	}
 	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}

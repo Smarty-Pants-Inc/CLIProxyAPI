@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -43,6 +44,9 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if h.AuthManager != nil && h.AuthManager.MissingKeyPolicy(ctx) {
+		return nil, nil, executionErrorMessage(&coreauth.Error{HTTPStatus: 503, Message: "api_key_policy_unavailable"})
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -87,12 +91,30 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		ProxyURL:                    execOptions.ProxyURL,
 	}
 	opts.Metadata = reqMeta
+	// Validate before hierarchy derivation, preserving request-owned authority.
+	var errOrigin error
+	if h.AuthManager == nil {
+		errOrigin = fmt.Errorf("auth manager is unavailable")
+	} else {
+		opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	}
+	if errOrigin != nil {
+		errMsg := executionErrorMessage(errOrigin)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
+	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	var interceptErr *interfaces.ErrorMessage
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
 		lifecycle.completeError(ctx, interceptErr)
 		return nil, nil, interceptErr
+	}
+	opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	if errOrigin != nil {
+		errMsg := executionErrorMessage(errOrigin)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
@@ -119,6 +141,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if h.AuthManager != nil && h.AuthManager.MissingKeyPolicy(ctx) {
+		return nil, nil, executionErrorMessage(&coreauth.Error{HTTPStatus: 503, Message: "api_key_policy_unavailable"})
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
@@ -157,12 +182,30 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		ProxyURL:                    execOptions.ProxyURL,
 	}
 	opts.Metadata = reqMeta
+	// Count requests have the same untrusted-body boundary as execution.
+	var errOrigin error
+	if h.AuthManager == nil {
+		errOrigin = fmt.Errorf("auth manager is unavailable")
+	} else {
+		opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	}
+	if errOrigin != nil {
+		errMsg := executionErrorMessage(errOrigin)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
+	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	var interceptErr *interfaces.ErrorMessage
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
 		lifecycle.completeError(ctx, interceptErr)
 		return nil, nil, interceptErr
+	}
+	opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	if errOrigin != nil {
+		errMsg := executionErrorMessage(errOrigin)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)

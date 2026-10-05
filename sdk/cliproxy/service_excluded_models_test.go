@@ -267,7 +267,6 @@ func TestRegisterModelsForAuth_OpenAICompatibilityInputModalities(t *testing.T) 
 }
 
 func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
-	t.Skip("smarty-dev#3555: inherited catalog drift; gemini-pro-agent advertises web search on upstream c404af96")
 	var sawFetch bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != antigravityModelsPath {
@@ -360,8 +359,9 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	if agentModel == nil {
 		t.Fatal("expected gemini-pro-agent to be registered")
 	}
-	if agentModel.SupportsWebSearch {
-		t.Fatal("gemini-pro-agent should not support web search")
+	// Remote hints add capabilities; omission must preserve the static catalog value.
+	if staticAgentModel := staticByID["gemini-pro-agent"]; staticAgentModel == nil || agentModel.SupportsWebSearch != staticAgentModel.SupportsWebSearch {
+		t.Fatal("gemini-pro-agent should preserve its static web search capability")
 	}
 	if staticOnlyModel == nil {
 		t.Fatal("expected static-only Antigravity model to remain registered")

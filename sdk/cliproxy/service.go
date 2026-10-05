@@ -45,6 +45,13 @@ type Service struct {
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
+	// affinityCaches preserves one binding-store owner per local state path for
+	// the service lifetime, including disabled affinity and auth-dir round trips.
+	// Access is serialized by configRuntimeMu; caches synchronize request writes.
+	// A last-selector release stops cleanup, even after later re-enable. Lazy
+	// expiration and bounded-capacity eviction still enforce routing correctness.
+	affinityCaches map[string]*coreauth.SessionCache
+
 	// configPath is the path to the configuration file.
 	configPath string
 

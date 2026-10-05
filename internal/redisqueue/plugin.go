@@ -19,6 +19,9 @@ func init() {
 
 type usageQueuePlugin struct{}
 
+// BuiltinUsageSink identifies the proxy's native accounting sink, not a plugin.
+func (*usageQueuePlugin) BuiltinUsageSink() {}
+
 func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if p == nil {
 		return
@@ -143,6 +146,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Endpoint:            resolveEndpoint(ctx),
 		AuthType:            authType,
 		APIKey:              apiKey,
+		APIKeyHash:          record.APIKeySHA256,
 		RequestID:           requestID,
 		ExecutionID:         executionID,
 		TraceID:             traceID,
@@ -173,6 +177,7 @@ type queuedUsageDetail struct {
 	Endpoint            string                   `json:"endpoint"`
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`
+	APIKeyHash          string                   `json:"api_key_hash,omitempty"`
 	RequestID           string                   `json:"request_id"`
 	ExecutionID         string                   `json:"execution_id,omitempty"`
 	TraceID             string                   `json:"trace_id,omitempty"`

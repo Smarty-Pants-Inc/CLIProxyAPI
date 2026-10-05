@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -144,16 +145,23 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+
+const errAPIKeysWriteDisabled = "api-keys are managed only in config.yaml; management PUT/PATCH/DELETE /api-keys is disabled"
+
+// PutAPIKeys, PatchAPIKeys and DeleteAPIKeys always refuse (F24A, #31 option a).
+// Indexed edits mutated the APIKeys backing array shared with Service, Server,
+// access and Live before policy history was captured, so a later YAML re-add could
+// hot-activate a policy over a live raw relay. Client keys change only in YAML.
+// ponytail: refuse rather than give every publisher an owned key-history snapshot;
+// revisit only if a tool must manage client keys through this API.
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	c.JSON(http.StatusConflict, gin.H{"error": errAPIKeysWriteDisabled})
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	c.JSON(http.StatusConflict, gin.H{"error": errAPIKeysWriteDisabled})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	c.JSON(http.StatusConflict, gin.H{"error": errAPIKeysWriteDisabled})
 }
 
 // gemini-api-key: []GeminiKey

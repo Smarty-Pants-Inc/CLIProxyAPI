@@ -16,6 +16,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("config payload is empty")
 	}
 
+	if errValidate := validateSingleConfigDocument(data); errValidate != nil {
+		return nil, errValidate
+	}
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
 		return nil, errValidate
 	}
@@ -43,6 +46,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
+	}
+	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
+		return nil, errValidate
 	}
 	if errValidate := validateTrustedProxies(cfg.TrustedProxies); errValidate != nil {
 		return nil, errValidate

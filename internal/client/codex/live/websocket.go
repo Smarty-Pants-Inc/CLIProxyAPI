@@ -31,6 +31,9 @@ func (h *Handler) HandleRealtimeWebsocket(c *gin.Context) {
 
 // HandleDirectWebsocket relays a standard Realtime WebSocket through Codex OAuth.
 func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
+	if h.refuseKeyPolicy(c) {
+		return
+	}
 	if h == nil || h.authManager == nil {
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable", "server_error", "codex_auth_unavailable")
 		return
@@ -41,6 +44,8 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		return
 	}
 
+	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
+	defer releaseRaw()
 	requestedModel := strings.TrimSpace(c.Query("model"))
 	if requestedModel == "" {
 		requestedModel = defaultStandardRealtimeModel
@@ -54,7 +59,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 			return
 		}
 	}
-	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = context.WithValue(ctx, "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, nil, nil)
@@ -184,7 +189,12 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	}
 	closeHandshakeBody(handshakeResponse, "direct websocket handshake")
 	closeUpstream := websocketCloseFunc("upstream", upstream)
+	rawResources.add(closeUpstream)
 	defer func() { _ = closeUpstream() }()
+	if ctx.Err() != nil {
+		writeLiveError(c, http.StatusServiceUnavailable, "api_key_policy_unavailable")
+		return
+	}
 	if len(tokenSession) > 0 {
 		updateSession, errSession := realtimeSessionUpdate(tokenSession)
 		if errSession != nil {
@@ -225,6 +235,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		return
 	}
 	closeDownstream := websocketCloseFunc("downstream", downstream)
+	rawResources.add(closeDownstream)
 	defer func() { _ = closeDownstream() }()
 	if selection != nil {
 		if errBind := selection.Bind(closeDownstream); errBind != nil {
