@@ -20,6 +20,24 @@ func secureConfigMAC(staging *os.File, path string, original os.FileInfo) error 
 		return err
 	}
 	defer func() { _ = source.Close() }()
+	// Inspect the original ACL on this stable descriptor, under the publication
+	// lock and before writing credentials. Extended ACL mode group bits are a
+	// mask, not authorization for the owning group. We do not copy ACLs, so
+	// refuse rather than widen a grant or silently discard a legitimate reader.
+	info, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect original config identity: %w", err)
+	}
+	if !os.SameFile(original, info) {
+		return fmt.Errorf("original config identity changed before ACL inspection")
+	}
+	n, err := unix.Fgetxattr(int(source.Fd()), "system.posix_acl_access", nil)
+	if err != nil && err != unix.ENODATA && err != unix.ENOTSUP {
+		return fmt.Errorf("inspect original POSIX ACL: %w", err)
+	}
+	if err == nil || n > 0 {
+		return fmt.Errorf("publication refused: original POSIX ACL cannot be preserved exactly")
+	}
 	return preserveSELinuxLabel(
 		func() ([]byte, error) { return configSELinuxLabel(source) },
 		func() ([]byte, error) { return configSELinuxLabel(staging) },

@@ -105,6 +105,12 @@ added. If ownership cannot be retained, publication refuses before writing
 credentials. This keeps a normal `0640` restricted-group reader working across
 startup key hashing and subsequent publications.
 
+Linux inspects the original access ACL through an open descriptor before writing
+credentials. Publication refuses an extended POSIX access ACL because this path
+cannot preserve all of its effective permissions exactly. Mode group bits are an
+ACL mask in that case, not authorization for the owning group. Refusal leaves the
+original bytes and ACL intact; no owner-only migration is performed implicitly.
+
 Linux must keep inherited named POSIX ACL entries masked. If staging has named
 user/group entries, the allowed mode is instead `0600` intersected with the
 original: enabling the group-read mask would enable unrelated inherited readers.
