@@ -29,6 +29,30 @@ func (h *Host) RegisterPluginForTest(id string, plugin pluginapi.Plugin) {
 	h.mu.Unlock()
 }
 
+// RegisterBuiltinQuotaProvider registers the core provider once for this host's lifetime.
+// It survives plugin disable, reload and unload and is never exposed as a dynamic plugin.
+func (h *Host) RegisterBuiltinQuotaProvider(provider pluginapi.QuotaProvider) {
+	if h == nil || provider == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.builtinQuota == nil {
+		h.builtinQuota = &capabilityRecord{builtin: true, id: "builtin-oauth-usage", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{QuotaProvider: provider}}}
+	}
+}
+
+func (h *Host) quotaRecords(snap *Snapshot) []capabilityRecord {
+	records := h.activeRecordsFromSnapshot(snap)
+	h.mu.Lock()
+	builtin := h.builtinQuota
+	h.mu.Unlock()
+	if builtin != nil {
+		records = append([]capabilityRecord{*builtin}, records...)
+	}
+	return records
+}
+
 type RegisteredQuotaProviderInfo struct {
 	PluginID           string   `json:"plugin_id"`
 	Provider           string   `json:"provider"`
@@ -44,7 +68,7 @@ func (h *Host) QuotaProviderIdentifiers() []string {
 	}
 	out := make([]string, 0)
 	seen := make(map[string]struct{})
-	for _, record := range h.activeRecords() {
+	for _, record := range h.quotaRecords(h.Snapshot()) {
 		provider := record.plugin.Capabilities.QuotaProvider
 		if provider == nil || h.isPluginFused(record.id) {
 			continue
@@ -66,7 +90,7 @@ func (h *Host) QuotaProviders(ctx context.Context) []RegisteredQuotaProviderInfo
 		return nil
 	}
 	out := make([]RegisteredQuotaProviderInfo, 0)
-	for _, record := range h.activeRecords() {
+	for _, record := range h.quotaRecords(h.Snapshot()) {
 		provider := record.plugin.Capabilities.QuotaProvider
 		if provider == nil || h.isPluginFused(record.id) {
 			continue
@@ -123,7 +147,7 @@ func (h *Host) QuotaSupportedProvidersSet(ctx context.Context) map[string]struct
 	if snap == nil {
 		return nil
 	}
-	records := h.activeRecordsFromSnapshot(snap)
+	records := h.quotaRecords(snap)
 	out := make(map[string]struct{})
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
@@ -166,7 +190,7 @@ func (h *Host) quotaProviderRecord(ctx context.Context, provider string) *capabi
 	if snap == nil {
 		return nil
 	}
-	records := h.activeRecordsFromSnapshot(snap)
+	records := h.quotaRecords(snap)
 	// First pass: match exact QuotaProvider.Identifier(), plugin ID, or AuthProvider.Identifier()
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
@@ -247,7 +271,7 @@ func (h *Host) quotaProviderRecordByPlugin(pluginID string) *capabilityRecord {
 	if h == nil || pluginID == "" {
 		return nil
 	}
-	for _, record := range h.activeRecords() {
+	for _, record := range h.quotaRecords(h.Snapshot()) {
 		if record.id == pluginID && record.plugin.Capabilities.QuotaProvider != nil && !h.isPluginFused(record.id) {
 			r := record
 			return &r
@@ -349,6 +373,11 @@ func (h *Host) callQuotaDescribe(ctx context.Context, record capabilityRecord, p
 func (h *Host) callQuotaFetch(ctx context.Context, record capabilityRecord, provider pluginapi.QuotaProvider, req pluginapi.QuotaFetchRequest) (resp pluginapi.QuotaFetchResponse, handled bool, err error) {
 	if h == nil || provider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.QuotaFetchResponse{}, false, nil
+	}
+	if record.builtin {
+		// The core provider resolves its credential in process and bypasses plugin request capture.
+		resp, err = provider.FetchQuota(ctx, req)
+		return resp, true, err
 	}
 	var authRecord *coreauth.Auth
 	if req.AuthIndex != "" {

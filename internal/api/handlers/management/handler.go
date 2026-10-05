@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/quotaprovider"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -146,6 +147,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	if h == nil {
 		return
+	}
+	if host != nil {
+		host.RegisterBuiltinQuotaProvider(quotaprovider.New(h.resolveQuotaCredential))
 	}
 	h.mu.Lock()
 	h.pluginHost = host
