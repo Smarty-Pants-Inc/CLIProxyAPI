@@ -25,11 +25,11 @@ const (
 	codexCapacityEvent      = `{"type":"error","error":{"message":"Selected model is at capacity. Please try a different model."},"sequence_number":2}`
 	codexInvalidEvent       = `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."},"sequence_number":2}`
 	codexCreatedEvent       = `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-terra"}}`
-	codexInProgressEvent    = `{"type":"response.in_progress","response":{"id":"resp_1"}}`
+	codexInProgressEvent    = `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"resp_1"}}`
 	codexOutputAddedEvent   = `{"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","content":[]},"output_index":0}`
 	codexKeepaliveEvent     = `{"type":"keepalive","sequence_number":1}`
 	codexOutputDeltaEvent   = `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hi"}`
-	codexCompletedEventBody = `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+	codexCompletedEventBody = `{"type":"response.completed","response":{"model":"gpt-5.6-terra","id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 )
 
 func codexBufferingConfig(enabled bool) *config.Config {
@@ -211,7 +211,7 @@ func TestCodexExecutor_BootstrapBuffering_NonOverloadStaysInStream(t *testing.T)
 func TestCodexExecutor_BootstrapBuffering_BufferLimitReleasesStream(t *testing.T) {
 	events := make([]string, 0, codexBootstrapMaxBufferedFrames+2)
 	for i := 0; i < codexBootstrapMaxBufferedFrames+1; i++ {
-		events = append(events, fmt.Sprintf(`{"type":"response.in_progress","response":{"id":"resp_%d"}}`, i))
+		events = append(events, fmt.Sprintf(`{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"resp_%d"}}`, i))
 	}
 	events = append(events, codexOverloadEvent)
 	server := codexSSEServer(events...)
@@ -312,7 +312,7 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *tes
 // seeded from the upstream message so it still advances for a downstream that renders nothing.
 func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapOrderingAndSeed(t *testing.T) {
 	t.Run("oversized message is not admitted", func(t *testing.T) {
-		oversized := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
+		oversized := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
 		server := codexWebsocketRawServer(t, []string{oversized}, codexOverloadEvent)
 		defer server.Close()
 
@@ -328,7 +328,7 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapOrderingAndSeed(t *te
 	})
 
 	t.Run("budget counts the upstream message", func(t *testing.T) {
-		frame := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
+		frame := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
 		frames := make([]string, 10)
 		for i := range frames {
 			frames[i] = frame
@@ -392,6 +392,7 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_SkippedFramesExhaustTheWindo
 			for i := range frames {
 				frames[i] = tc.frame
 			}
+			frames[0] = codexCreatedEvent // Verify identity without changing the frame count.
 			server := codexWebsocketRawServer(t, frames, codexOverloadEvent)
 			defer server.Close()
 
@@ -487,7 +488,7 @@ func TestCodexExecutor_BootstrapBuffering_NonOverloadTerminalStaysInStream(t *te
 // admission and released, so the rejection that follows it immediately - with no line in between to
 // trigger a late release - is delivered in-stream rather than failing the attempt over.
 func TestCodexExecutor_BootstrapBuffering_OversizedFrameIsNotAdmitted(t *testing.T) {
-	oversized := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
+	oversized := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("q", codexBootstrapMaxBufferedBytes*2) + `"}}`
 	body := "data: " + oversized + "\n" + "data: " + codexOverloadEvent + "\n\n"
 	server := codexSSERawServer(body)
 	defer server.Close()
@@ -508,7 +509,7 @@ func TestCodexExecutor_BootstrapBuffering_OversizedFrameIsNotAdmitted(t *testing
 // measured chunks alone would never advance and only the frame budget would remain - which these ten
 // frames stay well inside.
 func TestCodexExecutor_BootstrapBuffering_ByteCapCountsUpstreamFrames(t *testing.T) {
-	frame := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
+	frame := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("w", codexBootstrapMaxBufferedBytes/8) + `"}}`
 	body := strings.Repeat("data: "+frame+"\n\n", 10) + "data: " + codexOverloadEvent + "\n\n"
 	server := codexSSERawServer(body)
 	defer server.Close()
@@ -528,7 +529,7 @@ func TestCodexExecutor_BootstrapBuffering_ByteCapCountsUpstreamFrames(t *testing
 // The websocket byte cap needs its own coverage: without it a handful of large frames would sit
 // inside the frame budget while retaining far more than the cap.
 func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapReleasesStream(t *testing.T) {
-	third := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("z", codexBootstrapMaxBufferedBytes/3) + `"}}`
+	third := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("z", codexBootstrapMaxBufferedBytes/3) + `"}}`
 	server := codexWebsocketRawServer(t, []string{third, third, third, third}, codexOverloadEvent)
 	defer server.Close()
 
@@ -560,7 +561,7 @@ func TestCodexExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *testing.T) {
 	overload := "data: " + codexOverloadEvent + "\n\n"
 
 	t.Run("one line under the budget still fails over", func(t *testing.T) {
-		body := strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames-1) + overload
+		body := "data: " + codexCreatedEvent + "\n" + strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames-2) + overload
 		server := codexSSERawServer(body)
 		defer server.Close()
 
@@ -572,7 +573,7 @@ func TestCodexExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *testing.T) {
 	})
 
 	t.Run("exactly the budget still fails over", func(t *testing.T) {
-		body := strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames) + overload
+		body := "data: " + codexCreatedEvent + "\n" + strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames-1) + overload
 		server := codexSSERawServer(body)
 		defer server.Close()
 
@@ -584,7 +585,7 @@ func TestCodexExecutor_BootstrapBuffering_BudgetBoundaryIsExact(t *testing.T) {
 	})
 
 	t.Run("one line over the budget releases", func(t *testing.T) {
-		body := strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames+1) + overload
+		body := "data: " + codexCreatedEvent + "\n" + strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames) + overload
 		server := codexSSERawServer(body)
 		defer server.Close()
 
@@ -629,7 +630,7 @@ func TestCodexExecutor_BootstrapBuffering_EmptyDataFrameDoesNotReleaseStream(t *
 // NonContentFramesDoNotReleaseStream cases, which run against a passthrough downstream.
 func TestCodexExecutor_BootstrapBuffering_BoundHoldsForEverySSEFraming(t *testing.T) {
 	overload := "data: " + codexOverloadEvent + "\n\n"
-	handshake := `{"type":"response.in_progress","response":{"id":"resp_1"}}`
+	handshake := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"resp_1"}}`
 
 	cases := []struct {
 		name string
@@ -638,7 +639,7 @@ func TestCodexExecutor_BootstrapBuffering_BoundHoldsForEverySSEFraming(t *testin
 		{
 			// Comment heartbeats need no blank separator at all.
 			name: "comment heartbeats without blank separators",
-			body: strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames*4) + overload,
+			body: "data: " + codexCreatedEvent + "\n" + strings.Repeat(": keepalive\n", codexBootstrapMaxBufferedFrames*4-1) + overload,
 		},
 		{
 			// A data: line is a complete frame; a blank line is optional between them.
@@ -687,7 +688,7 @@ func TestCodexExecutor_BootstrapBuffering_BoundHoldsForEverySSEFraming(t *testin
 func TestCodexExecutor_BootstrapBuffering_ByteCapReleasesStream(t *testing.T) {
 	// Frames that are individually well inside the cap but add up past it must still release, which
 	// is what makes this a cap on the buffer rather than a per-frame size limit.
-	third := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("y", codexBootstrapMaxBufferedBytes/3) + `"}}`
+	third := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("y", codexBootstrapMaxBufferedBytes/3) + `"}}`
 	body := "data: " + third + "\n\n" + "data: " + third + "\n\n" + "data: " + third + "\n\n" +
 		"data: " + third + "\n\n" + "data: " + codexOverloadEvent + "\n\n"
 	server := codexSSERawServer(body)
@@ -856,11 +857,12 @@ func TestCodexExecutor_BootstrapBuffering_HeartbeatArithmeticPerFraming(t *testi
 	}{
 		{"three-line event:/data:/blank", "event: keepalive\ndata: " + codexKeepaliveEvent + "\n\n", 15},
 		{"two-line : keepalive comment", ": keepalive\n\n", 23},
-		{"one-line : keepalive comment", ": keepalive\n", 47},
+		{"one-line : keepalive comment", ": keepalive\n", 46},
 	}
 	failsOver := func(t *testing.T, heartbeats int, heartbeat, overload string) bool {
 		t.Helper()
-		server := codexSSERawServer(strings.Repeat(heartbeat, heartbeats) + overload)
+		// One data line verifies identity, leaving 47 lines for heartbeats and the error event header.
+		server := codexSSERawServer("data: " + codexCreatedEvent + "\n" + strings.Repeat(heartbeat, heartbeats) + overload)
 		defer server.Close()
 		req, opts := codexTestRequest()
 		result, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
@@ -885,7 +887,7 @@ func TestCodexExecutor_BootstrapBuffering_HeartbeatArithmeticPerFraming(t *testi
 // what is retained is the chunks. Both padded frames fit the cap on their upstream bytes alone, so
 // only a budget that also counts the translated chunks releases the stream here.
 func TestCodexExecutor_BootstrapBuffering_ByteCapCountsTranslatedChunks(t *testing.T) {
-	padded := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("p", 300<<10) + `"}}`
+	padded := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("p", 300<<10) + `"}}`
 	server := codexSSEServer(padded, padded, codexOverloadEvent)
 	defer server.Close()
 
@@ -903,7 +905,7 @@ func TestCodexExecutor_BootstrapBuffering_ByteCapCountsTranslatedChunks(t *testi
 }
 
 func TestCodexWebsocketsExecutor_BootstrapBuffering_ByteCapCountsTranslatedChunks(t *testing.T) {
-	padded := `{"type":"response.in_progress","response":{"id":"` + strings.Repeat("p", 300<<10) + `"}}`
+	padded := `{"type":"response.in_progress","response":{"model":"gpt-5.6-terra","id":"` + strings.Repeat("p", 300<<10) + `"}}`
 	server := codexWebsocketRawServer(t, []string{padded, padded}, codexOverloadEvent)
 	defer server.Close()
 
@@ -1649,8 +1651,9 @@ func TestCodexExecutor_BootstrapBuffering_OverloadDirectlyAfterTimeoutDeliveredI
 			f.Flush()
 		}
 
+		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
 		<-bootstrapStarted
-		// Advance clock past 10s timeout before the first event arrives
+		// Identity precedes the failure; advance past the timeout before the error arrives.
 		clock.advance(11 * time.Second)
 
 		_, _ = w.Write([]byte("event: error\ndata: " + codexOverloadEvent + "\n\n"))
@@ -1699,8 +1702,9 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_OverloadDirectlyAfterTimeout
 			return
 		}
 
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(codexCreatedEvent))
 		<-bootstrapStarted
-		// Advance clock past 10s timeout before writing any messages
+		// Identity precedes the failure; advance past the timeout before the error arrives.
 		clock.advance(11 * time.Second)
 
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(codexOverloadEvent))
@@ -1750,6 +1754,7 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_StatusBearingErrorAfterTimeo
 			return
 		}
 
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(codexCreatedEvent))
 		<-bootstrapStarted
 		// Advance clock past 10s timeout before writing error frame
 		clock.advance(11 * time.Second)

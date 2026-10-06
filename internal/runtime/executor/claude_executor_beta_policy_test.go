@@ -136,7 +136,7 @@ func TestClaudeExecutor_ContextManagementNeverLeaksToOtherUpstreams(t *testing.T
 		body, _ := io.ReadAll(r.Body)
 		upstreamBody = bytes.Clone(body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 	}))
 	defer server.Close()
 
