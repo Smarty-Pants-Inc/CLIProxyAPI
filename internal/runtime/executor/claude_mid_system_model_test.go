@@ -71,6 +71,8 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 				`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
 			}, "\n\n") + "\n\n"
 		}
+		// The fork's Claude model-integrity guard requires the requested model (smarty-dev#3555).
+		responseBody = strings.ReplaceAll(responseBody, `"model":"m"`, `"model":"`+gjson.GetBytes(payload, "model").String()+`"`)
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{contentType}},
@@ -149,8 +151,11 @@ func sendMidSystemExecute(t *testing.T, ex *ClaudeExecutor, ctx context.Context,
 
 func sendMidSystemStream(t *testing.T, ex *ClaudeExecutor, ctx context.Context, model string) error {
 	t.Helper()
+	// A streaming caller asks for SSE; the fork's Claude model guard reads the
+	// served model from message_start before any bytes go downstream (smarty-dev#3555).
+	payload := []byte(strings.Replace(string(midSystemLegacyPayload(model)), `{`, `{"stream":true,`, 1))
 	result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
-		Model: model, Payload: midSystemLegacyPayload(model),
+		Model: model, Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 	if err != nil {
 		return err

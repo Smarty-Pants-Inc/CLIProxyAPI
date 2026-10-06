@@ -58,7 +58,7 @@ func applyPatchTestFrames(protocol, name string) (string, string) {
 	args := applyPatchTestPartial + applyPatchTestRemainder
 	switch protocol {
 	case "claude":
-		first := fmt.Sprintf("data: {\"type\":\"message_start\",\"message\":{\"id\":\"r1\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\"}}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":%q,\"input\":{}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%q}}\n\n", name, applyPatchTestPartial)
+		first := fmt.Sprintf("data: {\"type\":\"message_start\",\"message\":{\"id\":\"r1\",\"role\":\"assistant\",\"model\":\"test\"}}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":%q,\"input\":{}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%q}}\n\n", name, applyPatchTestPartial)
 		last := fmt.Sprintf("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%q}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", applyPatchTestRemainder)
 		return first, last
 	case "interactions":
@@ -400,7 +400,12 @@ func newApplyPatchCompatTestExecutor(t *testing.T, reply string) (*OpenAICompatE
 			contentType = "text/event-stream"
 		}
 		w.Header().Set("Content-Type", contentType)
-		_, _ = io.WriteString(w, reply)
+		out := reply
+		if gjson.Get(reply, "type").String() == "message" && !gjson.Get(reply, "model").Exists() {
+			// The fork's Claude model-integrity guard requires the served model (smarty-dev#3555).
+			out, _ = sjson.Set(reply, "model", gjson.GetBytes(body, "model").String())
+		}
+		_, _ = io.WriteString(w, out)
 	}))
 	t.Cleanup(server.Close)
 	return NewOpenAICompatExecutor("custom-compat", &config.Config{}), &cliproxyauth.Auth{Provider: "custom-compat", Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "test"}}, bodies
@@ -571,7 +576,9 @@ func TestApplyPatchBridgeLiveWebsocketPreview(t *testing.T) {
 			bodies := make(chan []byte, 1)
 			first, last := applyPatchTestFrames("responses", "apply_patch")
 			if native {
-				first = "data: { \"type\":\"response.output_item.added\", \"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"a1\",\"call_id\":\"c1\",\"name\":\"apply_patch\",\"input\":\"\"}}\n\ndata: { \"type\":\"response.custom_tool_call_input.delta\", \"output_index\":0,\"item_id\":\"a1\",\"call_id\":\"c1\",\"delta\":\"*** Begin Patch\\n*** Add File: a.txt\\n+hello\\n\"}\n\n"
+				// The fork's Codex model-integrity guard holds output until response.model arrives (smarty-dev#3555).
+				first = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5.6-sol\"}}\n\n" +
+					"data: { \"type\":\"response.output_item.added\", \"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"a1\",\"call_id\":\"c1\",\"name\":\"apply_patch\",\"input\":\"\"}}\n\ndata: { \"type\":\"response.custom_tool_call_input.delta\", \"output_index\":0,\"item_id\":\"a1\",\"call_id\":\"c1\",\"delta\":\"*** Begin Patch\\n*** Add File: a.txt\\n+hello\\n\"}\n\n"
 				item := fmt.Sprintf(`{ "type":"custom_tool_call", "id":"a1","call_id":"c1","name":"apply_patch","input":%q}`, applyPatchTestInput)
 				last = fmt.Sprintf("data: { \"type\":\"response.custom_tool_call_input.delta\", \"output_index\":0,\"item_id\":\"a1\",\"call_id\":\"c1\",\"delta\":\"*** End Patch\\n\"}\n\ndata: { \"type\":\"response.custom_tool_call_input.done\", \"item_id\":\"a1\",\"call_id\":\"c1\",\"input\":%q}\n\ndata: { \"type\":\"response.output_item.done\", \"output_index\":0,\"item\":%s}\n\ndata: { \"type\":\"response.completed\", \"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[%s]}}\n\n", applyPatchTestInput, item, item)
 			}

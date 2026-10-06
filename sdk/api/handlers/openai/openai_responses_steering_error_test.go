@@ -204,9 +204,10 @@ func TestResponsesWebsocketClosesOnIdleCodexDisconnect(t *testing.T) {
 					t.Errorf("read initial request: %v", errRead)
 					return
 				}
+				// The fork's Codex model-integrity guard needs response.model (smarty-dev#3555).
 				for _, payload := range []string{
-					`{"type":"response.created","response":{"id":"first","output":[]}}`,
-					`{"type":"response.completed","response":{"id":"first","output":[]}}`,
+					`{"type":"response.created","response":{"id":"first","model":"idle-disconnect-model","output":[]}}`,
+					`{"type":"response.completed","response":{"id":"first","model":"idle-disconnect-model","output":[]}}`,
 				} {
 					if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(payload)); errWrite != nil {
 						t.Errorf("write response: %v", errWrite)

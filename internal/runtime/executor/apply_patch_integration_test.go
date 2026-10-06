@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,7 +42,7 @@ func task6ProviderFixture(provider, mode, toolName string) string {
 	switch provider {
 	case "claude", "claude-oauth":
 		if mode == "nonstream" {
-			return fmt.Sprintf(`{"id":"r","type":"message","role":"assistant","content":[{"type":"tool_use","id":"c","name":%q,"input":%s}],"usage":{"input_tokens":5,"output_tokens":3}}`, toolName, args)
+			return fmt.Sprintf(`{"id":"r","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"c","name":%q,"input":%s}],"usage":{"input_tokens":5,"output_tokens":3}}`, toolName, args)
 		}
 		start := fmt.Sprintf("data: {\"type\":\"message_start\",\"message\":{\"id\":\"r\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":5}}}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c\",\"name\":%q,\"input\":{}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%q}}\n\n", toolName, args)
 		if mode != "eof" {
@@ -106,11 +107,41 @@ func task6Executor(provider string) cliproxyauth.ProviderExecutor {
 	}
 }
 
+// task6EchoClaudeModel makes a Claude fixture report the model the executor sent
+// upstream: the fork's model-integrity guard fails closed on a missing or
+// different model (smarty-dev#3555).
+func task6EchoClaudeModel(provider, fixture string, requestBody []byte) string {
+	model := gjson.GetBytes(requestBody, "model").String()
+	if !strings.HasPrefix(provider, "claude") || model == "" {
+		return fixture
+	}
+	return strings.ReplaceAll(fixture, `"model":"claude-sonnet-4-6"`, fmt.Sprintf(`"model":%q`, model))
+}
+
 func assertTask6PatchError(t *testing.T, err error) {
 	t.Helper()
 	status, okStatus := err.(interface{ StatusCode() int })
 	if !okStatus || status.StatusCode() != http.StatusBadGateway || err.Error() != "Invalid apply_patch tool arguments received from upstream." {
 		t.Fatalf("expected clean 502, got %T %v", err, err)
+	}
+}
+
+func assertTask6ClaudeModelGuardStream(t *testing.T, chunks <-chan cliproxyexecutor.StreamChunk) {
+	t.Helper()
+	var output []byte
+	var errs []error
+	for chunk := range chunks {
+		output = append(output, chunk.Payload...)
+		if chunk.Err != nil {
+			errs = append(errs, chunk.Err)
+		}
+	}
+	var guardErr *helps.ClaudeModelMismatchError
+	if len(errs) != 1 || !errors.As(errs[0], &guardErr) || len(output) != 0 {
+		t.Fatalf("empty Claude stream: errors=%v output=%s", errs, output)
+	}
+	if status, ok := errs[0].(interface{ StatusCode() int }); !ok || status.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("empty Claude stream status: %v", errs[0])
 	}
 }
 
@@ -197,6 +228,12 @@ func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 					stream, errExecuteStream := exec.ExecuteStream(context.Background(), auth, req, opts)
 					if errExecuteStream != nil {
 						t.Fatal(errExecuteStream)
+					}
+					if strings.HasPrefix(provider, "claude") && mode == "empty" {
+						// Fork: an empty Claude stream has no served model, so the
+						// model-integrity guard fails closed before any output (smarty-dev#3555).
+						assertTask6ClaudeModelGuardStream(t, stream.Chunks)
+						return
 					}
 					assertTask6FailedStream(t, stream.Chunks)
 				}
@@ -403,7 +440,7 @@ func TestApplyPatchHTTPGatewayErrorMatrix(t *testing.T) {
 					if actualMode != "nonstream" {
 						w.Header().Set("Content-Type", "text/event-stream")
 					}
-					_, _ = io.WriteString(w, task6ProviderFixture(provider, actualMode, name))
+					_, _ = io.WriteString(w, task6EchoClaudeModel(provider, task6ProviderFixture(provider, actualMode, name), body))
 				}))
 				defer server.Close()
 				exec := task6Executor(provider)

@@ -17,9 +17,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func writeClaudeSSEMockResponse(w http.ResponseWriter) {
+// writeClaudeSSEMockResponse reports the requested model: the fork's Claude
+// model-integrity guard fails closed on another model (smarty-dev#3555).
+func writeClaudeSSEMockResponse(w http.ResponseWriter, servedModel ...string) {
+	model := "claude-3-5-sonnet-20241022"
+	if len(servedModel) > 0 {
+		model = servedModel[0]
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-5-sonnet\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+	_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\""+model+"\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
 	_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
 	_, _ = fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
 	_, _ = fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
@@ -792,7 +798,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_LegacyModelPrese
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, gjson.GetBytes(body, "model").String())
 	}))
 	defer server.Close()
 

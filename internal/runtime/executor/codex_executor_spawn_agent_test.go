@@ -214,7 +214,8 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 func TestCodexExecutorsMultiAgentV2UsesSelectedHomeModel(t *testing.T) {
 	capturedPayload := make(chan []byte, 1)
 	upgrader := websocket.Upgrader{}
-	completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}`)
+	// The fork's model-integrity guard fails closed without response.model (smarty-dev#3555).
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-5.4","status":"completed","output":[]}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if websocket.IsWebSocketUpgrade(request) {
 			conn, errUpgrade := upgrader.Upgrade(w, request, nil)
