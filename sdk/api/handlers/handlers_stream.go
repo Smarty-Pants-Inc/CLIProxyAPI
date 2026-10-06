@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/sse"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -786,9 +787,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 }
 
 type sseJSONValidationState struct {
-	pending        []byte
-	pendingErr     error
-	prevEndsWithCR bool
+	pending    []byte
+	pendingErr error
+	lines      sse.Lines
 	// lex holds the incremental state of pending; see sseDataLexer.
 	lex sseDataLexer
 	// insertedLF is 1 + the index of the LF this validator added between two
@@ -807,25 +808,16 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	if len(chunk) == 0 {
 		return nil, nil
 	}
-	if s.prevEndsWithCR {
-		if chunk[0] == '\n' {
-			chunk = chunk[1:]
-		}
-		s.prevEndsWithCR = false
-	}
+	chunk = s.lines.Normalize(chunk)
 	if len(chunk) == 0 {
 		return nil, nil
 	}
-	endsWithCR := chunk[len(chunk)-1] == '\r'
-	chunk = bytes.ReplaceAll(chunk, []byte("\r\n"), []byte("\n"))
-	chunk = bytes.ReplaceAll(chunk, []byte("\r"), []byte("\n"))
-	s.prevEndsWithCR = endsWithCR
 	if bytes.IndexByte(chunk, '\n') >= 0 {
 		s.sawLF = true
 	}
 	if len(s.pending) > 0 && !bytes.HasSuffix(s.pending, []byte("\n")) && !bytes.HasPrefix(chunk, []byte("\n")) {
 		first := bytes.TrimSpace(bytes.SplitN(chunk, []byte("\n"), 2)[0])
-		if bytes.HasPrefix(first, []byte("data:")) || bytes.HasPrefix(first, []byte("event:")) || s.startsLine(chunk) {
+		if s.startsLine(first) {
 			s.pending = append(s.pending, '\n')
 			s.insertedLF = len(s.pending)
 		}
@@ -917,18 +909,11 @@ func (s *sseJSONValidationState) pendingMayRelease() bool {
 // sdk/cliproxy/auth uses the same rule.
 func (s *sseJSONValidationState) startsLine(chunk []byte) bool {
 	l := &s.lex
-	if l.line != 1 || l.inStr {
-		return false
-	}
-	if bytes.HasPrefix(chunk, []byte("id:")) || bytes.HasPrefix(chunk, []byte("retry:")) {
-		return true
-	}
-	if chunk[0] != ':' {
-		return false
-	}
-	scanner := s.events > 0 && !s.sawLF
-	open := l.root != 0 && !l.done
-	return !(open && (l.afterLF || (l.colon && !scanner)))
+	return sse.StartsLine(chunk, sse.LexicalBoundary{
+		InString: l.inStr, PartialField: l.line == 0 && l.prefix > 0,
+		DataLine: l.line == 1, Open: l.root != 0 && !l.done,
+		AfterBreak: l.afterLF, Colon: l.colon, Scanner: s.events > 0 && !s.sawLF,
+	})
 }
 
 func sseJSONValidationPendingValid(pending []byte) bool {
@@ -938,7 +923,7 @@ func sseJSONValidationPendingValid(pending []byte) bool {
 }
 
 func (s *sseJSONValidationState) Finish() error {
-	s.prevEndsWithCR = false
+	s.lines = sse.Lines{}
 	s.lex, s.insertedLF = sseDataLexer{}, 0
 	if s.pendingErr != nil {
 		errPending := s.pendingErr
