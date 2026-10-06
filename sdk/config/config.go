@@ -6,6 +6,11 @@ package config
 
 import internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 
+var (
+	ErrConfigConflict        = internalconfig.ErrConfigConflict
+	ErrConfigVersionRequired = internalconfig.ErrConfigVersionRequired
+)
+
 type APIKeyPolicy = internalconfig.APIKeyPolicy
 
 type SDKConfig = internalconfig.SDKConfig
@@ -51,8 +56,30 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.ParseConfigBytes(data) }
 
+// PrepareConfigPublication validates bytes and hashes only the management-key scalar.
+func PrepareConfigPublication(data []byte) ([]byte, error) {
+	return internalconfig.PrepareConfigPublication(data)
+}
+
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	return internalconfig.SaveConfigPreserveComments(configFile, cfg)
+}
+
+// SaveConfigPreserveCommentsCAS publishes cfg only when the file has expectedVersion.
+func SaveConfigPreserveCommentsCAS(configFile string, cfg *Config, expectedVersion string) (string, error) {
+	return internalconfig.SaveConfigPreserveCommentsCAS(configFile, cfg, expectedVersion)
+}
+
+func ConfigFileVersion(configFile string) (string, error) {
+	return internalconfig.ConfigFileVersion(configFile)
+}
+
+func AtomicWriteConfig(configFile string, data []byte) error {
+	return internalconfig.AtomicWriteConfig(configFile, data)
+}
+
+func AtomicWriteConfigCAS(configFile string, data []byte, expectedVersion string) (string, error) {
+	return internalconfig.AtomicWriteConfigCAS(configFile, data, expectedVersion)
 }
 
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {

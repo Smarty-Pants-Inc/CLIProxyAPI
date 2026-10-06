@@ -12,6 +12,12 @@ import (
 // ParseConfigBytes parses a YAML configuration payload into Config and applies the same
 // in-memory normalizations as LoadConfigOptional, without persisting any changes to disk.
 func ParseConfigBytes(data []byte) (*Config, error) {
+	return parseConfigBytes(data, true)
+}
+
+// parseConfigBytes is the complete, side-effect-free server parsing pipeline.
+// File loading hashes plaintext keys only after acquiring the publication lock.
+func parseConfigBytes(data []byte, hashManagementKey bool) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config payload is empty")
 	}
@@ -58,6 +64,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
+	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
 	if errValidate := cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, errValidate
 	}
@@ -69,7 +78,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	// Hash remote management key if plaintext is detected (nested), but do NOT persist.
-	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+	if hashManagementKey && cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
 		hashed, errHash := bcrypt.GenerateFromPassword([]byte(cfg.RemoteManagement.SecretKey), bcrypt.DefaultCost)
 		if errHash != nil {
 			return nil, fmt.Errorf("hash remote management key: %w", errHash)
@@ -127,5 +136,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.SanitizeOAuthRequestScopedErrors()
 	cfg.SanitizePayloadRules()
 
+	// Authority belongs to the original bytes, not the normalized/hashed object.
+	cfg.ConfigFileVersion = configVersion(data)
 	return &cfg, nil
 }

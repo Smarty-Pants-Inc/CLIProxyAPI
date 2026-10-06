@@ -22,7 +22,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
+// SetReloadResultCallback installs a runtime callback that reports application failure.
+// Set it before starting the watcher. Legacy callbacks are assumed successful.
+func (w *Watcher) SetReloadResultCallback(callback func(*config.Config) bool) {
+	w.reloadResultCallback = callback
+}
+
+func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) bool {
 	log.Debugf("starting full client load process")
 
 	w.clientsMutex.RLock()
@@ -31,7 +37,93 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	if cfg == nil {
 		log.Error("config is nil, cannot reload clients")
-		return
+		return false
+	}
+
+	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, metaAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
+	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
+	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
+
+	var authFileCount int
+	if rescanAuth {
+		authFileCount = w.loadFileClients(cfg)
+		log.Debugf("loaded %d file-based clients", authFileCount)
+	} else {
+		w.clientsMutex.RLock()
+		authFileCount = len(w.lastAuthHashes)
+		w.clientsMutex.RUnlock()
+		log.Debugf("skipping auth directory rescan; retaining %d existing auth files", authFileCount)
+	}
+
+	if rescanAuth {
+		// Keep the candidate caches private and release the scan lock on panic.
+		func() {
+			w.authRescanMu.Lock()
+			defer w.authRescanMu.Unlock()
+			cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
+			newAuthHashes := make(map[string]string)
+			var newAuthContents map[string]*coreauth.Auth
+			if cacheAuthContents {
+				newAuthContents = make(map[string]*coreauth.Auth)
+			}
+			newFileAuthsByPath := make(map[string]map[string]*coreauth.Auth)
+
+			w.clientsMutex.RLock()
+			parser := w.pluginAuthParser
+			w.clientsMutex.RUnlock()
+
+			if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
+				log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
+			} else if resolvedAuthDir != "" {
+				entries, errReadDir := os.ReadDir(resolvedAuthDir)
+				if errReadDir != nil {
+					log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
+				} else {
+					for _, entry := range entries {
+						if entry == nil || entry.IsDir() {
+							continue
+						}
+						name := entry.Name()
+						if !strings.HasSuffix(strings.ToLower(name), ".json") {
+							continue
+						}
+						fullPath := filepath.Join(resolvedAuthDir, name)
+						if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
+							sum := sha256.Sum256(data)
+							normalizedPath := w.normalizeAuthPath(fullPath)
+							newAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+							// Parse and cache auth content for future diff comparisons (debug only).
+							if cacheAuthContents {
+								var auth coreauth.Auth
+								if errParse := json.Unmarshal(data, &auth); errParse == nil {
+									newAuthContents[normalizedPath] = &auth
+								}
+							}
+							ctx := &synthesizer.SynthesisContext{
+								Config:           cfg,
+								AuthDir:          resolvedAuthDir,
+								Now:              time.Now(),
+								IDGenerator:      synthesizer.NewStableIDGenerator(),
+								PluginAuthParser: parser,
+							}
+							generated, errSynthesize := synthesizer.SynthesizeAuthFile(ctx, fullPath, data)
+							if errSynthesize != nil {
+								log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
+							} else if len(generated) > 0 {
+								if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
+									newFileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
+								}
+							}
+						}
+					}
+				}
+			}
+			w.clientsMutex.Lock()
+			w.lastAuthHashes = newAuthHashes
+			w.lastAuthContents = newAuthContents
+			w.fileAuthsByPath = newFileAuthsByPath
+			w.clientsMutex.Unlock()
+		}()
 	}
 
 	if len(affectedOAuthProviders) > 0 {
@@ -56,92 +148,14 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Unlock()
 	}
 
-	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, metaAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
-	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
-	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
-
-	var authFileCount int
-	if rescanAuth {
-		authFileCount = w.loadFileClients(cfg)
-		log.Debugf("loaded %d file-based clients", authFileCount)
-	} else {
-		w.clientsMutex.RLock()
-		authFileCount = len(w.lastAuthHashes)
-		w.clientsMutex.RUnlock()
-		log.Debugf("skipping auth directory rescan; retaining %d existing auth files", authFileCount)
-	}
-
-	if rescanAuth {
-		w.authRescanMu.Lock()
-		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
-		newAuthHashes := make(map[string]string)
-		var newAuthContents map[string]*coreauth.Auth
-		if cacheAuthContents {
-			newAuthContents = make(map[string]*coreauth.Auth)
-		}
-		newFileAuthsByPath := make(map[string]map[string]*coreauth.Auth)
-
-		w.clientsMutex.RLock()
-		parser := w.pluginAuthParser
-		w.clientsMutex.RUnlock()
-
-		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
-			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
-		} else if resolvedAuthDir != "" {
-			entries, errReadDir := os.ReadDir(resolvedAuthDir)
-			if errReadDir != nil {
-				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
-			} else {
-				for _, entry := range entries {
-					if entry == nil || entry.IsDir() {
-						continue
-					}
-					name := entry.Name()
-					if !strings.HasSuffix(strings.ToLower(name), ".json") {
-						continue
-					}
-					fullPath := filepath.Join(resolvedAuthDir, name)
-					if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
-						sum := sha256.Sum256(data)
-						normalizedPath := w.normalizeAuthPath(fullPath)
-						newAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons (debug only).
-						if cacheAuthContents {
-							var auth coreauth.Auth
-							if errParse := json.Unmarshal(data, &auth); errParse == nil {
-								newAuthContents[normalizedPath] = &auth
-							}
-						}
-						ctx := &synthesizer.SynthesisContext{
-							Config:           cfg,
-							AuthDir:          resolvedAuthDir,
-							Now:              time.Now(),
-							IDGenerator:      synthesizer.NewStableIDGenerator(),
-							PluginAuthParser: parser,
-						}
-						generated, errSynthesize := synthesizer.SynthesizeAuthFile(ctx, fullPath, data)
-						if errSynthesize != nil {
-							log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
-						} else if len(generated) > 0 {
-							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
-								newFileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
-							}
-						}
-					}
-				}
-			}
-		}
-		w.clientsMutex.Lock()
-		w.lastAuthHashes = newAuthHashes
-		w.lastAuthContents = newAuthContents
-		w.fileAuthsByPath = newFileAuthsByPath
-		w.clientsMutex.Unlock()
-		w.authRescanMu.Unlock()
-	}
-
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
 
-	if w.reloadCallback != nil {
+	if w.reloadResultCallback != nil {
+		if !w.reloadResultCallback(cfg) {
+			log.Error("config runtime reload failed; version remains unobserved")
+			return false
+		}
+	} else if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback before auth refresh")
 		w.reloadCallback(cfg)
 	}
@@ -160,6 +174,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		metaAPIKeyCount,
 		openAICompatCount,
 	)
+	return true
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {

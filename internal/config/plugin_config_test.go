@@ -189,8 +189,8 @@ func TestSaveConfigPreserveComments_PrunesDefaultPluginsDir(t *testing.T) {
 			Configs: map[string]PluginInstanceConfig{},
 		},
 	}
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	data, errRead := os.ReadFile(configPath)

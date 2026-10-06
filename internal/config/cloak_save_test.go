@@ -34,8 +34,8 @@ func TestSaveConfigPreserveComments_ClaudeCloakUpdates(t *testing.T) {
 		},
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -106,8 +106,8 @@ func TestSaveConfigPreserveComments_ClaudeCloakExplicitFalse(t *testing.T) {
 		},
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -170,8 +170,8 @@ func TestSaveConfigPreserveComments_ClaudeCloakExplicitFalseWhenFieldPreviouslyA
 		},
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -221,8 +221,8 @@ func TestSaveConfigPreserveComments_ClaudeCloakRemovedWhenNil(t *testing.T) {
 		},
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)
@@ -272,8 +272,8 @@ claude-api-key:
 		},
 	}
 
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	if errSave := saveConfigFixture(configPath, cfg); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 
 	savedBytes, errRead := os.ReadFile(configPath)

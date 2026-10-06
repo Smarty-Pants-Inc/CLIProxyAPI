@@ -99,7 +99,7 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -198,7 +198,7 @@ func TestListPluginsUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -247,7 +247,7 @@ options:
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -292,7 +292,7 @@ func TestGetPluginConfigReturnsEmptyObjectForKnownUnconfiguredPlugin(t *testing.
 				Dir: pluginsDir,
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -318,8 +318,8 @@ func TestGetPluginConfigReturnsNotFoundForUnknownPlugin(t *testing.T) {
 	t.Parallel()
 
 	h := &Handler{
-		cfg:            &config.Config{},
-		configFilePath: writeTestConfigFile(t),
+		cfg:           &config.Config{},
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -346,7 +346,7 @@ func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 	reloads, reloadDone := captureConfigReload(h)
 
@@ -399,7 +399,7 @@ func TestPatchPluginEnabledReloadSnapshotRawImmutability(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 	reloads := make(chan *config.Config, 1)
 	releaseReload := make(chan struct{})
@@ -463,7 +463,7 @@ func TestPutPluginConfigReplacesPluginConfig(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -498,7 +498,7 @@ func TestPatchPluginConfigMergesAndDeletesFields(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -546,7 +546,7 @@ func TestDeletePluginRejectsUnresolvedPluginsDir(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -578,7 +578,8 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 
 	pluginsDir := writeManagementPluginFile(t, "sample")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if errWrite := os.WriteFile(configPath, []byte("plugins:\n  configs:\n    sample:\n      enabled: true\n      mode: safe\n    keep:\n      enabled: true\n      mode: retained\n"), 0o600); errWrite != nil {
+	const source = "plugins:\n  configs:\n    sample:\n      enabled: true\n      mode: safe\n    keep:\n      enabled: true\n      mode: retained\n"
+	if errWrite := os.WriteFile(configPath, []byte(source), 0o600); errWrite != nil {
 		t.Fatalf("failed to write test config: %v", errWrite)
 	}
 	h := &Handler{
@@ -592,6 +593,7 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 			},
 		},
 		configFilePath: configPath,
+		configVersion:  testConfigSourceVersion(source),
 	}
 	reloads := make(chan *config.Config, 1)
 	releaseReload := make(chan struct{})
@@ -690,7 +692,7 @@ func TestDeletePluginUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -718,8 +720,8 @@ func TestDeletePluginReturnsNotFoundForUnknownPlugin(t *testing.T) {
 	t.Parallel()
 
 	h := &Handler{
-		cfg:            &config.Config{},
-		configFilePath: writeTestConfigFile(t),
+		cfg:           &config.Config{},
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()

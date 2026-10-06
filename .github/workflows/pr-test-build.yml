@@ -41,6 +41,15 @@ jobs:
           for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
+      - name: Test config ACL publication boundaries
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMPDIR=$(mktemp -d)
+          go test -race -v ./internal/config -run '^(TestOriginalACLGroupBoundaryRefusesPublication|TestInheritedACLRestrictedGroupSurvivesOrRefuses)$' -count=1 | tee "$RUNNER_TEMP/config-acl-boundary.log"
+          grep -F -- '--- PASS: TestOriginalACLGroupBoundaryRefusesPublication' "$RUNNER_TEMP/config-acl-boundary.log"
+          grep -F -- '--- PASS: TestInheritedACLRestrictedGroupSurvivesOrRefuses' "$RUNNER_TEMP/config-acl-boundary.log"
       - name: Test full Go suite with explicit known-failure quarantine
         timeout-minutes: 20
         shell: bash

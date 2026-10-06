@@ -49,8 +49,13 @@ func TestAPIKeyWeightParsingAndZeroPersistence(t *testing.T) {
 `), 0644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
-	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
-		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	loaded, errLoad := LoadConfig(configPath)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	loaded.XAIKey[0].Weight = cfg.XAIKey[0].Weight
+	if errSave := SaveConfigPreserveComments(configPath, loaded); errSave != nil {
+		t.Fatalf("saveConfigFixture() error = %v", errSave)
 	}
 	saved, errRead := os.ReadFile(configPath)
 	if errRead != nil {

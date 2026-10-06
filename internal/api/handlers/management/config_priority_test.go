@@ -95,7 +95,7 @@ func TestPatchPriorityForEveryProvider(t *testing.T) {
 			cfg := &config.Config{}
 			test.setup(cfg)
 			configFile := writeTestConfigFile(t)
-			h := &Handler{cfg: cfg, configFilePath: configFile}
+			h := &Handler{cfg: cfg, configVersion: testConfigSourceVersion("{}\n"), configFilePath: configFile}
 
 			// Update priority to 7
 			rec := httptest.NewRecorder()
@@ -107,7 +107,7 @@ func TestPatchPriorityForEveryProvider(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if got := test.get(cfg); got != 7 {
+			if got := test.get(h.cfg); got != 7 {
 				t.Fatalf("priority = %d, want 7", got)
 			}
 
@@ -130,7 +130,7 @@ func TestPatchPriorityForEveryProvider(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("omit priority: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if got := test.get(cfg); got != 7 {
+			if got := test.get(h.cfg); got != 7 {
 				t.Fatalf("preserved priority = %d, want 7", got)
 			}
 
@@ -144,7 +144,7 @@ func TestPatchPriorityForEveryProvider(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("reset priority: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if got := test.get(cfg); got != 0 {
+			if got := test.get(h.cfg); got != 0 {
 				t.Fatalf("reset priority = %d, want 0", got)
 			}
 		})

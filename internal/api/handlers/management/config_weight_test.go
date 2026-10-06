@@ -39,7 +39,7 @@ func TestPatchAPIKeyWeightForEveryFamily(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := &config.Config{}
 			test.setup(cfg)
-			h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			h := &Handler{cfg: cfg, configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t)}
 
 			rec := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(rec)
@@ -50,7 +50,7 @@ func TestPatchAPIKeyWeightForEveryFamily(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if weight := test.get(cfg); weight == nil || *weight != 7 {
+			if weight := test.get(h.cfg); weight == nil || *weight != 7 {
 				t.Fatalf("weight = %v, want 7", weight)
 			}
 		})
@@ -60,7 +60,7 @@ func TestPatchAPIKeyWeightForEveryFamily(t *testing.T) {
 func TestPatchAPIKeyWeightResetAndStrictValidation(t *testing.T) {
 	initial := 5
 	cfg := &config.Config{GeminiKey: []config.GeminiKey{{APIKey: "key", Weight: &initial}}}
-	h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+	h := &Handler{cfg: cfg, configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t)}
 
 	patch := func(raw string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -78,7 +78,7 @@ func TestPatchAPIKeyWeightResetAndStrictValidation(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("weight %s status = %d, want 400; body=%s", invalid, rec.Code, rec.Body.String())
 		}
-		if cfg.GeminiKey[0].Weight == nil || *cfg.GeminiKey[0].Weight != initial {
+		if h.cfg.GeminiKey[0].Weight == nil || *h.cfg.GeminiKey[0].Weight != initial {
 			t.Fatalf("invalid weight %s changed config", invalid)
 		}
 	}
@@ -86,13 +86,13 @@ func TestPatchAPIKeyWeightResetAndStrictValidation(t *testing.T) {
 	if rec := patch("null"); rec.Code != http.StatusOK {
 		t.Fatalf("reset status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if cfg.GeminiKey[0].Weight != nil {
-		t.Fatalf("reset weight = %v, want nil default", cfg.GeminiKey[0].Weight)
+	if h.cfg.GeminiKey[0].Weight != nil {
+		t.Fatalf("reset weight = %v, want nil default", h.cfg.GeminiKey[0].Weight)
 	}
 }
 
 func TestPutAPIKeyWeightRejectsAboveMaximum(t *testing.T) {
-	h := &Handler{cfg: &config.Config{}, configFilePath: writeTestConfigFile(t)}
+	h := &Handler{cfg: &config.Config{}, configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t)}
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/gemini-api-key", strings.NewReader(`[{"api-key":"key","weight":1000001}]`))

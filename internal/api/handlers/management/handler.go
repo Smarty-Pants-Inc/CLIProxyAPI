@@ -41,6 +41,7 @@ const attemptMaxIdleTime = 2 * time.Hour
 type Handler struct {
 	cfg                     *config.Config
 	configFilePath          string
+	configVersion           string
 	mu                      sync.Mutex
 	authStatusMu            sync.Mutex
 	reloadMu                sync.Mutex
@@ -83,6 +84,10 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	if cfg != nil {
+		h.configVersion = cfg.ConfigFileVersion
+	}
+
 	h.startAttemptCleanup()
 	return h
 }
@@ -122,6 +127,16 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager)
 }
 
+// configResponseSnapshot detaches every map and slice before a client write.
+func (h *Handler) configResponseSnapshot() *config.Config {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cfg.CloneForRuntime()
+}
+
 // SetConfig updates the in-memory config reference when the server hot-reloads.
 func (h *Handler) SetConfig(cfg *config.Config) {
 	if h == nil {
@@ -129,6 +144,11 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	}
 	h.mu.Lock()
 	h.cfg = cfg
+	h.configVersion = ""
+	if cfg != nil {
+		h.configVersion = cfg.ConfigFileVersion
+	}
+
 	h.mu.Unlock()
 }
 
@@ -178,12 +198,19 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 // saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
 // Callers must hold h.mu.
 func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
+	if !managementRequestActive(c) {
+		return configReloadSnapshot{}, false
+	}
 	if h.policyConfigFrozenLocked() {
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return configReloadSnapshot{}, false
 	}
-	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+	if errSave := h.saveConfigLockedContext(managementRequestContext(c)); errSave != nil {
+		if errSave == config.ErrConfigConflict {
+			c.JSON(http.StatusConflict, gin.H{"error": "config changed since it was read"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+		}
 		return configReloadSnapshot{}, false
 	}
 	return h.reloadSnapshotConfigLocked(), true
@@ -319,6 +346,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
+	h.mu.Lock()
 	cfg := h.cfg
 	var (
 		allowRemote bool
@@ -328,6 +356,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
 	}
+	h.mu.Unlock()
 	if h.allowRemoteOverride {
 		allowRemote = true
 	}
@@ -452,6 +481,51 @@ func (h *Handler) policyConfigFrozenLocked() bool {
 	return disk.Policies.Kind != 0
 }
 
+// configMutationLocked isolates a management edit from the live runtime snapshot.
+// Callers hold h.mu and defer the returned rollback until after publication.
+func (h *Handler) configMutationLocked() func() {
+	previous := h.cfg
+	if h.configVersion == "" && previous != nil {
+		h.configVersion = previous.ConfigFileVersion
+
+	}
+	generation := h.reloadGeneration
+	h.cfg = previous.CloneForRuntime()
+	return func() {
+		// A published config may still be read by the server and other runtime
+		// components. Never write back into it. Successful candidates remain
+		// handler-owned; the detached reload snapshot goes through the reload hook.
+		if h.reloadGeneration == generation {
+			h.cfg = previous
+		}
+	}
+}
+
+func (h *Handler) saveConfigLocked() error {
+	return h.saveConfigLockedContext(context.Background())
+}
+
+func (h *Handler) saveConfigLockedContext(ctx context.Context) error {
+	if h.configFilePath == "" {
+		return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+	}
+	version, errSave := config.SaveConfigPreserveCommentsCASContext(ctx, h.configFilePath, h.cfg, h.configVersion)
+	if errSave == nil {
+		h.configVersion = version
+	}
+	return errSave
+}
+
+// saveConfigWithCommitLocked keeps irreversible plugin effects behind config
+// CAS, cancellation and metadata checks, while retaining publication authority.
+func (h *Handler) saveConfigWithCommitLocked(ctx context.Context, afterCommit func() error) (error, error) {
+	version, effectErr, err := config.SaveConfigPreserveCommentsCASContextWithCommit(ctx, h.configFilePath, h.cfg, h.configVersion, afterCommit)
+	if err == nil {
+		h.configVersion = version
+	}
+	return effectErr, err
+}
+
 // persist saves the current in-memory config to disk.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
@@ -462,13 +536,19 @@ func (h *Handler) persist(c *gin.Context) bool {
 // persistLocked saves the current in-memory config to disk.
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
+	if !managementRequestActive(c) {
+		return false
+	}
 	if h.policyConfigFrozenLocked() {
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return false
 	}
-	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+	if err := h.saveConfigLockedContext(managementRequestContext(c)); err != nil {
+		if err == config.ErrConfigConflict {
+			c.JSON(http.StatusConflict, gin.H{"error": "config changed since it was read"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		}
 		return false
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
@@ -483,6 +563,9 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 
 // Helper methods for simple types
 func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -490,11 +573,15 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	defer h.configMutationResponse(c)()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -502,11 +589,15 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	defer h.configMutationResponse(c)()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
+	if !prepareManagementBody(c) {
+		return
+	}
 	var body struct {
 		Value *string `json:"value"`
 	}
@@ -514,6 +605,7 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	defer h.configMutationResponse(c)()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }

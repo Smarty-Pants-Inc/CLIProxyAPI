@@ -49,6 +49,8 @@ func (w *Watcher) ReloadConfigIfChanged() {
 }
 
 func (w *Watcher) reloadConfigIfChanged() {
+	w.configApplyMu.Lock()
+	defer w.configApplyMu.Unlock()
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
@@ -71,21 +73,31 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
-		finalHash := newHash
-		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
-			sumUpdated := sha256.Sum256(updatedData)
-			finalHash = hex.EncodeToString(sumUpdated[:])
-		} else if errRead != nil {
-			log.WithError(errRead).Debug("failed to compute updated config hash after reload")
-		}
-		w.clientsMutex.Lock()
-		w.lastConfigHash = finalHash
-		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
 	}
 }
 
-func (w *Watcher) reloadConfig() bool {
+func (w *Watcher) reloadConfig() (applied bool) {
+	var previousConfig, attemptedConfig *config.Config
+	var previousYAML []byte
+	staged := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.WithField("panic", recovered).Error("config runtime reload failed; version remains unobserved")
+			applied = false
+		}
+		if !applied && staged {
+			w.clientsMutex.Lock()
+			// Runtime callbacks may have applied partial side effects. Neither the
+			// attempted bytes nor the previous bytes are an observed runtime state.
+			w.lastConfigHash = ""
+			if w.config == attemptedConfig {
+				w.config = previousConfig
+				w.oldConfigYaml = previousYAML
+			}
+			w.clientsMutex.Unlock()
+		}
+	}()
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)
 
@@ -95,6 +107,8 @@ func (w *Watcher) reloadConfig() bool {
 		return false
 	}
 
+	// Retain this immutable value before exposing newConfig to runtime callbacks.
+	loadedVersion := newConfig.ConfigFileVersion
 	if w.mirroredAuthDir != "" {
 		newConfig.AuthDir = w.mirroredAuthDir
 	} else {
@@ -106,6 +120,9 @@ func (w *Watcher) reloadConfig() bool {
 	}
 
 	w.clientsMutex.Lock()
+	previousConfig, previousYAML = w.config, w.oldConfigYaml
+	attemptedConfig = newConfig
+	staged = true
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
@@ -139,6 +156,11 @@ func (w *Watcher) reloadConfig() bool {
 	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || retryConfigChanged)
 
 	log.Infof("config successfully reloaded, triggering client reload")
-	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
+	if !w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh) {
+		return false
+	}
+	w.clientsMutex.Lock()
+	w.lastConfigHash = loadedVersion
+	w.clientsMutex.Unlock()
 	return true
 }

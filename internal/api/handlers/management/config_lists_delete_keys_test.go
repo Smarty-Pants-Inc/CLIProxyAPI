@@ -1,6 +1,8 @@
 package management
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+// These synthetic unit fixtures are edits seeded from known source bytes.
+// Never fetch a fresh live-file hash to authorize them.
+func testConfigSourceVersion(source string) string {
+	sum := sha256.Sum256([]byte(source))
+	return fmt.Sprintf("%x", sum[:])
+}
 
 func writeTestConfigFile(t *testing.T) string {
 	t.Helper()
@@ -33,7 +42,7 @@ func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -60,7 +69,7 @@ func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -103,7 +112,7 @@ func TestDeleteGeminiStyleKeyRejectsAmbiguousRoutingIdentity(t *testing.T) {
 			} else {
 				cfg.GeminiKey = entries
 			}
-			handler := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			handler := &Handler{cfg: cfg, configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t)}
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodDelete, path, nil)
@@ -155,7 +164,7 @@ func TestPatchGeminiStyleKeyRoutingIdentity(t *testing.T) {
 			} else {
 				cfg.GeminiKey = entries
 			}
-			handler := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			handler := &Handler{cfg: cfg, configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t)}
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodPatch, path, strings.NewReader(`{"match":"shared-key","value":{"prefix":"updated"}}`))
@@ -169,9 +178,9 @@ func TestPatchGeminiStyleKeyRoutingIdentity(t *testing.T) {
 			if recorder.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, tc.wantStatus, recorder.Body.String())
 			}
-			remaining := cfg.GeminiKey
+			remaining := handler.cfg.GeminiKey
 			if tc.interactions {
-				remaining = cfg.InteractionsKey
+				remaining = handler.cfg.InteractionsKey
 			}
 			if tc.wantStatus == http.StatusOK {
 				if remaining[0].Prefix != "team-a" || remaining[1].Prefix != "updated" {
@@ -194,7 +203,7 @@ func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T)
 				{APIKey: "shared-key", BaseURL: "https://claude.example.com"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -224,7 +233,7 @@ func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -254,7 +263,7 @@ func TestDeleteXAIKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -281,7 +290,7 @@ func TestDeleteMetaKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()
@@ -308,7 +317,7 @@ func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configVersion: testConfigSourceVersion("{}\n"), configFilePath: writeTestConfigFile(t),
 	}
 
 	rec := httptest.NewRecorder()

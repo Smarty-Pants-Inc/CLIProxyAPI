@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,69 @@ import (
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	_, errSave := SaveConfigPreserveCommentsCAS(configFile, cfg, cfg.ConfigFileVersion)
+	return errSave
+}
+
+// SaveConfigPreserveCommentsCAS publishes cfg only when configFile still has expectedVersion.
+func SaveConfigPreserveCommentsCAS(configFile string, cfg *Config, expectedVersion string) (string, error) {
+	return SaveConfigPreserveCommentsCASContext(context.Background(), configFile, cfg, expectedVersion)
+}
+
+// SaveConfigPreserveCommentsCASContext retains request ownership through lock waiting and staging.
+func SaveConfigPreserveCommentsCASContext(ctx context.Context, configFile string, cfg *Config, expectedVersion string) (string, error) {
+	version, _, err := SaveConfigPreserveCommentsCASContextWithCommit(ctx, configFile, cfg, expectedVersion, nil)
+	return version, err
+}
+
+// SaveConfigPreserveCommentsCASContextWithCommit reserves the publication lock
+// through a post-commit local effect. The callback runs only after durable config
+// publication; cancellation cannot undo a committed operation. A callback error
+// is returned separately from a publication error: callers must retain the
+// committed snapshot/version and report explicit recovery, never roll it back.
+// Callbacks must not recurse into config publication or perform network I/O.
+func SaveConfigPreserveCommentsCASContextWithCommit(ctx context.Context, configFile string, cfg *Config, expectedVersion string, afterCommit func() error) (string, error, error) {
+	if cfg == nil {
+		return "", nil, fmt.Errorf("config is nil")
+	}
+	var version string
+	var effectErr error
+	err := withConfigFileLockContext(ctx, configFile, func(configFile string) error {
+		if expectedVersion == "" {
+			return ErrConfigVersionRequired
+		}
+		current, errRead := os.ReadFile(configFile)
+		if errRead != nil {
+			return errRead
+		}
+		if configVersion(current) != expectedVersion {
+			return ErrConfigConflict
+		}
+		if errSave := saveConfigPreserveCommentsUnlockedContext(ctx, configFile, cfg); errSave != nil {
+			return errSave
+		}
+		published, errPublished := os.ReadFile(configFile)
+		if errPublished != nil {
+			return errPublished
+		}
+		version = configVersion(published)
+		cfg.ConfigFileVersion = version
+		if afterCommit != nil {
+			effectErr = afterCommit()
+		}
+		return nil
+	})
+	return version, effectErr, err
+}
+
+func saveConfigPreserveCommentsUnlocked(configFile string, cfg *Config) error {
+	return saveConfigPreserveCommentsUnlockedContext(context.Background(), configFile, cfg)
+}
+
+func saveConfigPreserveCommentsUnlockedContext(ctx context.Context, configFile string, cfg *Config) error {
 	if err := cfg.ValidateAPIKeyPolicies(); err != nil {
 		return err
 	}
@@ -69,12 +133,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	}
 	normalizeCollectionNodeStyles(original.Content[0])
 
-	// Write back.
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	// Write back atomically.
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -85,14 +144,18 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	if err = enc.Close(); err != nil {
 		return err
 	}
-	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return atomicWriteConfigWithContext(ctx, configFile, NormalizeCommentIndentation(buf.Bytes()), replaceConfigFile)
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
+	return withConfigFileLock(configFile, func(configFile string) error {
+		return saveConfigPreserveCommentsUpdateNestedScalarUnlocked(configFile, path, value)
+	})
+}
+
+func saveConfigPreserveCommentsUpdateNestedScalarUnlocked(configFile string, path []string, value string) error {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return err
@@ -122,11 +185,6 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -137,9 +195,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	if err = enc.Close(); err != nil {
 		return err
 	}
-	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return atomicWriteConfigUnlocked(configFile, NormalizeCommentIndentation(buf.Bytes()))
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.
