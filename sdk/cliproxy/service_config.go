@@ -160,16 +160,17 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 
-	if !s.applyManagerConfig(ctx, commit) {
+	// Install client credentials, including the management handler's key hash,
+	// before fallible ancillary work such as cooldown persistence or pprof stop.
+	// Revocation must not depend on those steps, but their failures still reach
+	// the watcher so it can retry the rest of the captured revision.
+	if !s.updateServerClientsContext(ctx, cfg) {
 		return false
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
-	// Install client credentials, including the management handler's key hash,
-	// before fallible ancillary work. A failed pprof stop must not retain a
-	// revoked key, and its failure must still reach the watcher for retry.
-	if !s.updateServerClientsContext(ctx, cfg) {
+	if !s.applyManagerConfig(ctx, commit) {
 		return false
 	}
 	if errContext := ctx.Err(); errContext != nil {

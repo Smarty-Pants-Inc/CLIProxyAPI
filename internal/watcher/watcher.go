@@ -67,6 +67,13 @@ type Watcher struct {
 	pluginAuthParser     synthesizer.PluginAuthParser
 	mirroredAuthDir      string
 	oldConfigYaml        []byte
+
+	// Retry state is guarded by configApplyMu, including timer callbacks.
+	configRetryTimer      *time.Timer
+	configRetrySource     []byte
+	configRetryAttempt    int
+	configRetryGeneration uint64
+	configRetryAfterFunc  func(time.Duration, func()) *time.Timer
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -147,6 +154,7 @@ func (w *Watcher) Stop() error {
 	w.stopped.Store(true)
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
+	w.stopConfigRetry()
 	w.stopServerUpdateTimer()
 	return w.watcher.Close()
 }

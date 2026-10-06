@@ -56,6 +56,7 @@ func (w *Watcher) start(ctx context.Context) error {
 }
 
 func (w *Watcher) processEvents(ctx context.Context) {
+	defer w.stopConfigRetry()
 	for {
 		select {
 		case <-ctx.Done():
