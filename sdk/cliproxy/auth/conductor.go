@@ -42,6 +42,13 @@ type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
 
+// ExecutionAttemptObserver is told, for every provider, that a new upstream attempt starts for an
+// execution session. An executor ends state that bounds only the previous attempt's retry/final
+// decision, such as a pending downstream-close hold (CLIProxyAPI#64).
+type ExecutionAttemptObserver interface {
+	BeginExecutionAttempt(sessionID string)
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.

@@ -93,6 +93,47 @@ type arbitrationOptions struct {
 	httpRelease <-chan struct{}
 	httpSSE     string
 	tertiary    bool
+	// other makes the secondary credential a non-Codex provider served by otherExecutor.
+	other *otherProviderExecutor
+}
+
+// otherProviderExecutor is a non-Codex provider: the cross-provider replacement for a
+// Codex WebSocket quota refusal. Its first response waits for release.
+type otherProviderExecutor struct {
+	started chan struct{}
+	release chan struct{}
+	model   string
+	calls   atomic.Int32
+}
+
+func (*otherProviderExecutor) Identifier() string { return "arbitration-other" }
+func (e *otherProviderExecutor) ExecuteStream(ctx context.Context, _ *auth.Auth, _ execution.Request, _ execution.Options) (*execution.StreamResult, error) {
+	id := "next"
+	if e.calls.Add(1) == 1 {
+		id = "replacement"
+		close(e.started)
+		select {
+		case <-e.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	chunks := make(chan execution.StreamChunk, 1)
+	chunks <- execution.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"model":%q,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"other provider answer"}]}]}}`, id, e.model))}
+	close(chunks)
+	return &execution.StreamResult{Chunks: chunks}, nil
+}
+func (*otherProviderExecutor) Execute(context.Context, *auth.Auth, execution.Request, execution.Options) (execution.Response, error) {
+	return execution.Response{}, fmt.Errorf("not used")
+}
+func (*otherProviderExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
+	return a, nil
+}
+func (*otherProviderExecutor) CountTokens(context.Context, *auth.Auth, execution.Request, execution.Options) (execution.Response, error) {
+	return execution.Response{}, fmt.Errorf("not used")
+}
+func (*otherProviderExecutor) HttpRequest(context.Context, *auth.Auth, *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("not used")
 }
 
 func arbitrationClient(t *testing.T, refusal string, fallback bool, gate <-chan struct{}) (*websocket.Conn, *arbitrationExecutor, *atomic.Int32) {
@@ -164,6 +205,10 @@ func arbitrationClientWith(t *testing.T, refusal string, fallback bool, gate <-c
 	manager.SetConfig(cfg)
 	manager.SetRetryConfig(0, 0, 0)
 	manager.RegisterExecutor(exec)
+	if o.other != nil {
+		o.other.model = model
+		manager.RegisterExecutor(o.other)
+	}
 	tokens := []string{"primary"}
 	if fallback {
 		tokens = append(tokens, "secondary")
@@ -174,10 +219,18 @@ func arbitrationClientWith(t *testing.T, refusal string, fallback bool, gate <-c
 	httpFallback := o.httpStarted != nil || o.httpSSE != ""
 	for i, token := range tokens {
 		id := fmt.Sprintf("%s-%d", t.Name(), i)
-		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		provider := "codex"
+		if i > 0 && o.other != nil {
+			provider = o.other.Identifier()
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
-		_, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive,
-			Attributes: map[string]string{"api_key": token, "base_url": upstream.URL, "websockets": fmt.Sprint(i == 0 || !httpFallback)}, Metadata: map[string]any{"disable_cooling": false}})
+		attrs := map[string]string{"api_key": token, "base_url": upstream.URL, "websockets": fmt.Sprint(i == 0 || !httpFallback)}
+		if i == 0 {
+			attrs["priority"] = "10" // the Codex WebSocket credential is tried first
+		}
+		_, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: provider, Status: auth.StatusActive,
+			Attributes: attrs, Metadata: map[string]any{"disable_cooling": false}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -476,5 +529,75 @@ func TestCodexWebsocketHTTPFallbackOutputQuotaRefusal(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// CLIProxyAPI#64 Astra round 3 P1: the handover is provider-independent. A Codex WebSocket quota
+// refusal + EOF fails over to a non-Codex provider. Manager's attempt boundary ends the old hold;
+// its timer callback, delivered after the replacement starts, must not close the client. The
+// replacement completes, a second turn uses the same socket, and closing it releases the session.
+func TestCodexWebsocketCrossProviderFallbackOutlivesDecisionHold(t *testing.T) {
+	for _, code := range []string{"usage_limit_reached", "insufficient_quota"} {
+		t.Run(code, func(t *testing.T) {
+			gate := make(chan struct{})
+			other := &otherProviderExecutor{started: make(chan struct{}), release: make(chan struct{})}
+			c, exec, attempts := arbitrationClientWith(t, code, true, gate, arbitrationOptions{other: other})
+			var sess *codexWebsocketSession
+			select {
+			case sess = <-exec.session:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no teardown receipt from the Codex primary")
+			}
+			sess.connMu.Lock()
+			hold := sess.disconnectHold
+			generation := sess.disconnectHoldGeneration
+			sess.connMu.Unlock()
+			if hold == nil {
+				t.Fatal("no decision hold while waiting for the decision")
+			}
+			close(gate)
+			select {
+			case <-other.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("other-provider fallback did not start")
+			}
+			sess.connMu.Lock()
+			hold = sess.disconnectHold
+			sess.connMu.Unlock()
+			if hold != nil {
+				t.Error("other-provider attempt did not end the Codex decision hold")
+			}
+			// The replacement outlives the bound: deliver the old timer's callback now.
+			sess.expireDisconnectHold(generation)
+			close(other.release)
+			_, payload, err := c.ReadMessage()
+			if err != nil || gjson.GetBytes(payload, "response.id").String() != "replacement" || !strings.Contains(string(payload), "other provider answer") {
+				t.Fatalf("other-provider answer = %s, %v", payload, err)
+			}
+			if err := c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[]}`, other.model))); err != nil {
+				t.Fatal(err)
+			}
+			_, payload, err = c.ReadMessage()
+			if err != nil || gjson.GetBytes(payload, "response.id").String() != "next" {
+				t.Fatalf("next turn on same socket = %s, %v", payload, err)
+			}
+			if attempts.Load() != 0 || other.calls.Load() != 2 {
+				t.Fatalf("codex fallback attempts = %d, other-provider calls = %d", attempts.Load(), other.calls.Load())
+			}
+			_ = c.Close()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				exec.store.mu.Lock()
+				open := len(exec.store.sessions)
+				exec.store.mu.Unlock()
+				if open == 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("downstream close left %d Codex session(s)", open)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
 	}
 }

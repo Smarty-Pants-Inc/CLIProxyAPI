@@ -73,7 +73,6 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	e.wsExec.cancelDisconnectHold(opts)
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
 		return e.wsExec.Execute(ctx, auth, req, opts)
 	}
@@ -87,7 +86,6 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	e.wsExec.cancelDisconnectHold(opts)
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
@@ -109,6 +107,13 @@ func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: http executor is nil")
 	}
 	return e.httpExec.CountTokens(ctx, auth, req, opts)
+}
+
+func (e *CodexAutoExecutor) BeginExecutionAttempt(sessionID string) {
+	if e == nil || e.wsExec == nil {
+		return
+	}
+	e.wsExec.BeginExecutionAttempt(sessionID)
 }
 
 func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
