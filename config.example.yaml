@@ -271,13 +271,17 @@ routing:
   # execution or derived session identity, and the existing first-message hash fallback.
   # Unavailable bindings may fail over, except when compacted context is unsafe to replay
   # on another credential; those requests fail closed instead of switching credentials.
-  # Standalone gateways persist bindings in auth-dir/session-affinity.state (not an auth JSON).
+  # Standalone gateways persist bindings in session-affinity-state-dir/session-affinity.state.
   # Home owns routing and does not create this local affinity state file.
   # SDK configs with an empty auth-dir keep bindings in memory only.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
+  # Empty defaults to $XDG_STATE_HOME/cliproxyapi, or ~/.local/state/cliproxyapi.
+  # Must be outside auth-dir; paths resolving into it (including symlinks) are rejected.
+  # No automatic import of legacy state from auth-dir. See DESIGN-409.md for recovery.
+  session-affinity-state-dir: ""
   # How long session-to-auth bindings are retained. Default: 6h
   session-affinity-ttl: "6h"
   # When true (default), subagents (child sessions with parent references) inherit and bind

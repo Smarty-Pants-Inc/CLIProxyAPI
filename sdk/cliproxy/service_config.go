@@ -3,13 +3,11 @@ package cliproxy
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -56,19 +54,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if state.sessionAffinity && !cfg.Home.Enabled && strings.TrimSpace(cfg.AuthDir) != "" {
-		authDir, errResolve := util.ResolveAuthDir(cfg.AuthDir)
-		if errResolve == nil {
-			authDir, errResolve = filepath.Abs(authDir)
-		}
-		if errResolve == nil {
-			authDir, errResolve = resolveAffinityStateDir(authDir)
-		}
+		stateDir, errResolve := cfg.ResolveSessionAffinityStateDir()
 		if errResolve != nil {
 			// Do not write runtime state to an unresolved or unintended directory.
 			log.WithError(errResolve).Error("failed to resolve session affinity state directory; routing will fail closed")
 			state.statePathUnavailable = true
 		} else {
-			state.statePath = filepath.Join(authDir, "session-affinity.state")
+			state.statePath = filepath.Join(stateDir, "session-affinity.state")
 		}
 	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -83,28 +75,6 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
 	return state
-}
-
-// resolveAffinityStateDir receives an absolute path. Resolve its longest existing
-// ancestor so creating missing directories cannot change the cache ownership key.
-func resolveAffinityStateDir(path string) (string, error) {
-	ancestor := path
-	missing := ""
-	for {
-		realDir, errReal := filepath.EvalSymlinks(ancestor)
-		if errReal == nil {
-			return filepath.Join(realDir, missing), nil
-		}
-		if !errors.Is(errReal, os.ErrNotExist) {
-			return "", errReal
-		}
-		parent := filepath.Dir(ancestor)
-		if parent == ancestor {
-			return "", errReal
-		}
-		missing = filepath.Join(filepath.Base(ancestor), missing)
-		ancestor = parent
-	}
 }
 
 func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCache) coreauth.Selector {
@@ -163,6 +133,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		s.cfgMu.RUnlock()
 	}
 	if newCfg == nil {
+		return configCommit{}
+	}
+	if _, errResolve := newCfg.ResolveSessionAffinityStateDir(); errResolve != nil {
+		log.WithError(errResolve).Warn("rejected config update with invalid session affinity state directory")
 		return configCommit{}
 	}
 	if errValidate := newCfg.ValidateAPIKeyPolicies(); errValidate != nil {
