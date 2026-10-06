@@ -63,6 +63,8 @@ type codexWebsocketSession struct {
 	lifecycleBindMu           sync.Mutex
 	lifecycle                 cliproxyexecutor.ExecutionLifecycle
 	lifecycleModel            string
+	disconnectHold            *time.Timer
+	disconnectHoldGeneration  uint64
 
 	writeMu sync.Mutex
 
@@ -688,6 +690,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 		logCodexWebsocketConnectedWithReused(sess, sess.sessionID, authID, wsURL, true)
 		return previous, previousCloser, nil, nil
 	}
+	sess.stopDisconnectHoldLocked()
 	sess.conn = conn
 	sess.connCloser = closer
 	sess.multiAgentV2OptimizedConn = nil
@@ -724,7 +727,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				}
 			}
 			if !invalidated {
-				invalidate()
+				if ch != nil && !e.responseSteeringEnabled() {
+					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_disconnected", errRead)
+				} else {
+					invalidate()
+				}
 			}
 			return
 		}
@@ -745,7 +752,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 					}
 				}
 				if !invalidated {
-					invalidate()
+					if ch != nil && !e.responseSteeringEnabled() {
+						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "unexpected_binary", errBinary)
+					} else {
+						invalidate()
+					}
 				}
 				return
 			}
@@ -771,6 +782,68 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	}
 }
 
+// Bound only the retry/final decision after teardown, not a live response.
+// This fixed ceiling applies even without a caller context deadline (#3484).
+const codexWebsocketDisconnectHold = 30 * time.Second
+
+func (e *CodexWebsocketsExecutor) responseSteeringEnabled() bool {
+	return e.cfg != nil && (e.cfg.Codex.ResponseSteering || e.cfg.CodexResponseSteering)
+}
+
+// Requires connMu. A generation check rejects a callback already fired when
+// Stop races with reconnection or teardown. Refusals cannot extend the bound.
+func (s *codexWebsocketSession) startDisconnectHoldLocked(bound time.Duration) {
+	if s.disconnectHold != nil {
+		return
+	}
+	s.disconnectHoldGeneration++
+	generation := s.disconnectHoldGeneration
+	s.disconnectHold = time.AfterFunc(bound, func() { s.expireDisconnectHold(generation) })
+}
+
+func (s *codexWebsocketSession) expireDisconnectHold(generation uint64) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.disconnectHold == nil || s.disconnectHoldGeneration != generation {
+		return
+	}
+	s.stopDisconnectHoldLocked()
+	// Use the handler's immediate silent close, even for a stalled data writer.
+	s.notifyUpstreamDisconnect(context.DeadlineExceeded)
+}
+
+// BeginExecutionAttempt ends the decision wait for the execution session. Manager calls it before
+// every upstream attempt on any provider. The hold bounds only the wait for the retry/final
+// decision: once a fallback attempt starts, on Codex WebSocket, Codex HTTP or another provider,
+// that attempt's own lifecycle governs the downstream socket (CLIProxyAPI#64).
+func (e *CodexWebsocketsExecutor) BeginExecutionAttempt(id string) {
+	id = strings.TrimSpace(id)
+	if e == nil || id == "" {
+		return
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	store.mu.Lock()
+	sess := store.sessions[id]
+	store.mu.Unlock()
+	if sess == nil {
+		return
+	}
+	sess.connMu.Lock()
+	sess.stopDisconnectHoldLocked()
+	sess.connMu.Unlock()
+}
+
+func (s *codexWebsocketSession) stopDisconnectHoldLocked() {
+	if s.disconnectHold != nil {
+		s.disconnectHold.Stop()
+		s.disconnectHold = nil
+	}
+	s.disconnectHoldGeneration++
+}
+
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
 	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, true)
 }
@@ -792,6 +865,9 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	if current == nil || current != conn {
 		sess.connMu.Unlock()
 		return
+	}
+	if !notify && !e.responseSteeringEnabled() && (reason == "upstream_disconnected" || reason == "read_error" || reason == "unexpected_binary" || reason == "terminal_failure" || reason == "upstream_error") {
+		sess.startDisconnectHoldLocked(codexWebsocketDisconnectHold)
 	}
 	lifecycle := sess.lifecycle
 	closer := sess.connCloser
@@ -883,6 +959,7 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	}
 
 	sess.connMu.Lock()
+	sess.stopDisconnectHoldLocked()
 	conn := sess.conn
 	authID := sess.authID
 	wsURL := sess.wsURL

@@ -134,6 +134,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
 		}
+		m.beginExecutionAttempt(opts)
 		resp, err := exec.Execute(ctx, a, req, opts)
 		if err != nil {
 			return resp, err
@@ -291,6 +292,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return nil, err
 		}
 		producerCtx, cancelProducer := context.WithCancel(ctx)
+		m.beginExecutionAttempt(opts)
 		result, err := exec.ExecuteStream(producerCtx, a, req, opts)
 		if err != nil {
 			cancelProducer()
@@ -739,6 +741,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
+			m.beginExecutionAttempt(execOpts)
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
@@ -756,6 +759,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
+					m.beginExecutionAttempt(execOpts)
 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)

@@ -1690,6 +1690,26 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	}
 }
 
+// beginExecutionAttempt is the provider-independent handover: call it immediately before any
+// executor attempt so a decision hold armed by an earlier attempt on another executor ends.
+func (m *Manager) beginExecutionAttempt(opts cliproxyexecutor.Options) {
+	sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
+	if m == nil || sessionID == "" {
+		return
+	}
+	m.mu.RLock()
+	observers := make([]ExecutionAttemptObserver, 0, 1)
+	for _, exec := range m.executors {
+		if observer, ok := exec.(ExecutionAttemptObserver); ok && observer != nil {
+			observers = append(observers, observer)
+		}
+	}
+	m.mu.RUnlock()
+	for _, observer := range observers {
+		observer.BeginExecutionAttempt(sessionID)
+	}
+}
+
 func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false

@@ -1428,6 +1428,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				return cliproxyexecutor.Response{}, false, errIntercept
 			}
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, execOpts.Metadata)
+			m.beginExecutionAttempt(execOpts)
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
 			if isRequestStopError(errExec) || isRequestTerminatedError(errExec) {
 				return cliproxyexecutor.Response{}, false, errExec

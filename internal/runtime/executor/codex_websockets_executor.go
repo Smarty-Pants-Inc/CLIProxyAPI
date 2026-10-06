@@ -109,6 +109,13 @@ func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	return e.httpExec.CountTokens(ctx, auth, req, opts)
 }
 
+func (e *CodexAutoExecutor) BeginExecutionAttempt(sessionID string) {
+	if e == nil || e.wsExec == nil {
+		return
+	}
+	e.wsExec.BeginExecutionAttempt(sessionID)
+}
+
 func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 	if e == nil || e.wsExec == nil {
 		return

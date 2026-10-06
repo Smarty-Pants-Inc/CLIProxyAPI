@@ -372,6 +372,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		// consumer delivery on the parent, never in a retained cancelable child.
 		producerCtx, cancelAttempt := context.WithCancel(ctx)
 		execOpts.StreamResultValidation = true
+		m.beginExecutionAttempt(execOpts)
 		streamResult, errStream := executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
 		cancelAttempt = streamAttemptCancel(cancelAttempt, streamResult)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
@@ -395,6 +396,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					producerCtx, cancelAttempt = context.WithCancel(ctx)
 					startRetry := time.Now()
+					m.beginExecutionAttempt(execOpts)
 					streamResult, errStream = executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
 					cancelAttempt = streamAttemptCancel(cancelAttempt, streamResult)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
@@ -479,6 +481,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					producerCtx, cancelAttempt = context.WithCancel(ctx)
 					startRetry := time.Now()
+					m.beginExecutionAttempt(execOpts)
 					retryStream, retryErr := executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
 					cancelAttempt = streamAttemptCancel(cancelAttempt, retryStream)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)

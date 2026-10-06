@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -13,6 +14,20 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// Only steering-off Codex quota failover uses this marker. If every credential
+// refuses the turn, the handler must write the original refusal before closing.
+type codexWebsocketQuotaRefusal struct{ error }
+
+func (e codexWebsocketQuotaRefusal) Unwrap() error              { return e.error }
+func (codexWebsocketQuotaRefusal) ExposeWebsocketRefusal() bool { return true }
+func (e codexWebsocketQuotaRefusal) StatusCode() int {
+	var status interface{ StatusCode() int }
+	if errors.As(e.error, &status) {
+		return status.StatusCode()
+	}
+	return http.StatusTooManyRequests
+}
 
 type statusErrWithHeaders struct {
 	statusErr
@@ -205,4 +220,13 @@ func closeHTTPResponseBody(resp *http.Response, logPrefix string) {
 	if errClose := resp.Body.Close(); errClose != nil {
 		log.Errorf("%s: %v", logPrefix, errClose)
 	}
+}
+
+// markCodexQuotaRefusal marks a quota refusal so the downstream websocket client receives it
+// before the close, including after output was committed and replay is no longer allowed.
+func markCodexQuotaRefusal(err error, body []byte) error {
+	if err != nil && isCodexUsageLimitError(body) {
+		return codexWebsocketQuotaRefusal{err}
+	}
+	return err
 }
