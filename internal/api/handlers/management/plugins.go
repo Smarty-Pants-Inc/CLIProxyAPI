@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -17,6 +19,19 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
+
+// pluginDeleteDrainTimeout bounds active-call draining, not established network IO.
+const pluginDeleteDrainTimeout = 30 * time.Second
+
+// pluginDeleteConflictLocked expects h.mu to be held. An empty id checks bulk
+// config writes, which could overwrite any in-progress plugin deletion.
+func (h *Handler) pluginDeleteConflictLocked(c *gin.Context, id string) bool {
+	if (id == "" && len(h.pluginsDeleting) > 0) || h.pluginsDeleting[id] {
+		c.JSON(http.StatusConflict, gin.H{"error": "plugin_deleting"})
+		return true
+	}
+	return false
+}
 
 type pluginListResponse struct {
 	PluginsEnabled bool              `json:"plugins_enabled"`
@@ -228,6 +243,10 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 	}
 
 	h.mu.Lock()
+	if h.pluginDeleteConflictLocked(c, id) {
+		h.mu.Unlock()
+		return
+	}
 	ensurePluginConfigMap(h.cfg)
 	item := h.cfg.Plugins.Configs[id]
 	node := pluginConfigNode(item)
@@ -272,6 +291,9 @@ func (h *Handler) PutPluginConfig(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.pluginDeleteConflictLocked(c, id) {
+		return
+	}
 	ensurePluginConfigMap(h.cfg)
 	h.cfg.Plugins.Configs[id] = updated
 	h.persistLocked(c)
@@ -290,6 +312,9 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.pluginDeleteConflictLocked(c, id) {
+		return
+	}
 	ensurePluginConfigMap(h.cfg)
 	node := pluginConfigNode(h.cfg.Plugins.Configs[id])
 	keys := make([]string, 0, len(body))
@@ -336,10 +361,43 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
+	if h.policyConfigFrozenLocked() {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return
+	}
+	if h.pluginDeleteConflictLocked(c, id) {
+		h.mu.Unlock()
+		return
+	}
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	item, configured := h.cfg.Plugins.Configs[id]
 	host := h.pluginHost
+	if !host.BeginPluginDelete(id) {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "plugin_deleting"})
+		return
+	}
+	if h.pluginsDeleting == nil {
+		h.pluginsDeleting = make(map[string]bool)
+	}
+	h.pluginsDeleting[id] = true
 	h.mu.Unlock()
+	deleting := true
+	clearDeletingLocked := func() {
+		delete(h.pluginsDeleting, id)
+		host.EndPluginDelete(id)
+		deleting = false
+	}
+	// Early discovery failures also restore admission. Drain/commit paths clear
+	// the tombstone in their second critical section, before writing the response.
+	defer func() {
+		if deleting {
+			h.mu.Lock()
+			clearDeletingLocked()
+			h.mu.Unlock()
+		}
+	}()
 
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
 	if errResolvePluginsDir != nil {
@@ -361,20 +419,29 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	// Serialize the freeze check, unload, file removal, and config update with config writers.
-	if h.policyConfigFrozenLocked() {
+	// Drain outside h.mu so reads and unrelated management operations continue.
+	drainCtx, cancelDrain := context.WithTimeout(c.Request.Context(), pluginDeleteDrainTimeout)
+	errDrain := host.UnloadPluginForDeleteContext(drainCtx, id)
+	cancelDrain()
+	if errDrain != nil {
+		h.mu.Lock()
+		clearDeletingLocked()
 		h.mu.Unlock()
-		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		status := http.StatusServiceUnavailable
+		if errors.Is(errDrain, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		c.JSON(status, gin.H{"error": "plugin_delete_drain_failed", "message": errDrain.Error()})
 		return
 	}
-	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
+
+	h.mu.Lock()
+	if h.policyConfigFrozenLocked() {
+		// The drain already unloaded the plugin. Keep its file and config intact,
+		// but leave it unloaded rather than invoking plugin code under h.mu.
+		clearDeletingLocked()
 		h.mu.Unlock()
-		c.JSON(http.StatusConflict, gin.H{
-			"error":            "plugin_delete_requires_restart",
-			"message":          "loaded plugin cannot be deleted while the server is running",
-			"restart_required": true,
-		})
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return
 	}
 
@@ -382,6 +449,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	if path != "" {
 		if errRemove := os.Remove(path); errRemove != nil {
 			if !errors.Is(errRemove, os.ErrNotExist) {
+				clearDeletingLocked()
 				h.mu.Unlock()
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_delete_failed", "message": errRemove.Error()})
 				return
@@ -394,6 +462,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
 		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
+			clearDeletingLocked()
 			h.mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":        "config_save_failed",
@@ -405,6 +474,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		}
 	}
 	cfgSnapshot := h.reloadSnapshotConfigLocked()
+	clearDeletingLocked()
 	h.mu.Unlock()
 
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)

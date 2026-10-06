@@ -73,6 +73,17 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusOK, result)
 		return
 	}
+	// Full config replacement and plugin-wide edits could overwrite the target.
+	// Unrelated config paths and other plugin configs remain editable during drain.
+	if len(parts) == 0 || parts[0] == "plugins" {
+		id := ""
+		if len(parts) >= 3 && parts[1] == "configs" {
+			id = parts[2]
+		}
+		if h.pluginDeleteConflictLocked(c, id) {
+			return
+		}
+	}
 	before := cloneConfigV8Node(root)
 	config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 	if c.Request.Method == http.MethodDelete {

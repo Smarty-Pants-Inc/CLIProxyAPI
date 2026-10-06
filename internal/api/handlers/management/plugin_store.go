@@ -231,6 +231,12 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": errVersionRequest.Error()})
 		return
 	}
+	h.mu.Lock()
+	if h.pluginDeleteConflictLocked(c, id) {
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
 	installCtx := c.Request.Context()
 	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
@@ -313,6 +319,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			"message": fmt.Sprintf("plugin file installed at %s but config is unavailable to enable it", result.Path),
 			"path":    result.Path,
 		})
+		return
+	}
+	if h.pluginDeleteConflictLocked(c, id) {
+		h.mu.Unlock()
 		return
 	}
 	// Recheck after installation before changing the shared runtime config.

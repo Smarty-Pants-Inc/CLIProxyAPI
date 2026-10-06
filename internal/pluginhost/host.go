@@ -67,6 +67,7 @@ type Host struct {
 	loaded                 map[string]*loadedPlugin
 	retired                map[string][]*loadedPlugin
 	loading                map[string]*pluginLoadRequest
+	deleting               map[string]bool
 	fused                  map[string]string
 	pluginFileVersions     map[string]string
 	activePluginVersions   map[string]string
@@ -181,7 +182,7 @@ func (h *Host) PluginLoaded(id string) bool {
 	return len(h.retired[id]) > 0
 }
 
-// PluginBusy reports whether a plugin dynamic library is loaded or being loaded.
+// PluginBusy reports whether a plugin is loaded, loading, or reserved for deletion.
 func (h *Host) PluginBusy(id string) bool {
 	if h == nil {
 		return false
@@ -199,7 +200,7 @@ func (h *Host) PluginBusy(id string) bool {
 		return true
 	}
 	_, ok := h.loading[id]
-	return ok
+	return ok || h.deleting[id]
 }
 
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
@@ -654,7 +655,11 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 		return false
 	}
 	defer h.unlockApply()
+	return h.unloadPluginLocked(ctx, id)
+}
 
+// unloadPluginLocked expects the caller to hold applyMu.
+func (h *Host) unloadPluginLocked(ctx context.Context, id string) bool {
 	targets := make([]pluginUnloadTarget, 0)
 	h.mu.Lock()
 	lp := h.loaded[id]

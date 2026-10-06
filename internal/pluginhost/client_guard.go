@@ -12,6 +12,8 @@ type guardedPluginClient struct {
 	inner        pluginClient
 	instance     *hostCallbackInstance
 	calls        int
+	draining     bool
+	idle         chan struct{}
 	closed       bool
 	shutdownDone chan struct{}
 }
@@ -85,8 +87,11 @@ func (c *guardedPluginClient) acquire() (pluginClient, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.inner == nil {
+	if c.closed || c.draining || c.inner == nil {
 		return nil, fmt.Errorf("plugin client is closed")
+	}
+	if c.calls == 0 {
+		c.idle = make(chan struct{})
 	}
 	c.calls++
 	return c.inner, nil
@@ -96,6 +101,7 @@ func (c *guardedPluginClient) release() {
 	c.mu.Lock()
 	c.calls--
 	if c.calls == 0 {
+		close(c.idle)
 		c.cond.Broadcast()
 	}
 	c.mu.Unlock()
