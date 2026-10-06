@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	pluginapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	pluginapi "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // Move the existing cache clock deterministically by changing expiration times,
