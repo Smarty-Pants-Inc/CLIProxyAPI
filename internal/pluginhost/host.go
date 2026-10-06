@@ -68,6 +68,7 @@ type Host struct {
 	retired                map[string][]*loadedPlugin
 	loading                map[string]*pluginLoadRequest
 	deleting               map[string]bool
+	configApplyLeaseSource func(*config.Config) func() bool
 	fused                  map[string]string
 	pluginFileVersions     map[string]string
 	activePluginVersions   map[string]string
@@ -204,12 +205,19 @@ func (h *Host) PluginBusy(id string) bool {
 }
 
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
-	if h == nil || !h.lockApply(ctx) {
+	if h == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	guard := h.configApplyGuard(ctx, cfg)
+	if !h.lockApply(ctx) {
 		return
 	}
 	defer h.unlockApply()
-	if ctx == nil {
-		ctx = context.Background()
+	if !guard() {
+		return
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return
@@ -218,6 +226,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	rc, errRuntimeConfig := runtimeConfigFromConfig(cfg)
 	if errRuntimeConfig != nil {
 		log.WithError(errRuntimeConfig).Error("failed to apply plugin runtime config")
+		return
+	}
+	if !guard() {
 		return
 	}
 	h.mu.Lock()
@@ -254,6 +265,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	loadedFiles := make([]pluginFile, 0, len(files))
 	hotReloadLogs := make([]log.Fields, 0)
 	for _, file := range files {
+		if !guard() {
+			return
+		}
 		item, ok := rc.Items[file.ID]
 		if !ok {
 			item = defaultRuntimeItemConfig(file.ID)
@@ -296,9 +310,21 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 					return
 				}
 			}
+			if !guard() {
+				h.clearLoadingRequest(file.ID, request)
+				return
+			}
 			h.startPluginLoad(ctx, file, item, request)
 
 			loadResult, completed := h.waitForPluginLoad(ctx, request)
+			if !guard() {
+				if completed {
+					h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
+				} else {
+					h.cleanupCanceledPluginLoad(file.ID, request)
+				}
+				return
+			}
 			if !completed {
 				if replaced == nil {
 					h.cleanupCanceledPluginLoad(file.ID, request)
@@ -363,6 +389,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			if loadedNow {
 				continue
 			}
+			if !guard() {
+				return
+			}
 			var okCall bool
 			plugin, okCall = h.callRegister(ctx, lp, item)
 			if !okCall {
@@ -395,6 +424,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		loadedFiles = append(loadedFiles, file)
 	}
 
+	if !guard() {
+		return
+	}
 	sortRecords(records)
 	h.mu.Lock()
 	cleanupFiles := h.cleanupFilesPending

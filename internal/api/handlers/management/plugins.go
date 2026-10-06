@@ -382,10 +382,12 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		h.pluginsDeleting = make(map[string]bool)
 	}
 	h.pluginsDeleting[id] = true
+	gen := h.beginPluginOperationLocked(id, pluginOperationDeleting)
 	h.mu.Unlock()
 	deleting := true
 	clearDeletingLocked := func() {
 		delete(h.pluginsDeleting, id)
+		h.endPluginOperationLocked(id, gen)
 		host.EndPluginDelete(id)
 		deleting = false
 	}
@@ -419,6 +421,14 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
+	// Recheck the deletion lease at the unload boundary.
+	h.mu.Lock()
+	current := h.pluginOperationCurrentLocked(id, gen)
+	h.mu.Unlock()
+	if !current {
+		c.JSON(http.StatusConflict, gin.H{"error": "plugin_operation_superseded"})
+		return
+	}
 	// Drain outside h.mu so reads and unrelated management operations continue.
 	drainCtx, cancelDrain := context.WithTimeout(c.Request.Context(), pluginDeleteDrainTimeout)
 	errDrain := host.UnloadPluginForDeleteContext(drainCtx, id)
@@ -436,6 +446,12 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 
 	h.mu.Lock()
+	if !h.pluginOperationCurrentLocked(id, gen) {
+		clearDeletingLocked()
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "plugin_operation_superseded"})
+		return
+	}
 	if h.policyConfigFrozenLocked() {
 		// The drain already unloaded the plugin. Keep its file and config intact,
 		// but leave it unloaded rather than invoking plugin code under h.mu.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -236,7 +237,13 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		h.mu.Unlock()
 		return
 	}
+	gen := h.beginPluginOperationLocked(id, pluginOperationInstalling)
 	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		h.endPluginOperationLocked(id, gen)
+		h.mu.Unlock()
+	}()
 	installCtx := c.Request.Context()
 	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
@@ -257,9 +264,25 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if !validatePluginStoreInstallSource(c, configs, sources, id, source.ID) {
 		return
 	}
+	// Download into a private, undiscoverable directory. Only the current lease
+	// may rename this operation's artifact into the business plugin directory.
+	if errMkdir := os.MkdirAll(pluginsDir, 0o755); errMkdir != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errMkdir.Error()})
+		return
+	}
+	stageDir, errStage := os.MkdirTemp(pluginsDir, ".install-"+id+"-")
+	if errStage != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_install_failed", "message": errStage.Error()})
+		return
+	}
+	defer func() {
+		if errCleanup := os.RemoveAll(stageDir); errCleanup != nil {
+			log.WithError(errCleanup).Warn("pluginstore: failed to remove staged install")
+		}
+	}()
 	pluginIsBusy := func() bool { return pluginBusy(host, id) }
 	installOptions := pluginstore.InstallOptions{
-		PluginsDir:   pluginsDir,
+		PluginsDir:   stageDir,
 		GOOS:         goos,
 		GOARCH:       goarch,
 		PluginLoaded: pluginIsBusy,
@@ -312,6 +335,11 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	restartRequired := false
 
 	h.mu.Lock()
+	if !h.pluginOperationCurrentLocked(id, gen) {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "plugin_operation_superseded"})
+		return
+	}
 	if h.cfg == nil {
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -329,6 +357,21 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if h.policyConfigFrozenLocked() {
 		h.mu.Unlock()
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return
+	}
+	// The lease check, artifact rename and config commit share h.mu, so DELETE
+	// cannot invalidate this operation between these effect boundaries.
+	if errCommit := commitStagedPlugin(&result, pluginsDir, goos, goarch, pluginIsBusy); errCommit != nil {
+		h.mu.Unlock()
+		if errors.Is(errCommit, pluginstore.ErrLoadedPluginLocked) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":            "plugin_update_requires_restart",
+				"message":          "loaded plugin cannot be overwritten while the server is running",
+				"restart_required": true,
+			})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_install_failed", "message": errCommit.Error()})
 		return
 	}
 	if errEnable := h.enablePluginConfigLocked(id, manifest); errEnable != nil {

@@ -58,6 +58,7 @@ type Handler struct {
 	postAuthPersistHook     coreauth.PostAuthHook
 	pluginHost              *pluginhost.Host
 	pluginsDeleting         map[string]bool
+	pluginOperations        map[string]pluginOperation
 	configReloadHook        func(context.Context, *config.Config)
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
@@ -66,8 +67,9 @@ type Handler struct {
 }
 
 type configReloadSnapshot struct {
-	cfg        *config.Config
-	generation uint64
+	cfg         *config.Config
+	generation  uint64
+	pluginLease pluginConfigLease
 }
 
 // NewHandler creates a new management handler instance.
@@ -150,6 +152,7 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	}
 	h.mu.Lock()
 	h.pluginHost = host
+	host.SetConfigApplyLeaseSource(h.pluginConfigApplyLease)
 	h.mu.Unlock()
 }
 
@@ -171,8 +174,9 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 	}
 	h.reloadGeneration++
 	return configReloadSnapshot{
-		cfg:        h.cfg.CloneForRuntime(),
-		generation: h.reloadGeneration,
+		cfg:         h.cfg.CloneForRuntime(),
+		generation:  h.reloadGeneration,
+		pluginLease: h.pluginConfigLeaseLocked(h.cfg),
 	}
 }
 
@@ -200,13 +204,14 @@ func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot 
 	defer h.reloadMu.Unlock()
 
 	h.mu.Lock()
-	if snapshot.generation < h.appliedReloadGeneration {
+	if snapshot.generation < h.appliedReloadGeneration || !h.pluginConfigLeaseCurrentLocked(snapshot.pluginLease) {
 		h.mu.Unlock()
 		return
 	}
 	hook := h.configReloadHook
 	host := h.pluginHost
 	h.mu.Unlock()
+	ctx = pluginhost.WithConfigApplyGuard(ctx, h.pluginConfigApplyGuard(snapshot.pluginLease))
 	if hook != nil {
 		hook(ctx, snapshot.cfg)
 	} else if host != nil {
