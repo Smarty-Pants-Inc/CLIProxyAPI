@@ -16,8 +16,8 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
 }
 
-func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
-	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
+func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) bool {
+	return s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
 }
 
 type configCommit struct {
@@ -166,16 +166,19 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
+	// Install client credentials, including the management handler's key hash,
+	// before fallible ancillary work. A failed pprof stop must not retain a
+	// revoked key, and its failure must still reach the watcher for retry.
+	if !s.updateServerClientsContext(ctx, cfg) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	if !s.applyPprofConfigContext(ctx, cfg) {
 		return false
 	}
 	s.applyDiscoveryConfigContext(ctx, cfg)
-	if errContext := ctx.Err(); errContext != nil {
-		return false
-	}
-	if !s.updateServerClientsContext(ctx, cfg) {
-		return false
-	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}

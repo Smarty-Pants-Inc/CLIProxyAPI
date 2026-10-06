@@ -99,6 +99,15 @@ func canonicalPublicationPath(path string) (string, error) {
 	if !os.IsNotExist(err) {
 		return "", err
 	}
+	// EvalSymlinks also reports not-exist for an existing dangling alias.
+	// Only a genuinely absent leaf may be created; never replace that alias.
+	info, errLeaf := os.Lstat(absolute)
+	if errLeaf == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("config publication refused: dangling symlink")
+	}
+	if errLeaf != nil && !os.IsNotExist(errLeaf) {
+		return "", errLeaf
+	}
 	dir, err := filepath.EvalSymlinks(filepath.Dir(absolute))
 	if err != nil {
 		return "", err

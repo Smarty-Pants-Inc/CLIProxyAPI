@@ -135,7 +135,6 @@ func (w *Watcher) reloadConfig(snapshots ...[]byte) bool {
 	w.clientsMutex.Lock()
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
-	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
 	w.config = newConfig
 	w.clientsMutex.Unlock()
 
@@ -166,6 +165,13 @@ func (w *Watcher) reloadConfig(snapshots ...[]byte) bool {
 	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || retryConfigChanged)
 
 	log.Infof("config successfully reloaded, triggering client reload")
-	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
+	if !w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh) {
+		return false
+	}
+	// Retain the prior applied snapshot on failure so retry preserves rescan
+	// and auth-refresh decisions as well as leaving the hash unobserved.
+	w.clientsMutex.Lock()
+	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
+	w.clientsMutex.Unlock()
 	return true
 }
