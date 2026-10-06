@@ -19,6 +19,7 @@ func TestPatchClaudeKeyFingerprintProfile(t *testing.T) {
 		},
 	}
 	h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+	loadHandlerConfigBaseline(t, h)
 
 	// Patch fingerprint-profile to claude-code-cli
 	rec := httptest.NewRecorder()
@@ -143,6 +144,7 @@ func TestPatchClaudeKeyCloak(t *testing.T) {
 		},
 	}
 	*cfg.ClaudeKey[0].Cloak.CacheUserID = true
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// 1. Partial patch: only update strict-mode to false. mode: always and cache-user-id: true must be preserved.
@@ -278,6 +280,8 @@ func TestPatchClaudeKeyDoesNotInheritModeWhenIdentityChanged(t *testing.T) {
 					},
 				},
 			}
+			writeConfigFixtureBytes(t, configFile, []byte(initialYAML))
+			*cfg = *loadConfigFixture(t, configFile)
 			h := &Handler{cfg: cfg, configFilePath: configFile}
 
 			rec := httptest.NewRecorder()
@@ -320,6 +324,7 @@ func TestPutClaudeKeysCloakPersistence(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// PUT with updated cloak where mode is empty (preserves original mode), strict-mode is false, cache-user-id is false
@@ -397,6 +402,7 @@ func TestPutClaudeKeysPreservesModeByCredentialIdentity(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// Submit PUT where key-a is removed, and key-b is sent with empty mode.
@@ -457,6 +463,7 @@ func TestPutClaudeKeysRealFrontendPayload(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// Real frontend PUT request when user clears mode and unchecks cache-user-id:
@@ -536,6 +543,7 @@ func TestPutClaudeKeysPreservesModeWithDifferentPrefix(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// Update team2 with empty mode. It must retain its own "never" mode and not team1's "always".
@@ -583,6 +591,7 @@ func TestPutClaudeKeysAuthIndexCannotBypassStrictTupleIsolation(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// PUT sends key-b with key-a's auth-index and empty mode.
@@ -627,6 +636,7 @@ func TestPutClaudeKeysDoesNotInheritModeForNewCredential(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// PUT replaces old-key with completely new-key (without auth-index) and empty mode.
@@ -685,6 +695,7 @@ func TestPutClaudeKeysAmbiguousCredentialsDoNotInheritMode(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// PUT sends one shared-key with empty mode and no auth-index.
@@ -729,6 +740,7 @@ func TestPutClaudeKeysNewCredentialWithDifferentPrefixDoesNotInheritMode(t *test
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// PUT retains team1 and adds a second credential for team2 with empty mode without auth-index.
@@ -774,6 +786,7 @@ func TestPutClaudeKeysOmittedCloakPreservesExistingMode(t *testing.T) {
 			},
 		},
 	}
+	*cfg = *loadConfigFixture(t, configFile)
 	h := &Handler{cfg: cfg, configFilePath: configFile}
 
 	// PUT sends the credential without a cloak block. Existing mode: always must be preserved.
@@ -814,6 +827,7 @@ func TestPatchClaudeKeyPriority(t *testing.T) {
 		},
 	}
 	h := &Handler{cfg: cfg, configFilePath: configFile}
+	loadHandlerConfigBaseline(t, h)
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)

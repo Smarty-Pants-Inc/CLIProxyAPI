@@ -5,6 +5,7 @@ package management
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -183,6 +184,9 @@ func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnaps
 		return configReloadSnapshot{}, false
 	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		if respondStaleConfigConflict(c, errSave) {
+			return configReloadSnapshot{}, false
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
 		return configReloadSnapshot{}, false
 	}
@@ -412,6 +416,18 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 
 const errPolicyConfigFrozen = "api-key-policies are configured: edit config.yaml and restart; management config writes are disabled"
 
+const errStaleConfigMessage = "config changed since it was loaded; reload config and retry"
+
+// Only the config fence sentinel is a conflict. Do not expose the underlying
+// error, which can include config paths or values.
+func respondStaleConfigConflict(c *gin.Context, err error) bool {
+	if !errors.Is(err, config.ErrStaleConfig) {
+		return false
+	}
+	c.JSON(http.StatusConflict, gin.H{"error": errStaleConfigMessage})
+	return true
+}
+
 // policyFreezeExempt lists management writes that never mutate h.cfg or write
 // config.yaml (auth files, quotas, logs, OAuth sessions).
 var policyFreezeExempt = map[string]bool{
@@ -468,6 +484,9 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 	}
 	// Preserve comments when writing
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		if respondStaleConfigConflict(c, err) {
+			return false
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}

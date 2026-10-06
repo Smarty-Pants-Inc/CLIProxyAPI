@@ -112,6 +112,7 @@ type WatcherWrapper struct {
 	dispatchPersistedAuthWithRev func(update *watcher.AuthUpdate) (bool, uint64)
 	setPluginAuthParser          func(parser PluginAuthParser)
 	reloadConfigIfChanged        func()
+	setReloadResultCallback      func(func(*config.Config) bool)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -136,6 +137,15 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 		return
 	}
 	w.setConfig(cfg)
+}
+
+// SetReloadResultCallback registers an acknowledging runtime consumer when
+// supported by the watcher. Legacy custom factories keep their void callback.
+func (w *WatcherWrapper) SetReloadResultCallback(callback func(*config.Config) bool) {
+	if w == nil || w.setReloadResultCallback == nil {
+		return
+	}
+	w.setReloadResultCallback(callback)
 }
 
 // ReloadConfigIfChanged asks the underlying watcher to reload config from disk.

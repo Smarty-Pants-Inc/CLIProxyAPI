@@ -20,8 +20,8 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
 }
 
-func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
-	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
+func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) bool {
+	return s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
 }
 
 type configCommit struct {
@@ -215,6 +215,16 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 
+	// Install client credentials, including the management handler's key hash,
+	// before fallible ancillary work such as cooldown persistence or pprof stop.
+	// Revocation must not depend on those steps, but their failures still reach
+	// the watcher so it can retry the rest of the captured revision.
+	if !s.updateServerClientsContext(ctx, cfg) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	if !s.applyManagerConfig(ctx, commit) {
 		return false
 	}
@@ -225,12 +235,6 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.applyDiscoveryConfigContext(ctx, cfg)
-	if errContext := ctx.Err(); errContext != nil {
-		return false
-	}
-	if !s.updateServerClientsContext(ctx, cfg) {
-		return false
-	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
