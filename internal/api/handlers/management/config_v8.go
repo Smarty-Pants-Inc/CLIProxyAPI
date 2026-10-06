@@ -193,6 +193,12 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	// Save the validated canonical tree directly: projecting runtime defaults
 	// back onto it loses explicit nulls, empty maps, and opaque plugin settings.
 	// WriteConfig retains the inode of a mounted configuration file.
+	// Middleware admission is not a persistence fence: desired policies may have
+	// been installed on disk while this request was already in flight.
+	if h.policyConfigFrozenLocked() {
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return
+	}
 	if err = WriteConfig(h.configFilePath, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return

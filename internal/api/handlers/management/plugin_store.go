@@ -315,6 +315,12 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		})
 		return
 	}
+	// Recheck after installation before changing the shared runtime config.
+	if h.policyConfigFrozenLocked() {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return
+	}
 	if errEnable := h.enablePluginConfigLocked(id, manifest); errEnable != nil {
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -322,6 +328,11 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			"message": fmt.Sprintf("plugin file installed at %s but enabling it in config failed: %s", result.Path, errEnable.Error()),
 			"path":    result.Path,
 		})
+		return
+	}
+	if h.policyConfigFrozenLocked() {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return
 	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {

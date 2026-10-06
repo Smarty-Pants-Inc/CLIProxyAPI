@@ -383,6 +383,12 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 
 	h.mu.Lock()
+	// Recheck at the config persistence boundary, after plugin file operations.
+	if h.policyConfigFrozenLocked() {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return
+	}
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
 		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {

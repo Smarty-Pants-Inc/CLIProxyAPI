@@ -2,6 +2,7 @@ package helps
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"math/big"
@@ -29,8 +30,21 @@ func IsCodexUserAgent(headers http.Header) bool {
 
 // NormalizeCodexToolIntegerTypes normalizes specified tool parameter declarations
 // from number to integer for Codex clients across supported tool formats.
-func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
-	return toolschema.NormalizeCodexToolIntegerTypes(body, headers)
+func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header, contexts ...context.Context) []byte {
+	ctx := context.Background()
+	if len(contexts) != 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	out, err := toolschema.NormalizeCodexToolIntegerTypesContext(ctx, body, headers)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// NormalizeCodexToolIntegerTypesContext exposes validation errors to request builders.
+func NormalizeCodexToolIntegerTypesContext(ctx context.Context, body []byte, headers http.Header) ([]byte, error) {
+	return toolschema.NormalizeCodexToolIntegerTypesContext(ctx, body, headers)
 }
 
 // NormalizeCodexToolSchemas inspects function tools in a Codex request payload

@@ -46,7 +46,7 @@ func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Hea
 // plus the normalizer's thinking ownership for ApplyRequestThinking.
 func TranslateRequestWithCodexMultiAgentV2AndUpdateIntent(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) ([]byte, bool) {
 	if IsCodexUserAgent(headers) {
-		payload = NormalizeCodexToolIntegerTypes(payload, headers)
+		payload = NormalizeCodexToolIntegerTypes(payload, headers, ctx)
 	}
 	translated := multiagentv2.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: payload})
 	return translated.Body, translated.ConfigurationUpdatesChanged
@@ -56,7 +56,7 @@ func TranslateRequestWithCodexMultiAgentV2AndUpdateIntent(ctx context.Context, h
 // compatibility while respecting the actual target executor identity.
 func TranslateRequestWithCodexMultiAgentV2ForExecutor(ctx context.Context, headers http.Header, cfg *config.Config, targetExecutor string, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
 	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
-		payload = NormalizeCodexToolIntegerTypes(payload, headers)
+		payload = NormalizeCodexToolIntegerTypes(payload, headers, ctx)
 	}
 	return multiagentv2.TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
 }
@@ -147,7 +147,7 @@ func TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntentForExecutor(ctx 
 	if !isCompat || (to == sdktranslator.FormatCodex && from != sdktranslator.FormatClaude) {
 		translated := sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: payload}
 		if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
-			translated.Body = NormalizeCodexToolIntegerTypes(translated.Body, headers)
+			translated.Body = NormalizeCodexToolIntegerTypes(translated.Body, headers, ctx)
 		}
 		translated = multiagentv2.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, translated)
 		return translated.Body, translated.ConfigurationUpdatesChanged
@@ -167,7 +167,7 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 // request translation while preserving the actual target executor's schema policy.
 func TranslateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context, headers http.Header, cfg *config.Config, targetExecutor string, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool, normalizedChanged ...*bool) []byte {
 	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
-		payload = NormalizeCodexToolIntegerTypes(payload, headers)
+		payload = NormalizeCodexToolIntegerTypes(payload, headers, ctx)
 	}
 	// fallback keeps the request envelope so the normalizer's thinking
 	// ownership reaches the executor (the byte-only wrapper dropped it).

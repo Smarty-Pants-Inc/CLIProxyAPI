@@ -70,7 +70,10 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 	body = normalizeCodexInstructions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "meta executor", body)
 	body = helps.SanitizeMetaWebSearchTools(body)
-	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
+	body, errNormalizePatch = helps.NormalizeCodexToolIntegerTypesContext(ctx, body, opts.Headers)
+	if errNormalizePatch != nil {
+		return nil, errNormalizePatch
+	}
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	return &metaPreparedRequest{

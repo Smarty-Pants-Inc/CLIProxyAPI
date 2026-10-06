@@ -1,7 +1,7 @@
 package toolschema
 
 import (
-	"fmt"
+	"context"
 	"net/http"
 	"strings"
 
@@ -160,17 +160,20 @@ func matchCodexTargetTool(toolName string) map[string]struct{} {
 	return codexClientToolIntegerFields[baseName]
 }
 
-func normalizeCodexToolFieldTypes(rawParams []byte, targetFields map[string]struct{}) ([]byte, bool) {
+func normalizeCodexToolFieldTypes(ctx context.Context, rawParams []byte, targetFields map[string]struct{}) ([]byte, bool, error) {
 	if len(targetFields) == 0 || len(rawParams) == 0 {
-		return rawParams, false
+		return rawParams, false, nil
 	}
 	params := gjson.ParseBytes(rawParams)
 	properties := params.Get("properties")
 	if !properties.Exists() || !properties.IsObject() {
-		return rawParams, false
+		return rawParams, false, nil
 	}
 	changed := false
 	for fieldName := range targetFields {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		prop := properties.Get(fieldName)
 		if !prop.Exists() {
 			continue
@@ -191,6 +194,9 @@ func normalizeCodexToolFieldTypes(rawParams []byte, targetFields map[string]stru
 			seenTypes := make(map[string]struct{}, len(arrayItems))
 			newTypes := make([]string, 0, len(arrayItems))
 			for _, item := range arrayItems {
+				if err := ctx.Err(); err != nil {
+					return nil, false, err
+				}
 				itemStr := item.String()
 				if itemStr == "number" {
 					hasNumber = true
@@ -209,63 +215,119 @@ func normalizeCodexToolFieldTypes(rawParams []byte, targetFields map[string]stru
 			}
 		}
 	}
-	return rawParams, changed
+	return rawParams, changed, nil
 }
 
-// NormalizeCodexToolIntegerTypes normalizes specified tool parameter declarations
-// from number to integer for Codex clients across supported tool formats (OpenAI,
-// Claude input_schema, Gemini function_declarations, and namespace tools).
+// NormalizeCodexToolIntegerTypes preserves the byte-only API for SDK callers.
+// Invalid/over-budget input is left untouched, never normalized. Request dispatch
+// must use ValidateCodexToolIntegerTypes to surface its 400-class error to clients.
 func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
-	if len(body) == 0 || !IsCodexUserAgent(headers) {
+	out, err := NormalizeCodexToolIntegerTypesContext(context.Background(), body, headers)
+	if err != nil {
 		return body
 	}
+	return out
+}
 
+// NormalizeCodexToolIntegerTypesContext normalizes supported declarations only
+// after preflight bounds pass. Cancellation discards partial mutations.
+func NormalizeCodexToolIntegerTypesContext(ctx context.Context, body []byte, headers http.Header) ([]byte, error) {
+	if err := ValidateCodexToolIntegerTypes(ctx, body, headers); err != nil {
+		return nil, err
+	}
+	if len(body) == 0 || !IsCodexUserAgent(headers) {
+		return body, nil
+	}
+	ctx = normalizationContext(ctx)
 	changed := false
-
-	// 1. Process top-level tools
-	toolsResult := gjson.GetBytes(body, "tools")
-	if toolsResult.IsArray() {
-		if updated, ok := normalizeToolIntegerTypesInArray(toolsResult, ""); ok {
-			if out, errSet := sjson.SetRawBytes(body, "tools", updated); errSet == nil {
-				body = out
-				changed = true
+	tools := gjson.GetBytes(body, "tools")
+	if tools.IsArray() {
+		updated, ok, err := normalizeToolIntegerTypesInArray(ctx, tools, "")
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			body, err = sjson.SetRawBytes(body, "tools", updated)
+			if err != nil {
+				return nil, err
 			}
+			changed = true
 		}
 	}
-
-	// 2. Process input[].additional_tools
-	inputResult := gjson.GetBytes(body, "input")
-	if inputResult.IsArray() {
-		for idx, item := range inputResult.Array() {
-			if item.Get("type").String() == "additional_tools" {
-				addTools := item.Get("tools")
-				if addTools.IsArray() {
-					if updated, ok := normalizeToolIntegerTypesInArray(addTools, ""); ok {
-						path := fmt.Sprintf("input.%d.tools", idx)
-						if out, errSet := sjson.SetRawBytes(body, path, updated); errSet == nil {
-							body = out
-							changed = true
-						}
-					}
-				}
+	// Reconstruct input once, preserving raw unchanged items and separators. Only
+	// one full-request rewrite is needed, regardless of changed group count.
+	input := gjson.GetBytes(body, "input")
+	if input.IsArray() {
+		var out []byte
+		offset := 0
+		var err error
+		input.ForEach(func(_, item gjson.Result) bool {
+			if err = ctx.Err(); err != nil {
+				return false
 			}
+			if item.Get("type").String() != "additional_tools" {
+				return true
+			}
+			updated, ok, errNormalize := normalizeToolIntegerTypesInArray(ctx, item.Get("tools"), "")
+			if errNormalize != nil {
+				err = errNormalize
+				return false
+			}
+			if !ok {
+				return true
+			}
+			updatedItem, errSet := sjson.SetRawBytes([]byte(item.Raw), "tools", updated)
+			if errSet != nil {
+				err = errSet
+				return false
+			}
+			if out == nil {
+				out = make([]byte, 0, len(input.Raw))
+			}
+			start := item.Index - input.Index
+			out = append(out, input.Raw[offset:start]...)
+			out = append(out, updatedItem...)
+			offset = start + len(item.Raw)
+			return true
+		})
+		if err != nil {
+			return nil, err
+		}
+		if out != nil {
+			out = append(out, input.Raw[offset:]...)
+			body, err = sjson.SetRawBytes(body, "input", out)
+			if err != nil {
+				return nil, err
+			}
+			changed = true
 		}
 	}
-
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if changed {
 		log.Debugf("codex: normalized target tool number types to integer")
 	}
-	return body
+	return body, nil
 }
 
-func normalizeToolIntegerTypesInArray(tools gjson.Result, namespace string) ([]byte, bool) {
+func normalizeToolIntegerTypesInArray(ctx context.Context, tools gjson.Result, namespace string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if !tools.IsArray() {
-		return nil, false
+		return nil, false, nil
 	}
 	var out []byte
 	offset := 0
+	var err error
 	tools.ForEach(func(_, tool gjson.Result) bool {
-		updated, changed := normalizeToolIntegerTypesInElement(tool, namespace)
+		var updated []byte
+		var changed bool
+		updated, changed, err = normalizeToolIntegerTypesInElement(ctx, tool, namespace)
+		if err != nil {
+			return false
+		}
 		if !changed {
 			return true
 		}
@@ -278,56 +340,62 @@ func normalizeToolIntegerTypesInArray(tools gjson.Result, namespace string) ([]b
 		offset = start + len(tool.Raw)
 		return true
 	})
-	if out == nil {
-		return nil, false
+	if err != nil {
+		return nil, false, err
 	}
-	return append(out, tools.Raw[offset:]...), true
+	if out == nil {
+		return nil, false, nil
+	}
+	return append(out, tools.Raw[offset:]...), true, nil
 }
 
-func normalizeToolIntegerTypesInElement(tool gjson.Result, namespace string) ([]byte, bool) {
+func normalizeToolIntegerTypesInElement(ctx context.Context, tool gjson.Result, namespace string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	toolRaw := []byte(tool.Raw)
 	changed := false
-
-	// Handle namespace tools
 	if tool.Get("type").String() == "namespace" {
 		if namespace != "" {
-			return nil, false
+			return nil, false, nil
 		}
 		namespace = tool.Get("name").String()
 		if namespace == "" {
-			return nil, false
+			return nil, false, nil
 		}
-		nested := tool.Get("tools")
-		if nested.IsArray() {
-			if updated, ok := normalizeToolIntegerTypesInArray(nested, namespace); ok {
-				if out, errSet := sjson.SetRawBytes(toolRaw, "tools", updated); errSet == nil {
-					toolRaw = out
-					changed = true
-				}
+		updated, ok, err := normalizeToolIntegerTypesInArray(ctx, tool.Get("tools"), namespace)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
+			toolRaw, err = sjson.SetRawBytes(toolRaw, "tools", updated)
+			if err != nil {
+				return nil, false, err
 			}
+			changed = true
 		}
-		return toolRaw, changed
+		return toolRaw, changed, nil
 	}
-
-	// Handle Gemini function declarations
 	for _, declKey := range []string{"function_declarations", "functionDeclarations"} {
 		decls := tool.Get(declKey)
 		if decls.IsArray() {
-			if updated, ok := normalizeToolIntegerTypesInArray(decls, namespace); ok {
-				if out, errSet := sjson.SetRawBytes(toolRaw, declKey, updated); errSet == nil {
-					toolRaw = out
-					changed = true
-				}
+			updated, ok, err := normalizeToolIntegerTypesInArray(ctx, decls, namespace)
+			if err != nil {
+				return nil, false, err
 			}
-			return toolRaw, changed
+			if ok {
+				toolRaw, err = sjson.SetRawBytes(toolRaw, declKey, updated)
+				if err != nil {
+					return nil, false, err
+				}
+				changed = true
+			}
+			return toolRaw, changed, nil
 		}
 	}
-
-	// Standard function/custom tool or Claude tool
 	toolName := tool.Get("name").String()
 	paramPath := "parameters"
 	params := tool.Get("parameters")
-
 	if !params.Exists() || !params.IsObject() {
 		if fnParams := tool.Get("function.parameters"); fnParams.Exists() && fnParams.IsObject() {
 			paramPath = "function.parameters"
@@ -342,26 +410,26 @@ func normalizeToolIntegerTypesInElement(tool gjson.Result, namespace string) ([]
 			paramPath = "parametersJsonSchema"
 			params = jsonSchema
 		} else {
-			return nil, false
+			return nil, false, nil
 		}
 	}
-
 	if namespace != "" {
 		toolName = namespace + "__" + toolName
 	}
 	targetFields := matchCodexTargetTool(toolName)
 	if len(targetFields) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
-
-	updatedParams, paramsChanged := normalizeCodexToolFieldTypes([]byte(params.Raw), targetFields)
+	updatedParams, paramsChanged, err := normalizeCodexToolFieldTypes(ctx, []byte(params.Raw), targetFields)
+	if err != nil {
+		return nil, false, err
+	}
 	if !paramsChanged {
-		return nil, false
+		return nil, false, nil
 	}
-
 	updatedTool, errSet := sjson.SetRawBytes(toolRaw, paramPath, updatedParams)
 	if errSet != nil {
-		return nil, false
+		return nil, false, errSet
 	}
-	return updatedTool, true
+	return updatedTool, true, nil
 }
