@@ -248,7 +248,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						}
 						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}
-					bootstrapTerminalErr = streamErr
+					bootstrapTerminalErr = markCodexQuotaRefusal(streamErr, terminalBody)
 					break
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
@@ -449,7 +449,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					sendError(streamErr)
+					sendError(markCodexQuotaRefusal(streamErr, terminalBody))
 					return
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
