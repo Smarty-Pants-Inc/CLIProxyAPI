@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -42,6 +43,7 @@ type ResponseWriterWrapper struct {
 	isStreaming         bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
 	streamWriter        logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
 	chunkChannel        chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	chunkCloseOnce      sync.Once                  // chunkCloseOnce owns closing the streaming chunk channel.
 	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
 	logger              logging.RequestLogger      // logger is the instance of the request logger service.
 	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
@@ -185,7 +187,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 			w.streamDone = doneChan
 
 			// Start async chunk processor
-			go w.processStreamingChunks(doneChan)
+			go w.processStreamingChunks(doneChan, w.chunkChannel)
 
 			// Write status immediately
 			_ = streamWriter.WriteStatus(statusCode, w.headers)
@@ -247,18 +249,18 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 
 // processStreamingChunks runs in a separate goroutine to process response chunks from the chunkChannel.
 // It asynchronously writes each chunk to the streaming log writer.
-func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
+func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}, chunkChannel <-chan []byte) {
 	if done == nil {
 		return
 	}
 
 	defer close(done)
 
-	if w.streamWriter == nil || w.chunkChannel == nil {
+	if w.streamWriter == nil || chunkChannel == nil {
 		return
 	}
 
-	for chunk := range w.chunkChannel {
+	for chunk := range chunkChannel {
 		w.streamWriter.WriteChunkAsync(chunk)
 	}
 }
@@ -304,15 +306,18 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
-		if w.chunkChannel != nil {
-			close(w.chunkChannel)
-			w.chunkChannel = nil
-		}
+		w.chunkCloseOnce.Do(func() {
+			if w.chunkChannel != nil {
+				close(w.chunkChannel)
+			}
+		})
 
 		if w.streamDone != nil {
 			<-w.streamDone
 			w.streamDone = nil
 		}
+		// The worker has exited; it can no longer read the channel.
+		w.chunkChannel = nil
 
 		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
 

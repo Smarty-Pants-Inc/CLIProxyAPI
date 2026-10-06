@@ -370,10 +370,18 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
+	h.mu.Lock()
+	// Serialize the freeze check, file removal, and config update with config writers.
+	if h.policyConfigFrozenLocked() {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return
+	}
 	fileDeleted := false
 	if path != "" {
 		if errRemove := os.Remove(path); errRemove != nil {
 			if !errors.Is(errRemove, os.ErrNotExist) {
+				h.mu.Unlock()
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_delete_failed", "message": errRemove.Error()})
 				return
 			}
@@ -382,13 +390,6 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		}
 	}
 
-	h.mu.Lock()
-	// Recheck at the config persistence boundary, after plugin file operations.
-	if h.policyConfigFrozenLocked() {
-		h.mu.Unlock()
-		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
-		return
-	}
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
 		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
