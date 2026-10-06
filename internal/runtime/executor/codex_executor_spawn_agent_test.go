@@ -336,7 +336,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+		_, _ = w.Write([]byte(codexTestWithModel(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}`+"\n\n", upstreamBody)))
 	}))
 	defer server.Close()
 
@@ -525,7 +525,7 @@ func TestCodexExecutor_IsCompat_V8Layout_ClientScope_Issue6233(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+		_, _ = w.Write([]byte(codexTestWithModel(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}`+"\n\n", upstreamBody)))
 	}))
 	defer server.Close()
 

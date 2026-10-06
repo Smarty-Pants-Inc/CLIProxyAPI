@@ -330,7 +330,7 @@ func TestCodexExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *test
 		}
 		gotBody = body
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte(codexTestWithModel("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n", body)))
 	}))
 	defer server.Close()
 
@@ -637,7 +637,7 @@ func TestCodexWebsocketsExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAge
 		}
 		capturedPayload <- bytes.Clone(payload)
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(codexTestWithModel(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, payload))
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Errorf("write completed websocket message: %v", errWrite)
 		}
@@ -803,7 +803,7 @@ func TestCodexWebsocketsExecutor_UpgradeFallbackToHTTP_PreservesNumber(t *testin
 		}
 		httpCapturedBody = body
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fallback\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte(codexTestWithModel("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fallback\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n", body)))
 	}))
 	defer server.Close()
 

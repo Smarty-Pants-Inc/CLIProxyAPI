@@ -68,7 +68,9 @@ func TestServiceCatalogStartupAndConfigReload(t *testing.T) {
 		restoreCtx, restoreCancel := context.WithCancel(context.Background())
 		defer restoreCancel()
 		restoreCfg := *cfg
-		restoreCfg.Home.Enabled = true
+		// Upstream 01e285670 disables the Devin catalog for Home, so a Home restore
+		// could never republish the original catalog; restore without Home.
+		restoreCfg.Home.Enabled = false
 		restoreCfg.Models.DevinCatalog = originalPath
 		restore := &Service{cfg: &restoreCfg}
 		if string(registry.GetDevinModelsJSON()) != string(original) {
