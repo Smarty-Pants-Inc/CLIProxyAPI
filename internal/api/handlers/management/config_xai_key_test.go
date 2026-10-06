@@ -22,6 +22,7 @@ func TestPatchXAIKeyUpdatesExecutionFields(t *testing.T) {
 		}}},
 		configFilePath: writeTestConfigFile(t),
 	}
+	loadHandlerConfigBaseline(t, h)
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)

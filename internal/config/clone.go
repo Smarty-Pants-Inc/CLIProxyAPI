@@ -42,10 +42,12 @@ func cloneRuntimeValue(v reflect.Value) reflect.Value {
 		return cloneRuntimeValue(v.Elem())
 	case reflect.Struct:
 		out := reflect.New(v.Type()).Elem()
+		// Preserve private value metadata while still cloning exported collections.
+		out.Set(v)
 		for i := 0; i < v.NumField(); i++ {
 			dst := out.Field(i)
 			if !dst.CanSet() {
-				return v
+				continue
 			}
 			dst.Set(cloneRuntimeValue(v.Field(i)))
 		}

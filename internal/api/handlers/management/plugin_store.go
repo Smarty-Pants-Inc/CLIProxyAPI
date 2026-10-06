@@ -326,6 +326,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
 		h.mu.Unlock()
+		if respondStaleConfigConflict(c, errSave) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_save_failed",
 			"message": fmt.Sprintf("plugin file installed at %s but saving config failed: %s", result.Path, errSave.Error()),

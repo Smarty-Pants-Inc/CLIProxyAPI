@@ -356,6 +356,7 @@ func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/plugins/sample/enabled", strings.NewReader(`{"enabled":true}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	loadHandlerConfigBaseline(t, h)
 	h.PatchPluginEnabled(c)
 
 	if rec.Code != http.StatusOK {
@@ -416,6 +417,7 @@ func TestPatchPluginEnabledReloadSnapshotRawImmutability(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/plugins/sample/enabled", strings.NewReader(`{"enabled":true}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	loadHandlerConfigBaseline(t, h)
 	h.PatchPluginEnabled(c)
 
 	if rec.Code != http.StatusOK {
@@ -472,6 +474,7 @@ func TestPutPluginConfigReplacesPluginConfig(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/plugins/sample/config", bytes.NewBufferString(`{"enabled":true,"priority":7,"mode":"fast"}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	loadHandlerConfigBaseline(t, h)
 	h.PutPluginConfig(c)
 
 	if rec.Code != http.StatusOK {
@@ -507,6 +510,7 @@ func TestPatchPluginConfigMergesAndDeletesFields(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/plugins/sample/config", strings.NewReader(`{"mode":"fast","remove":null,"count":3}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	loadHandlerConfigBaseline(t, h)
 	h.PatchPluginConfig(c)
 
 	if rec.Code != http.StatusOK {
@@ -582,17 +586,10 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 		t.Fatalf("failed to write test config: %v", errWrite)
 	}
 	h := &Handler{
-		cfg: &config.Config{
-			Plugins: config.PluginsConfig{
-				Dir: pluginsDir,
-				Configs: map[string]config.PluginInstanceConfig{
-					"sample": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
-					"keep":   pluginConfigFromYAML(t, "enabled: true\nmode: retained\n"),
-				},
-			},
-		},
+		cfg:            loadConfigFixture(t, configPath),
 		configFilePath: configPath,
 	}
+	h.cfg.Plugins.Dir = pluginsDir
 	reloads := make(chan *config.Config, 1)
 	releaseReload := make(chan struct{})
 	reloadDone := make(chan struct{})
@@ -698,6 +695,7 @@ func TestDeletePluginUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
 	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample-provider", nil)
 
+	loadHandlerConfigBaseline(t, h)
 	h.DeletePlugin(c)
 
 	if rec.Code != http.StatusOK {

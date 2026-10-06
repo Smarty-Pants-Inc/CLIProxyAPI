@@ -31,40 +31,49 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath        string
-	authDir           string
-	config            *config.Config
-	clientsMutex      sync.RWMutex
-	authRescanMu      sync.Mutex
-	configReloadMu    sync.Mutex
-	configReloadTimer *time.Timer
-	serverUpdateMu    sync.Mutex
-	serverUpdateTimer *time.Timer
-	serverUpdateLast  time.Time
-	serverUpdatePend  bool
-	stopped           atomic.Bool
-	reloadCallback    func(*config.Config)
-	watcher           *fsnotify.Watcher
-	lastAuthHashes    map[string]string
-	lastAuthContents  map[string]*coreauth.Auth
-	fileAuthsByPath   map[string]map[string]*coreauth.Auth
-	lastRemoveTimes   map[string]time.Time
-	lastConfigHash    string
-	authQueue         chan<- AuthUpdate
-	currentAuths      map[string]*coreauth.Auth
-	authRevisions     map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
-	fileObservations  map[string]uint64 // Tracks file events even when content is unchanged.
-	activeAuthScans   int               // Guarded by clientsMutex.
-	runtimeAuths      map[string]*coreauth.Auth
-	dispatchMu        sync.Mutex
-	dispatchCond      *sync.Cond
-	pendingUpdates    map[string]AuthUpdate
-	pendingOrder      []string
-	dispatchCancel    context.CancelFunc
-	storePersister    storePersister
-	pluginAuthParser  synthesizer.PluginAuthParser
-	mirroredAuthDir   string
-	oldConfigYaml     []byte
+	configPath           string
+	authDir              string
+	config               *config.Config
+	clientsMutex         sync.RWMutex
+	authRescanMu         sync.Mutex
+	configApplyMu        sync.Mutex // Serializes config observation, runtime apply and recording.
+	configReloadMu       sync.Mutex
+	configReloadTimer    *time.Timer
+	serverUpdateMu       sync.Mutex
+	serverUpdateTimer    *time.Timer
+	serverUpdateLast     time.Time
+	serverUpdatePend     bool
+	stopped              atomic.Bool
+	reloadCallback       func(*config.Config)
+	reloadResultCallback func(*config.Config) bool
+	watcher              *fsnotify.Watcher
+	lastAuthHashes       map[string]string
+	lastAuthContents     map[string]*coreauth.Auth
+	fileAuthsByPath      map[string]map[string]*coreauth.Auth
+	lastRemoveTimes      map[string]time.Time
+	lastConfigHash       string
+	authQueue            chan<- AuthUpdate
+	currentAuths         map[string]*coreauth.Auth
+	authRevisions        map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
+	fileObservations     map[string]uint64 // Tracks file events even when content is unchanged.
+	activeAuthScans      int               // Guarded by clientsMutex.
+	runtimeAuths         map[string]*coreauth.Auth
+	dispatchMu           sync.Mutex
+	dispatchCond         *sync.Cond
+	pendingUpdates       map[string]AuthUpdate
+	pendingOrder         []string
+	dispatchCancel       context.CancelFunc
+	storePersister       storePersister
+	pluginAuthParser     synthesizer.PluginAuthParser
+	mirroredAuthDir      string
+	oldConfigYaml        []byte
+
+	// Retry state is guarded by configApplyMu, including timer callbacks.
+	configRetryTimer      *time.Timer
+	configRetrySource     []byte
+	configRetryAttempt    int
+	configRetryGeneration uint64
+	configRetryAfterFunc  func(time.Duration, func()) *time.Timer
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -145,8 +154,18 @@ func (w *Watcher) Stop() error {
 	w.stopped.Store(true)
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
+	w.stopConfigRetry()
 	w.stopServerUpdateTimer()
 	return w.watcher.Close()
+}
+
+// SetReloadResultCallback installs an acknowledging runtime consumer. A false
+// result leaves the source revision unobserved so a subsequent reload retries.
+// It takes precedence over the legacy notification-only callback.
+func (w *Watcher) SetReloadResultCallback(callback func(*config.Config) bool) {
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+	w.reloadResultCallback = callback
 }
 
 // SetConfig updates the current configuration
