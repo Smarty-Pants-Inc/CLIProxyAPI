@@ -53,9 +53,7 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -209,9 +207,7 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 			return
 		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
 	h.cfg.SanitizeGeminiKeys()
 	h.persistLocked(c)
@@ -243,9 +239,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.GeminiKey) {
 		targetIndex = *body.Index
@@ -330,9 +324,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 }
 
 func (h *Handler) DeleteGeminiKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
@@ -424,9 +416,7 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 			return
 		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.InteractionsKey = append([]config.GeminiKey(nil), arr...)
 	h.cfg.SanitizeInteractionsKeys()
 	h.persistLocked(c)
@@ -459,9 +449,7 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.InteractionsKey) {
 		targetIndex = *body.Index
@@ -546,9 +534,7 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 }
 
 func (h *Handler) DeleteInteractionsKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
@@ -657,9 +643,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	for i := range arr {
 		if arr[i].Cloak == nil {
 			if old := h.findExistingClaudeKey(h.cfg.ClaudeKey, arr[i]); old != nil && old.Cloak != nil && old.Cloak.Mode != "" {
@@ -713,9 +697,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ClaudeKey) {
 		targetIndex = *body.Index
@@ -848,9 +830,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 }
 
 func (h *Handler) DeleteClaudeKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
@@ -939,9 +919,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		filtered = append(filtered, arr[i])
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persistLocked(c)
@@ -974,9 +952,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OpenAICompatibility) {
 		targetIndex = *body.Index
@@ -1052,9 +1028,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 }
 
 func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if name := c.Query("name"); name != "" {
 		out := make([]config.OpenAICompatibility, 0, len(h.cfg.OpenAICompatibility))
 		for _, v := range h.cfg.OpenAICompatibility {
@@ -1114,9 +1088,7 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 			return
 		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.VertexCompatAPIKey = append([]config.VertexCompatKey(nil), arr...)
 	h.cfg.SanitizeVertexCompatKeys()
 	h.persistLocked(c)
@@ -1148,9 +1120,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.VertexCompatAPIKey) {
 		targetIndex = *body.Index
@@ -1224,9 +1194,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 }
 
 func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
@@ -1287,9 +1255,7 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -1314,9 +1280,7 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	var body struct {
 		Provider *string  `json:"provider"`
 		Models   []string `json:"models"`
@@ -1355,9 +1319,7 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 }
 
 func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	provider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
 	if provider == "" {
 		c.JSON(400, gin.H{"error": "missing provider"})
@@ -1388,9 +1350,7 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -1415,9 +1375,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	var body struct {
 		Provider *string                  `json:"provider"`
 		Channel  *string                  `json:"channel"`
@@ -1465,9 +1423,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
 	if channel == "" {
 		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
@@ -1501,9 +1457,7 @@ func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -1528,9 +1482,7 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	var body struct {
 		Provider *string                         `json:"provider"`
 		Channel  *string                         `json:"channel"`
@@ -1578,9 +1530,7 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 }
 
 func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
 	if channel == "" {
 		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
@@ -1641,9 +1591,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		}
 		filtered = append(filtered, entry)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
 	h.persistLocked(c)
@@ -1678,9 +1626,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
 		targetIndex = *body.Index
@@ -1761,9 +1707,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 }
 
 func (h *Handler) DeleteCodexKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
@@ -1851,9 +1795,7 @@ func (h *Handler) PutXAIKeys(c *gin.Context) {
 		}
 		filtered = append(filtered, entry)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.XAIKey = filtered
 	h.cfg.SanitizeXAIKeys()
 	h.persistLocked(c)
@@ -1888,9 +1830,7 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.XAIKey) {
 		targetIndex = *body.Index
@@ -1968,9 +1908,7 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 }
 
 func (h *Handler) DeleteXAIKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
@@ -2058,9 +1996,7 @@ func (h *Handler) PutMetaKeys(c *gin.Context) {
 		}
 		filtered = append(filtered, entry)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.MetaKey = filtered
 	h.cfg.SanitizeMetaKeys()
 	h.persistLocked(c)
@@ -2094,9 +2030,7 @@ func (h *Handler) PatchMetaKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	targetIndex := -1
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.MetaKey) {
 		targetIndex = *body.Index
@@ -2168,9 +2102,7 @@ func (h *Handler) PatchMetaKey(c *gin.Context) {
 }
 
 func (h *Handler) DeleteMetaKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)

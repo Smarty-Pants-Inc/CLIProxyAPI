@@ -163,7 +163,34 @@ func atomicWriteConfigWithContext(ctx context.Context, configFile string, data [
 		return err
 	}
 	tmpName := tmp.Name()
-	// Failed private staging files are retained for diagnosis, never unlinked.
+	// Remove only this transaction's unpublished inode. The live config and
+	// persistent coordination lock are never cleanup targets. Do not unlink a
+	// pathname that has been replaced by a different inode.
+	stagingInfo, err := tmp.Stat()
+	if err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	published := false
+	defer func() {
+		if errClose := tmp.Close(); errClose != nil && !errors.Is(errClose, os.ErrClosed) {
+			log.WithError(errClose).Error("failed to close unpublished config staging")
+		}
+		if published {
+			return
+		}
+		current, errInspect := os.Lstat(tmpName)
+		if os.IsNotExist(errInspect) {
+			return
+		}
+		if errInspect != nil || !os.SameFile(stagingInfo, current) {
+			log.Error("cannot verify unpublished config staging identity for cleanup")
+			return
+		}
+		if errRemove := os.Remove(tmpName); errRemove != nil {
+			log.WithError(errRemove).Error("failed to remove unpublished config staging")
+		}
+	}()
 	if err = secureConfigMAC(tmp, configFile, info); err == nil {
 		err = secureConfigReplacement(tmp, info)
 	}
@@ -193,5 +220,6 @@ func atomicWriteConfigWithContext(ctx context.Context, configFile string, data [
 	if err = rename(tmpName, configFile); err != nil {
 		return fmt.Errorf("atomic config publication refused (target may be a single-file bind mount or cross-device): mount a writable config directory instead; original config unchanged: %w", err)
 	}
+	published = true
 	return syncConfigDir(dir)
 }

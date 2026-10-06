@@ -126,14 +126,14 @@ func TestPatchDisableCoolingOverrideForEveryFamily(t *testing.T) {
 			if rec := patch("false"); rec.Code != http.StatusOK {
 				t.Fatalf("false patch status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if override := tc.get(cfg); override == nil || *override {
+			if override := tc.get(h.cfg); override == nil || *override {
 				t.Fatalf("disable-cooling = %v, want explicit false", override)
 			}
 
 			if rec := patch("null"); rec.Code != http.StatusOK {
 				t.Fatalf("null patch status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if override := tc.get(cfg); override != nil {
+			if override := tc.get(h.cfg); override != nil {
 				t.Fatalf("disable-cooling = %v, want inherited value", override)
 			}
 		})

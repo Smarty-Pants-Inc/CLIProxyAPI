@@ -178,9 +178,9 @@ func TestPatchGeminiStyleKeyRoutingIdentity(t *testing.T) {
 			if recorder.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, tc.wantStatus, recorder.Body.String())
 			}
-			remaining := cfg.GeminiKey
+			remaining := handler.cfg.GeminiKey
 			if tc.interactions {
-				remaining = cfg.InteractionsKey
+				remaining = handler.cfg.InteractionsKey
 			}
 			if tc.wantStatus == http.StatusOK {
 				if remaining[0].Prefix != "team-a" || remaining[1].Prefix != "updated" {

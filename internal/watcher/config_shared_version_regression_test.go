@@ -28,7 +28,7 @@ func TestManagementPublicationDuringRuntimeApplyIsNotObservedEarly(t *testing.T)
 		retries = append(retries, cfg.RequestRetry)
 		if cfg.RequestRetry == 1 {
 			// Server installs the exact callback pointer in management. Publishing B
-			// copies B back into that shared pointer before callback A returns.
+			// must not modify A while its runtime callback is still applying it.
 			h := management.NewHandler(cfg, path, nil)
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
@@ -37,8 +37,8 @@ func TestManagementPublicationDuringRuntimeApplyIsNotObservedEarly(t *testing.T)
 			if rec.Code != 200 {
 				t.Fatalf("management save=%d %s", rec.Code, rec.Body.String())
 			}
-			if cfg.RequestRetry != 2 {
-				t.Fatal("regression did not exercise shared-pointer publication")
+			if cfg.RequestRetry != 1 {
+				t.Fatal("management publication modified an applying runtime snapshot")
 			}
 		}
 	})

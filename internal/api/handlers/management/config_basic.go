@@ -221,9 +221,7 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -248,9 +246,7 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -287,9 +283,7 @@ func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -377,9 +371,7 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 	if !prepareManagementBody(c) {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	var body struct {
 		Value *string `json:"value"`
 	}
@@ -408,9 +400,7 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 	h.updateStringField(c, func(v string) { h.cfg.ProxyURL = v })
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	h.cfg.ProxyURL = ""
 	h.persistLocked(c)
 }

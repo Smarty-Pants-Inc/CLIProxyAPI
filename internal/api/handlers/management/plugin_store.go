@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -231,7 +232,16 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": errVersionRequest.Error()})
 		return
 	}
+	if !managementRequestActive(c) {
+		return
+	}
 	installCtx := c.Request.Context()
+	h.mu.Lock()
+	initialVersion := h.configVersion
+	if initialVersion == "" && h.cfg != nil {
+		initialVersion = h.cfg.ConfigFileVersion
+	}
+	h.mu.Unlock()
 	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
 	if errResolvePluginsDir != nil {
@@ -251,9 +261,32 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if !validatePluginStoreInstallSource(c, configs, sources, id, source.ID) {
 		return
 	}
+	// Download into a private, unscanned sibling tree, never a live artifact.
+	if errDir := os.MkdirAll(pluginsDir, 0755); errDir != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errDir.Error()})
+		return
+	}
+	stagingDir, errStage := os.MkdirTemp(pluginsDir, ".plugin-install-")
+	if errStage != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_install_failed", "message": errStage.Error()})
+		return
+	}
+	stageInfo, errStageInfo := os.Stat(stagingDir)
+	if errStageInfo != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_install_failed", "message": errStageInfo.Error()})
+		return
+	}
+	defer func() {
+		current, errInspect := os.Lstat(stagingDir)
+		if errInspect == nil && os.SameFile(stageInfo, current) {
+			if errRemove := os.RemoveAll(stagingDir); errRemove != nil {
+				log.WithError(errRemove).Error("remove unpublished plugin staging")
+			}
+		}
+	}()
 	pluginIsBusy := func() bool { return pluginBusy(host, id) }
 	installOptions := pluginstore.InstallOptions{
-		PluginsDir:   pluginsDir,
+		PluginsDir:   stagingDir,
 		GOOS:         goos,
 		GOARCH:       goarch,
 		PluginLoaded: pluginIsBusy,
@@ -297,7 +330,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		if errManifest != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "plugin_manifest_failed",
-				"message": fmt.Sprintf("plugin file installed at %s but creating store manifest failed: %s", result.Path, errManifest.Error()),
+				"message": fmt.Sprintf("plugin artifact staged at %s but creating store manifest failed: %s", result.Path, errManifest.Error()),
 				"path":    result.Path,
 			})
 			return
@@ -307,14 +340,31 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 
 	h.mu.Lock()
 	rollback := h.configMutationLocked()
+
+	if h.configVersion != initialVersion {
+		rollback()
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "config_save_failed", "message": "config changed during plugin download", "committed": false})
+		return
+	}
 	if h.cfg == nil {
 		rollback()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_unavailable",
-			"message": fmt.Sprintf("plugin file installed at %s but config is unavailable to enable it", result.Path),
+			"message": fmt.Sprintf("plugin artifact staged at %s but config is unavailable to enable it", result.Path),
 			"path":    result.Path,
 		})
+		return
+	}
+	if _, _, _, errArtifact := inspectPluginArtifact(result.Path, stagingDir, pluginsDir, id, h.pluginHost); errArtifact != nil {
+		rollback()
+		h.mu.Unlock()
+		if errors.Is(errArtifact, pluginstore.ErrLoadedPluginLocked) {
+			c.JSON(http.StatusConflict, gin.H{"error": "plugin_update_requires_restart", "restart_required": true})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_install_failed", "message": errArtifact.Error(), "committed": false})
 		return
 	}
 	if errEnable := h.enablePluginConfigLocked(id, manifest); errEnable != nil {
@@ -322,18 +372,29 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_update_failed",
-			"message": fmt.Sprintf("plugin file installed at %s but enabling it in config failed: %s", result.Path, errEnable.Error()),
+			"message": fmt.Sprintf("plugin artifact staged at %s but enabling it in config failed: %s", result.Path, errEnable.Error()),
 			"path":    result.Path,
 		})
 		return
 	}
-	if errSave := h.saveConfigLockedContext(managementRequestContext(c)); errSave != nil {
+	effectErr, errSave := h.saveConfigWithCommitLocked(managementRequestContext(c), func() error {
+		target, overwritten, errCommit := commitPluginArtifact(result.Path, stagingDir, pluginsDir, id, h.pluginHost)
+		if errCommit == nil {
+			result.Path = target
+			result.Overwritten = overwritten
+		}
+		return errCommit
+	})
+	if errSave != nil {
 		rollback()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "config_save_failed",
-			"message": fmt.Sprintf("plugin file installed at %s but saving config failed: %s", result.Path, errSave.Error()),
-			"path":    result.Path,
+			"error":                   "config_save_failed",
+			"config_commit_confirmed": false,
+			"artifact_published":      false,
+			"recovery":                "reload the disk config before retrying after a filesystem publication error",
+			"message":                 fmt.Sprintf("plugin artifact not published because saving config failed: %s", errSave.Error()),
+			"path":                    result.Path,
 		})
 		return
 	}
@@ -342,6 +403,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	h.mu.Unlock()
 
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
+	if effectErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_install_recovery_required", "message": effectErr.Error(), "committed": true, "restart_required": true, "recovery": "config enablement committed; retry installation, or stop the server, repair the artifact using the configured manifest, and restart"})
+		return
+	}
 	log.WithFields(log.Fields{
 		"plugin_id":    result.ID,
 		"plugin_name":  plugin.Name,

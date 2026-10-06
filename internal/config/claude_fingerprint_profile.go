@@ -38,7 +38,7 @@ func NormalizeClaudeFingerprintProfile(raw string) (string, bool) {
 // reject a typo instead of letting it reach the request path.
 func ValidateClaudeFingerprintProfile(raw string) error {
 	if _, ok := NormalizeClaudeFingerprintProfile(raw); !ok {
-		return fmt.Errorf("unsupported fingerprint-profile %q (supported: %q or empty)", strings.TrimSpace(raw), ClaudeFingerprintProfileClaudeCodeCLI)
+		return fmt.Errorf("unsupported fingerprint-profile (supported: %q or empty)", ClaudeFingerprintProfileClaudeCodeCLI)
 	}
 	return nil
 }

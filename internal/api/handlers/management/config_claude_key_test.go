@@ -27,6 +27,7 @@ func TestPatchClaudeKeyFingerprintProfile(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"fingerprint-profile":"claude-code-cli"}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -42,6 +43,7 @@ func TestPatchClaudeKeyFingerprintProfile(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"fingerprint-profile":""}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -58,6 +60,7 @@ func TestPatchClaudeKeyFingerprintProfile(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"fingerprint-profile":"  OAuth-CLI "}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -83,6 +86,7 @@ func TestPatchClaudeKeyRejectsUnknownFingerprintProfile(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"fingerprint-profile":"claude-code"}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -105,6 +109,7 @@ func TestPutClaudeKeysRejectsUnknownFingerprintProfile(t *testing.T) {
 		strings.NewReader(`[{"api-key":"k1"},{"api-key":"k2","fingerprint-profile":"claude-cli"}]`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -152,6 +157,7 @@ func TestPatchClaudeKeyCloak(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"cloak":{"strict-mode":false}}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -188,6 +194,7 @@ func TestPatchClaudeKeyCloak(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"cloak":{"cache-user-id":false}}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -212,6 +219,7 @@ func TestPatchClaudeKeyCloak(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"cloak":"invalid-string"}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for invalid cloak JSON", rec.Code)
 	}
@@ -223,6 +231,7 @@ func TestPatchClaudeKeyCloak(t *testing.T) {
 		strings.NewReader(`{"index":0,"value":{"cloak":null}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -284,6 +293,7 @@ func TestPatchClaudeKeyDoesNotInheritModeWhenIdentityChanged(t *testing.T) {
 			ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/claude-api-key", strings.NewReader(tc.patch))
 			ctx.Request.Header.Set("Content-Type", "application/json")
 			h.PatchClaudeKey(ctx)
+			cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -328,6 +338,7 @@ func TestPutClaudeKeysCloakPersistence(t *testing.T) {
 		strings.NewReader(`[{"api-key":"sk-ant-test","cloak":{"mode":"","strict-mode":false,"cache-user-id":false}}]`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -406,6 +417,7 @@ func TestPutClaudeKeysPreservesModeByCredentialIdentity(t *testing.T) {
 		strings.NewReader(`[{"api-key":"key-b","cloak":{"mode":""}}]`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -466,6 +478,7 @@ func TestPutClaudeKeysRealFrontendPayload(t *testing.T) {
 		strings.NewReader(`[{"api-key":"sk-ant-test","cloak":{"strict-mode":false}}]`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -544,6 +557,7 @@ func TestPutClaudeKeysPreservesModeWithDifferentPrefix(t *testing.T) {
 		strings.NewReader(`[{"api-key":"shared-key","prefix":"team1","cloak":{"mode":"always"}},{"api-key":"shared-key","prefix":"team2","cloak":{"mode":""}}]`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -593,6 +607,7 @@ func TestPutClaudeKeysAuthIndexCannotBypassStrictTupleIsolation(t *testing.T) {
 		strings.NewReader(payload))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -637,6 +652,7 @@ func TestPutClaudeKeysDoesNotInheritModeForNewCredential(t *testing.T) {
 		strings.NewReader(payload))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -695,6 +711,7 @@ func TestPutClaudeKeysAmbiguousCredentialsDoNotInheritMode(t *testing.T) {
 		strings.NewReader(payload))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -739,6 +756,7 @@ func TestPutClaudeKeysNewCredentialWithDifferentPrefixDoesNotInheritMode(t *test
 		strings.NewReader(payload))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -783,6 +801,7 @@ func TestPutClaudeKeysOmittedCloakPreservesExistingMode(t *testing.T) {
 		strings.NewReader(payload))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PutClaudeKeys(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -821,6 +840,7 @@ func TestPatchClaudeKeyPriority(t *testing.T) {
 		strings.NewReader(`{"index":1,"value":{"priority":20}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -867,6 +887,7 @@ func TestPatchClaudeKeyPriority(t *testing.T) {
 		strings.NewReader(`{"index":1,"value":{"prefix":"team-test"}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -885,6 +906,7 @@ func TestPatchClaudeKeyPriority(t *testing.T) {
 		strings.NewReader(`{"index":1,"value":{"priority":0}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -900,6 +922,7 @@ func TestPatchClaudeKeyPriority(t *testing.T) {
 		strings.NewReader(`{"index":1,"value":{"priority":"invalid"}}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClaudeKey(ctx)
+	cfg = h.cfg // Inspect the handler-owned committed snapshot, not runtime input.
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())

@@ -27,10 +27,22 @@ func SaveConfigPreserveCommentsCAS(configFile string, cfg *Config, expectedVersi
 
 // SaveConfigPreserveCommentsCASContext retains request ownership through lock waiting and staging.
 func SaveConfigPreserveCommentsCASContext(ctx context.Context, configFile string, cfg *Config, expectedVersion string) (string, error) {
+	version, _, err := SaveConfigPreserveCommentsCASContextWithCommit(ctx, configFile, cfg, expectedVersion, nil)
+	return version, err
+}
+
+// SaveConfigPreserveCommentsCASContextWithCommit reserves the publication lock
+// through a post-commit local effect. The callback runs only after durable config
+// publication; cancellation cannot undo a committed operation. A callback error
+// is returned separately from a publication error: callers must retain the
+// committed snapshot/version and report explicit recovery, never roll it back.
+// Callbacks must not recurse into config publication or perform network I/O.
+func SaveConfigPreserveCommentsCASContextWithCommit(ctx context.Context, configFile string, cfg *Config, expectedVersion string, afterCommit func() error) (string, error, error) {
 	if cfg == nil {
-		return "", fmt.Errorf("config is nil")
+		return "", nil, fmt.Errorf("config is nil")
 	}
 	var version string
+	var effectErr error
 	err := withConfigFileLockContext(ctx, configFile, func(configFile string) error {
 		if expectedVersion == "" {
 			return ErrConfigVersionRequired
@@ -51,9 +63,12 @@ func SaveConfigPreserveCommentsCASContext(ctx context.Context, configFile string
 		}
 		version = configVersion(published)
 		cfg.ConfigFileVersion = version
+		if afterCommit != nil {
+			effectErr = afterCommit()
+		}
 		return nil
 	})
-	return version, err
+	return version, effectErr, err
 }
 
 func saveConfigPreserveCommentsUnlocked(configFile string, cfg *Config) error {

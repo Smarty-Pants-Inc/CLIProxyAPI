@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package config
 
@@ -32,12 +32,29 @@ func secureConfigLockIdentity(file *os.File, original os.FileInfo) error {
 	if !current.Mode().IsRegular() || lockOwner.Nlink != 1 {
 		return fmt.Errorf("publication lock must be a single-link regular file")
 	}
+	// Validate the pathname and link identity before any privileged repair.
+	pathInfo, errPath := os.Lstat(file.Name())
+	if errPath != nil || !os.SameFile(current, pathInfo) {
+		return fmt.Errorf("publication lock identity changed before repair")
+	}
 	if original == nil {
+		if lockOwner.Uid != uint32(os.Geteuid()) {
+			return fmt.Errorf("unexpected publication lock owner")
+		}
+		if err := restrictConfigLockACL(file); err != nil {
+			return err
+		}
 		return file.Chmod(0600)
 	}
 	owner, ok := original.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("cannot inspect config owner for publication lock")
+	}
+	if lockOwner.Uid != owner.Uid && lockOwner.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("unexpected publication lock owner")
+	}
+	if err := restrictConfigLockACL(file); err != nil {
+		return err
 	}
 	if err := preserveConfigLockOwner(owner.Uid, owner.Gid, lockOwner.Uid, lockOwner.Gid, file.Chown); err != nil {
 		return err

@@ -50,7 +50,7 @@ func TestPatchAPIKeyWeightForEveryFamily(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			if weight := test.get(cfg); weight == nil || *weight != 7 {
+			if weight := test.get(h.cfg); weight == nil || *weight != 7 {
 				t.Fatalf("weight = %v, want 7", weight)
 			}
 		})
@@ -78,7 +78,7 @@ func TestPatchAPIKeyWeightResetAndStrictValidation(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("weight %s status = %d, want 400; body=%s", invalid, rec.Code, rec.Body.String())
 		}
-		if cfg.GeminiKey[0].Weight == nil || *cfg.GeminiKey[0].Weight != initial {
+		if h.cfg.GeminiKey[0].Weight == nil || *h.cfg.GeminiKey[0].Weight != initial {
 			t.Fatalf("invalid weight %s changed config", invalid)
 		}
 	}
@@ -86,8 +86,8 @@ func TestPatchAPIKeyWeightResetAndStrictValidation(t *testing.T) {
 	if rec := patch("null"); rec.Code != http.StatusOK {
 		t.Fatalf("reset status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if cfg.GeminiKey[0].Weight != nil {
-		t.Fatalf("reset weight = %v, want nil default", cfg.GeminiKey[0].Weight)
+	if h.cfg.GeminiKey[0].Weight != nil {
+		t.Fatalf("reset weight = %v, want nil default", h.cfg.GeminiKey[0].Weight)
 	}
 }
 

@@ -492,10 +492,12 @@ func (h *Handler) configMutationLocked() func() {
 	generation := h.reloadGeneration
 	h.cfg = previous.CloneForRuntime()
 	return func() {
-		if h.reloadGeneration != generation && previous != nil {
-			*previous = *h.cfg
+		// A published config may still be read by the server and other runtime
+		// components. Never write back into it. Successful candidates remain
+		// handler-owned; the detached reload snapshot goes through the reload hook.
+		if h.reloadGeneration == generation {
+			h.cfg = previous
 		}
-		h.cfg = previous
 	}
 }
 
@@ -512,6 +514,16 @@ func (h *Handler) saveConfigLockedContext(ctx context.Context) error {
 		h.configVersion = version
 	}
 	return errSave
+}
+
+// saveConfigWithCommitLocked keeps irreversible plugin effects behind config
+// CAS, cancellation and metadata checks, while retaining publication authority.
+func (h *Handler) saveConfigWithCommitLocked(ctx context.Context, afterCommit func() error) (error, error) {
+	version, effectErr, err := config.SaveConfigPreserveCommentsCASContextWithCommit(ctx, h.configFilePath, h.cfg, h.configVersion, afterCommit)
+	if err == nil {
+		h.configVersion = version
+	}
+	return effectErr, err
 }
 
 // persist saves the current in-memory config to disk.
@@ -561,9 +573,7 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	set(*body.Value)
 	h.persistLocked(c)
 }
@@ -579,9 +589,7 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	set(*body.Value)
 	h.persistLocked(c)
 }
@@ -597,9 +605,7 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	defer h.configMutationLocked()()
+	defer h.configMutationResponse(c)()
 	set(*body.Value)
 	h.persistLocked(c)
 }

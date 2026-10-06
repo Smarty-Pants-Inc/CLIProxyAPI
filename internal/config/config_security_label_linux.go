@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -37,6 +38,27 @@ func secureConfigMAC(staging *os.File, path string, original os.FileInfo) error 
 	}
 	if err == nil || n > 0 {
 		return fmt.Errorf("publication refused: original POSIX ACL cannot be preserved exactly")
+	}
+	// Enumerate both boundaries. Absence of SELinux alone does not rule out
+	// Smack or another mandatory policy on the original or staging inode.
+	for _, boundary := range []struct {
+		name string
+		file *os.File
+	}{{"original", source}, {"staging", staging}} {
+		n, err = unix.Flistxattr(int(boundary.file.Fd()), nil)
+		if err != nil && err != unix.ENOTSUP {
+			return fmt.Errorf("inspect %s security attributes: %w", boundary.name, err)
+		}
+		if n > 0 {
+			raw := make([]byte, n)
+			n, err = unix.Flistxattr(int(boundary.file.Fd()), raw)
+			if err != nil {
+				return fmt.Errorf("read %s security attributes: %w", boundary.name, err)
+			}
+			if err = refuseUnsupportedConfigAttributes(strings.Split(string(raw[:n]), "\x00"), "security.selinux"); err != nil {
+				return fmt.Errorf("publication refused: %s: %w", boundary.name, err)
+			}
+		}
 	}
 	return preserveSELinuxLabel(
 		func() ([]byte, error) { return configSELinuxLabel(source) },
