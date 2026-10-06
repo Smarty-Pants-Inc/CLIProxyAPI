@@ -4,6 +4,7 @@ package quotaprovider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -27,6 +28,10 @@ type Credential struct {
 }
 type Resolver func(context.Context, pluginapi.QuotaFetchRequest) (Credential, error)
 
+// ErrNotApplicable reports a request this provider does not own. No secret was
+// resolved and no HTTP request was made; callers fall through to other quota routes.
+var ErrNotApplicable = errors.New("quota provider not applicable to credential")
+
 type cachedQuota struct {
 	response pluginapi.QuotaFetchResponse
 	expires  time.Time
@@ -34,6 +39,8 @@ type cachedQuota struct {
 
 // OAuth is an in-process quota provider for Codex and Claude credentials.
 type OAuth struct {
+	// Admit, when set, must return true before any secret is resolved or cached.
+	Admit          func(pluginapi.QuotaFetchRequest) bool
 	resolve        Resolver
 	requestTimeout time.Duration
 	now            func() time.Time
@@ -65,8 +72,8 @@ func (p *OAuth) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest)
 	if id == "" {
 		id = req.AuthIndex
 	}
-	if id == "" || (req.Provider != "codex" && req.Provider != "claude") {
-		return unknown(), nil
+	if id == "" || (req.Provider != "codex" && req.Provider != "claude") || (p.Admit != nil && !p.Admit(req)) {
+		return pluginapi.QuotaFetchResponse{}, ErrNotApplicable
 	}
 	key := req.Provider + ":" + id
 	result := p.flights.DoChan(key, func() (any, error) {

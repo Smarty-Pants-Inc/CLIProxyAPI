@@ -2,9 +2,11 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/quotaprovider"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -47,8 +49,9 @@ func (h *Host) quotaRecords(snap *Snapshot) []capabilityRecord {
 	h.mu.Lock()
 	builtin := h.builtinQuota
 	h.mu.Unlock()
+	// The builtin is a default: configured plugins keep priority in both matching passes.
 	if builtin != nil {
-		records = append([]capabilityRecord{*builtin}, records...)
+		records = append(records, *builtin)
 	}
 	return records
 }
@@ -377,6 +380,10 @@ func (h *Host) callQuotaFetch(ctx context.Context, record capabilityRecord, prov
 	if record.builtin {
 		// The core provider resolves its credential in process and bypasses plugin request capture.
 		resp, err = provider.FetchQuota(ctx, req)
+		if errors.Is(err, quotaprovider.ErrNotApplicable) {
+			// Leave ineligible credentials to their declarative probe or the 501 fallback.
+			return pluginapi.QuotaFetchResponse{}, false, nil
+		}
 		return resp, true, err
 	}
 	var authRecord *coreauth.Auth

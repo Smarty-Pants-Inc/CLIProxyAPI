@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -54,7 +57,7 @@ func TestBuiltinQuotaManagementFetchRealPath(t *testing.T) {
 			host := pluginhost.New()
 			// Only replace the upstream transport with httptest; production handlers,
 			// host dispatch, dashboard credential resolution, cache and mapper all run.
-			host.RegisterBuiltinQuotaProvider(quotaprovider.New(func(ctx context.Context, req pluginapi.QuotaFetchRequest) (quotaprovider.Credential, error) {
+			builtin := quotaprovider.New(func(ctx context.Context, req pluginapi.QuotaFetchRequest) (quotaprovider.Credential, error) {
 				credential, err := h.resolveQuotaCredential(ctx, req)
 				credential.Transport = quotaTestTransport(func(r *http.Request) (*http.Response, error) {
 					clone := r.Clone(r.Context())
@@ -63,7 +66,9 @@ func TestBuiltinQuotaManagementFetchRealPath(t *testing.T) {
 					return server.Client().Transport.RoundTrip(clone)
 				})
 				return credential, err
-			}))
+			})
+			builtin.Admit = h.newBuiltinQuotaProvider().Admit
+			host.RegisterBuiltinQuotaProvider(builtin)
 			h.SetPluginHost(host)
 			rec := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(rec)
@@ -143,7 +148,8 @@ func TestBuiltinQuotaUnknownOnManagementFetch(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 	h.SetPluginHost(pluginhost.New())
 	for _, provider := range []string{"codex", "claude"} {
-		auth := &coreauth.Auth{ID: provider + "-no-token", Provider: provider}
+		// An OAuth credential whose access token is missing is owned by the builtin and reads unknown.
+		auth := &coreauth.Auth{ID: provider + "-no-token", Provider: provider, Metadata: map[string]any{"refresh_token": "fake-refresh"}}
 		auth.EnsureIndex()
 		if _, err := manager.Register(context.Background(), auth); err != nil {
 			t.Fatal(err)
@@ -155,6 +161,116 @@ func TestBuiltinQuotaUnknownOnManagementFetch(t *testing.T) {
 		h.FetchCredentialQuota(ctx)
 		if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"status":"unknown"}` {
 			t.Fatalf("unsafe unknown response: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// recordOutboundDials makes the dashboard transport refuse and count every dial
+// except to allowAddr, so a test sees any OAuth request the production path makes.
+func recordOutboundDials(t *testing.T, allowAddr string) *atomic.Int32 {
+	t.Helper()
+	var blocked atomic.Int32
+	old := http.DefaultTransport
+	var dialer net.Dialer
+	http.DefaultTransport = &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr == allowAddr {
+			return dialer.DialContext(ctx, network, addr)
+		}
+		blocked.Add(1)
+		return nil, errors.New("outbound dial blocked by test")
+	}}
+	t.Cleanup(func() { http.DefaultTransport = old })
+	return &blocked
+}
+
+func postQuotaFetch(h *Handler, authIndex string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/quota/fetch", strings.NewReader(`{"auth_index":"`+authIndex+`"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.FetchCredentialQuota(ctx)
+	return rec
+}
+
+func TestBuiltinQuotaNeverSendsAPIKeysToOAuthEndpoints(t *testing.T) {
+	const secret = "third-party-api-key-never-send"
+	dials := recordOutboundDials(t, "")
+	for _, provider := range []string{"codex", "claude"} {
+		for name, auth := range map[string]*coreauth.Auth{
+			"config-api-key":   {Attributes: map[string]string{"api_key": secret, "base_url": "https://third-party.example/v1", "auth_kind": "apikey"}},
+			"attr-api-key":     {Attributes: map[string]string{"api_key": secret, "base_url": "https://third-party.example/v1"}},
+			"metadata-api-key": {Metadata: map[string]any{"api_key": secret}},
+			"session-token":    {Attributes: map[string]string{"session_token": secret}},
+		} {
+			t.Run(provider+"/"+name, func(t *testing.T) {
+				manager := coreauth.NewManager(nil, nil, nil)
+				auth.ID, auth.Provider = provider+"-"+name, provider
+				auth.EnsureIndex()
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+				h.SetPluginHost(pluginhost.New())
+				before := dials.Load()
+				rec := postQuotaFetch(h, auth.Index)
+				if dials.Load() != before {
+					t.Fatal("API-key credential sent to an OAuth usage endpoint")
+				}
+				if rec.Code != http.StatusNotImplemented || strings.Contains(rec.Body.String(), secret) {
+					t.Fatalf("builtin consumed an API-key credential: %d %s", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestBuiltinQuotaOAuthControlStillFetches(t *testing.T) {
+	dials := recordOutboundDials(t, "")
+	for _, provider := range []string{"codex", "claude"} {
+		manager := coreauth.NewManager(nil, nil, nil)
+		auth := &coreauth.Auth{ID: provider + "-oauth", Provider: provider, Metadata: map[string]any{"access_token": "fake-oauth", "refresh_token": "fake-refresh"}}
+		auth.EnsureIndex()
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatal(err)
+		}
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+		h.SetPluginHost(pluginhost.New())
+		before := dials.Load()
+		rec := postQuotaFetch(h, auth.Index)
+		// The blocked dial is the OAuth request; its failure is reported as unknown.
+		if dials.Load() == before || rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"status":"unknown"}` {
+			t.Fatalf("%s OAuth control did not reach builtin: dials=%d %d %s", provider, dials.Load()-before, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestBuiltinQuotaPreservesDeclarativeProbe(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"summary":[{"key":"balance","label":"Balance","value":42,"unit":"credits"}]}`)
+	}))
+	defer upstream.Close()
+	dials := recordOutboundDials(t, strings.TrimPrefix(upstream.URL, "http://"))
+	for _, provider := range []string{"codex", "claude"} {
+		for name, metadata := range map[string]map[string]any{
+			"oauth-with-token": {"access_token": "fake-oauth", "refresh_token": "fake-refresh"},
+			"tokenless":        {},
+		} {
+			t.Run(provider+"/"+name, func(t *testing.T) {
+				metadata["quota_probe"] = map[string]any{"url": upstream.URL, "method": "GET"}
+				manager := coreauth.NewManager(nil, nil, nil)
+				auth := &coreauth.Auth{ID: provider + "-" + name, Provider: provider, Metadata: metadata}
+				auth.EnsureIndex()
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+				h.SetPluginHost(pluginhost.New())
+				before := dials.Load()
+				rec := postQuotaFetch(h, auth.Index)
+				if dials.Load() != before || rec.Code != 200 || !strings.Contains(rec.Body.String(), `"balance"`) {
+					t.Fatalf("declarative probe not used: dials=%d %d %s", dials.Load()-before, rec.Code, rec.Body.String())
+				}
+			})
 		}
 	}
 }
