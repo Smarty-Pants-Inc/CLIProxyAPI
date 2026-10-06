@@ -361,7 +361,15 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
+	h.mu.Lock()
+	// Serialize the freeze check, unload, file removal, and config update with config writers.
+	if h.policyConfigFrozenLocked() {
+		h.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
+		return
+	}
 	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
+		h.mu.Unlock()
 		c.JSON(http.StatusConflict, gin.H{
 			"error":            "plugin_delete_requires_restart",
 			"message":          "loaded plugin cannot be deleted while the server is running",
@@ -370,13 +378,6 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	// Serialize the freeze check, file removal, and config update with config writers.
-	if h.policyConfigFrozenLocked() {
-		h.mu.Unlock()
-		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
-		return
-	}
 	fileDeleted := false
 	if path != "" {
 		if errRemove := os.Remove(path); errRemove != nil {
