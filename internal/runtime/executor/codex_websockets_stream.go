@@ -246,11 +246,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
 
-	buffering := true
+	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
 	var exhaustionLogged bool
-	if buffering && e.cfg != nil {
+	if e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
 	}
@@ -287,7 +287,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, modelErr
 	}
 
-	if buffering {
+	if buffering || !modelGuard.Authoritative() {
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				if sess != nil {
@@ -516,7 +516,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if !modelGuard.Authoritative() && (!windowOpen || isTerminalEvent) {
 				return failModelGuard(modelGuard.Missing())
 			}
-			if windowOpen && (isCodexBootstrapBufferableEvent(eventType, payload) || !modelGuard.Authoritative()) && !isTerminalEvent {
+			if windowOpen && (buffering && isCodexBootstrapBufferableEvent(eventType, payload) || !modelGuard.Authoritative()) && !isTerminalEvent {
 				frameBytes := len(payload)
 				for i := range currentChunks {
 					frameBytes += len(currentChunks[i])

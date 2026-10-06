@@ -1028,6 +1028,93 @@ func TestCodexExecutor_BootstrapBuffering_FlushesInOrderOnFirstOutput(t *testing
 	}
 }
 
+// With buffering disabled, a verified identity releases the first chunk immediately.
+func TestCodexExecutor_BootstrapBuffering_DisabledForwardsAfterIdentity(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	req, opts := codexTestRequest()
+	result, err := NewCodexExecutor(&config.Config{}).ExecuteStream(ctx, codexTestAuth(server.URL), req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected stream result after verified identity")
+	}
+	select {
+	case chunk := <-result.Chunks:
+		if chunk.Err != nil {
+			t.Fatalf("first chunk error: %v", chunk.Err)
+		}
+		if !strings.Contains(string(chunk.Payload), "response.created") {
+			t.Fatalf("first chunk = %s, want response.created", chunk.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first verified chunk was not forwarded without waiting for bootstrap")
+	}
+}
+
+// With buffering disabled, identity verification still gates the first downstream chunk.
+func TestCodexExecutor_BootstrapBuffering_DisabledWithholdsBeforeIdentity(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hidden\"}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-release
+		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
+		_, _ = w.Write([]byte("data: " + codexOverloadEvent + "\n\n"))
+	}))
+	defer server.Close()
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	req, opts := codexTestRequest()
+	resultCh := make(chan struct {
+		result *cliproxyexecutor.StreamResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := NewCodexExecutor(&config.Config{}).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+		resultCh <- struct {
+			result *cliproxyexecutor.StreamResult
+			err    error
+		}{result, err}
+	}()
+
+	select {
+	case outcome := <-resultCh:
+		t.Fatalf("stream became available before identity verification: result=%v err=%v", outcome.result, outcome.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	outcome := <-resultCh
+	if outcome.err != nil {
+		t.Fatalf("ExecuteStream error after identity verification: %v", outcome.err)
+	}
+	combined, streamErr := drainChunks(outcome.result)
+	if !strings.Contains(combined, "response.created") {
+		t.Fatalf("verified identity frame missing from stream: %s", combined)
+	}
+	if streamErr == nil {
+		t.Fatal("expected overload error in stream")
+	}
+}
+
 // With the feature disabled the overload rejection keeps its legacy in-stream delivery.
 func TestCodexExecutor_BootstrapBuffering_DefaultDisabledPassthrough(t *testing.T) {
 	server := codexSSEServer(codexCreatedEvent, codexOverloadEvent)
