@@ -63,7 +63,8 @@ func codexSSEReplayManager(t *testing.T, events []string, modelLevelCooling bool
 		secondAttempts.Add(1)
 		secondHandler.ServeHTTP(w, r)
 	})
-	cfg := &config.Config{Codex: config.CodexConfig{ModelLevelCooling: modelLevelCooling}}
+	// These fixtures exercise opt-in bootstrap retry and replay safety.
+	cfg := &config.Config{Codex: config.CodexConfig{ModelLevelCooling: modelLevelCooling, StreamBootstrapBuffering: true}}
 	manager := cliproxyauth.NewManager(nil, &cliproxyauth.FillFirstSelector{}, nil)
 	manager.SetConfig(cfg)
 	manager.SetRetryConfig(0, 0, 0)
