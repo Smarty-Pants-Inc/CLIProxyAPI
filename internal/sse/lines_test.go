@@ -51,3 +51,20 @@ func TestStartsLine(t *testing.T) {
 		t.Fatal("raw byte fragment accepted as comment")
 	}
 }
+
+// A scalar suffix is just as ambiguous as an object-key colon when the first
+// data line has not established Scanner framing.
+func TestStartsLineScalarColonRequiresFraming(t *testing.T) {
+	for _, state := range []LexicalBoundary{
+		{DataLine: true, Open: true},
+		{DataLine: true, Open: true, AfterBreak: true},
+		{DataLine: true, Open: true, AfterBreak: true, Scanner: true},
+	} {
+		if StartsLine([]byte(":x"), state) {
+			t.Errorf("raw scalar suffix accepted as comment with %+v", state)
+		}
+	}
+	if !StartsLine([]byte(": comment"), LexicalBoundary{DataLine: true, Open: true, Scanner: true}) {
+		t.Fatal("proven Scanner comment rejected")
+	}
+}

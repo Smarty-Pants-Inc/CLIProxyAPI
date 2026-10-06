@@ -51,8 +51,8 @@ type LexicalBoundary struct {
 }
 
 // StartsLine recognizes a delimiter-free Scanner unit only when it cannot be
-// a JSON string or partial field continuation. A colon after an object key is
-// ambiguous until Scanner framing is proven; physical breaks are unambiguous.
+// a JSON string or partial field continuation. Any colon in an open data value
+// is ambiguous until Scanner framing is proven; physical breaks are unambiguous.
 func StartsLine(chunk []byte, b LexicalBoundary) bool {
 	if len(chunk) == 0 || b.InString || b.PartialField || b.RawJSON {
 		return false
@@ -63,5 +63,5 @@ func StartsLine(chunk []byte, b LexicalBoundary) bool {
 	if chunk[0] != ':' {
 		return false
 	}
-	return !(b.DataLine && b.Open && (b.AfterBreak || (b.Colon && !b.Scanner)))
+	return !(b.DataLine && b.Open && (b.AfterBreak || !b.Scanner))
 }
