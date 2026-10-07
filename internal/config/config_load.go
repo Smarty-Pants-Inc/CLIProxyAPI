@@ -229,10 +229,12 @@ func LoadConfigBytes(data []byte, configFile string, optional bool) (*Config, er
 	if changed {
 		// Publish through the revision-checked atomic path, then bind cfg to the
 		// bytes actually written so a later save is not refused as stale.
+		// ponytail: the cleanup is opportunistic. If it cannot be published (the file
+		// changed meanwhile, or a single-file bind mount refuses the rename), serve the
+		// cleaned config from memory and keep the revision on the unchanged file.
 		if errWrite := writeConfigRevision(configFile, cleaned, sourceRevision(current)); errWrite != nil {
-			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
-		}
-		if cfg.sourceRevision.matches(current) {
+			log.Warnf("config: could not write cleaned conflicting fields to %s: %v", configFile, errWrite)
+		} else if cfg.sourceRevision.matches(current) {
 			cfg.sourceRevision = sourceRevision(cleaned)
 		}
 	}
