@@ -152,6 +152,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		TraceID:             traceID,
 		SessionID:           sessionID,
 		ParentSessionID:     parentSessionID,
+		Role:                clientRequestMetadata.SenderRole,
+		Agent:               clientRequestMetadata.SenderAgent,
+		Spawner:             clientRequestMetadata.SenderSpawner,
 		NodeKind:            strings.TrimSpace(clientRequestMetadata.NodeKind),
 		IsFork:              clientRequestMetadata.IsFork,
 		IsCompaction:        clientRequestMetadata.IsCompaction,
@@ -186,6 +189,9 @@ type queuedUsageDetail struct {
 	NodeKind            string                   `json:"node_kind,omitempty"`
 	IsFork              bool                     `json:"is_fork,omitempty"`
 	IsCompaction        bool                     `json:"is_compaction,omitempty"`
+	Role                string                   `json:"role,omitempty"`
+	Agent               string                   `json:"agent,omitempty"`
+	Spawner             string                   `json:"spawner,omitempty"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
