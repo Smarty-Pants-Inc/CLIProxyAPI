@@ -17,9 +17,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func writeClaudeSSEMockResponse(w http.ResponseWriter) {
+// writeClaudeSSEMockResponse echoes the upstream request model in message_start,
+// as Anthropic does, so the fork's fail-closed Claude model guard can verify it.
+func writeClaudeSSEMockResponse(w http.ResponseWriter, requestBody []byte) {
 	w.Header().Set("Content-Type", "text/event-stream")
-	_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-5-sonnet\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+	_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":%q,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", gjson.GetBytes(requestBody, "model").String())
 	_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
 	_, _ = fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
 	_, _ = fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
@@ -30,7 +32,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_SuppressesAutoCacheContr
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -75,7 +77,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_PreservesClientBreakpoin
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -129,7 +131,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Stream_Explicit_SuppressesAutoCac
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -206,7 +208,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_ImplicitOrMissing_PreservesAutoCa
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				seenBody = bytes.Clone(body)
-				writeClaudeSSEMockResponse(w)
+				writeClaudeSSEMockResponse(w, body)
 			}))
 			defer server.Close()
 
@@ -243,7 +245,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_ToolsFallbackSuppressed(
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -288,7 +290,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_ClientToolBreakpointPres
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -342,7 +344,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_SuppressesAllAut
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -393,7 +395,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_PreservesClientB
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -451,7 +453,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_PreservesClientS
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -658,7 +660,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_ProbePreservesClient1hTT
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 
@@ -784,7 +786,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_LegacyModelPrese
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		seenBody = bytes.Clone(body)
-		writeClaudeSSEMockResponse(w)
+		writeClaudeSSEMockResponse(w, body)
 	}))
 	defer server.Close()
 

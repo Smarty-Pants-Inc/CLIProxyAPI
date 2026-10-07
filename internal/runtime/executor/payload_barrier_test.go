@@ -23,7 +23,7 @@ func TestPayloadBarrierCodexImageFilter(t *testing.T) {
 			for _, model := range []string{"gpt-5.6-sol", "gpt-5.6-luna"} {
 				t.Run(transport+"/"+model+map[bool]string{false: "/execute", true: "/stream"}[stream], func(t *testing.T) {
 					captured := make(chan []byte, 1)
-					completed := []byte(`{"type":"response.completed","response":{"id":"resp_barrier","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+					completed := []byte(`{"type":"response.completed","response":{"id":"resp_barrier","model":"` + model + `","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						if transport == "websocket" {
 							upgrader := websocket.Upgrader{}

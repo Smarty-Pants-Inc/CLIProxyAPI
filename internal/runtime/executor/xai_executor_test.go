@@ -7153,7 +7153,7 @@ func TestApplyPatchActualCodexExecutorNativePassthrough(t *testing.T) {
 				`{ "type":"response.custom_tool_call_input.delta", "item_id":"a", "delta":"p"}`,
 				`{ "type":"response.custom_tool_call_input.done", "item_id":"a", "input":"p"}`,
 				`{ "type":"response.output_item.done", "output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}}`,
-				`{ "type":"response.completed", "sequence_number":80, "response":{"id":"r","status":"completed","output":[{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}]}}`,
+				`{ "type":"response.completed", "sequence_number":80, "response":{"id":"r","model":"gpt-5.6-sol","status":"completed","output":[{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}]}}`,
 			}
 			bodies := make(chan []byte, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

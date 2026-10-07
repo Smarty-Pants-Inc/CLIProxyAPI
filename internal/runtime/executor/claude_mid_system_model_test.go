@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -55,7 +56,9 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 		u.called = true
 		u.headers = req.Header.Clone()
 		contentType := "application/json"
-		responseBody := `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+		// Echo the final upstream model so the fail-closed Claude model guard can verify it.
+		model := strconv.Quote(gjson.GetBytes(payload, "model").String())
+		responseBody := `{"id":"msg_1","type":"message","role":"assistant","model":` + model + `,"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
 		if strings.Contains(req.URL.Path, "count_tokens") {
 			responseBody = `{"input_tokens":18}`
 		} else if gjson.GetBytes(payload, "stream").Bool() {
@@ -63,7 +66,7 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 			// A translated caller aggregates the stream back into one message, so
 			// the stub has to complete the block and report a stop reason.
 			responseBody = strings.Join([]string{
-				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":` + model + `,"content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
 				`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 				`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
 				`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
@@ -149,8 +152,10 @@ func sendMidSystemExecute(t *testing.T, ex *ClaudeExecutor, ctx context.Context,
 
 func sendMidSystemStream(t *testing.T, ex *ClaudeExecutor, ctx context.Context, model string) error {
 	t.Helper()
+	// A streaming Claude client sends stream:true, so the upstream stub answers with SSE.
+	payload := []byte(strings.Replace(string(midSystemLegacyPayload(model)), `"max_tokens":32,`, `"max_tokens":32,"stream":true,`, 1))
 	result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
-		Model: model, Payload: midSystemLegacyPayload(model),
+		Model: model, Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 	if err != nil {
 		return err

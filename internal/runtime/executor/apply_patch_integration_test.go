@@ -32,6 +32,10 @@ const task6PatchRequest = `{"input":"patch","tools":[{"type":"custom","name":"ap
 
 func task6ProviderFixture(provider, mode, toolName string) string {
 	if mode == "empty" {
+		if strings.HasPrefix(provider, "claude") {
+			// The fork's fail-closed guard needs message_start.model; the stream is otherwise empty.
+			return "data: {\"type\":\"message_start\",\"message\":{\"id\":\"r\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":5}}}\n\n"
+		}
 		return ""
 	}
 	args := `{"input":7,"secret":"RAW_SECRET"}`
@@ -41,7 +45,7 @@ func task6ProviderFixture(provider, mode, toolName string) string {
 	switch provider {
 	case "claude", "claude-oauth":
 		if mode == "nonstream" {
-			return fmt.Sprintf(`{"id":"r","type":"message","role":"assistant","content":[{"type":"tool_use","id":"c","name":%q,"input":%s}],"usage":{"input_tokens":5,"output_tokens":3}}`, toolName, args)
+			return fmt.Sprintf(`{"id":"r","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"c","name":%q,"input":%s}],"usage":{"input_tokens":5,"output_tokens":3}}`, toolName, args)
 		}
 		start := fmt.Sprintf("data: {\"type\":\"message_start\",\"message\":{\"id\":\"r\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":5}}}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c\",\"name\":%q,\"input\":{}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%q}}\n\n", toolName, args)
 		if mode != "eof" {
@@ -156,7 +160,7 @@ func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 					if mode == "scanner" {
 						w.Header().Set("Content-Length", "999999")
 					}
-					_, _ = io.WriteString(w, task6ProviderFixture(provider, func() string {
+					_, _ = io.WriteString(w, applyPatchTestClaudeModel(task6ProviderFixture(provider, func() string {
 						if mode == "scanner" {
 							return "eof"
 						}
@@ -164,7 +168,7 @@ func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 							return "stream"
 						}
 						return mode
-					}(), name))
+					}(), name), body))
 				}))
 				defer server.Close()
 				exec := task6Executor(provider)
@@ -478,7 +482,7 @@ func TestApplyPatchHTTPGatewayErrorMatrix(t *testing.T) {
 					if actualMode != "nonstream" {
 						w.Header().Set("Content-Type", "text/event-stream")
 					}
-					_, _ = io.WriteString(w, task6ProviderFixture(provider, actualMode, name))
+					_, _ = io.WriteString(w, applyPatchTestClaudeModel(task6ProviderFixture(provider, actualMode, name), body))
 				}))
 				defer server.Close()
 				exec := task6Executor(provider)

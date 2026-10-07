@@ -53,6 +53,12 @@ func applyPatchTestPayloads(chunk []byte) [][]byte {
 	return payloads
 }
 
+// applyPatchTestClaudeModel makes a Claude fixture report the model the executor
+// sent upstream, as Anthropic does; the fork's fail-closed guard requires it.
+func applyPatchTestClaudeModel(frames string, upstreamBody []byte) string {
+	return strings.ReplaceAll(frames, `"model":"claude-sonnet-4-6"`, `"model":`+fmt.Sprintf("%q", gjson.GetBytes(upstreamBody, "model").String()))
+}
+
 // applyPatchTestFrames separates real parameter fragments from terminal snapshots.
 func applyPatchTestFrames(protocol, name string) (string, string) {
 	args := applyPatchTestPartial + applyPatchTestRemainder
@@ -214,6 +220,7 @@ func TestApplyPatchBridgeLiveHTTPPreviewMatrix(t *testing.T) {
 					name = gjson.GetBytes(body, "tools.0.name").String()
 				}
 				first, last := applyPatchTestFrames(tc.protocol, name)
+				first = applyPatchTestClaudeModel(first, body)
 				w.Header().Set("Content-Type", "text/event-stream")
 				if _, errWriteString := io.WriteString(w, first); errWriteString != nil {
 					return
@@ -505,7 +512,7 @@ func TestApplyPatchBridgeKimiReusedClientControls(t *testing.T) {
 			payload := []byte(`{"messages":[{"role":"user","content":"edit"}],"tools":[{"type":"function","function":{"name":"apply_patch","parameters":{"type":"object","properties":{"input":{"type":"string"},"extra":{"type":"integer"}}}}}]}`)
 			if source == sdktranslator.FormatClaude {
 				payload = []byte(`{"messages":[{"role":"user","content":"edit"}],"tools":[{"name":"apply_patch","input_schema":{"type":"object","properties":{"input":{"type":"string"},"extra":{"type":"integer"}}}}]}`)
-				reply = fmt.Sprintf(`{"id":"r1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"c1","name":"apply_patch","input":%s}],"stop_reason":"tool_use"}`, args)
+				reply = fmt.Sprintf(`{"id":"r1","type":"message","role":"assistant","model":"k2.5","content":[{"type":"tool_use","id":"c1","name":"apply_patch","input":%s}],"stop_reason":"tool_use"}`, args)
 			}
 			_, auth, bodies := newApplyPatchCompatTestExecutor(t, reply)
 			auth.Provider = "kimi"
@@ -571,7 +578,8 @@ func TestApplyPatchBridgeLiveWebsocketPreview(t *testing.T) {
 			bodies := make(chan []byte, 1)
 			first, last := applyPatchTestFrames("responses", "apply_patch")
 			if native {
-				first = "data: { \"type\":\"response.output_item.added\", \"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"a1\",\"call_id\":\"c1\",\"name\":\"apply_patch\",\"input\":\"\"}}\n\ndata: { \"type\":\"response.custom_tool_call_input.delta\", \"output_index\":0,\"item_id\":\"a1\",\"call_id\":\"c1\",\"delta\":\"*** Begin Patch\\n*** Add File: a.txt\\n+hello\\n\"}\n\n"
+				// Codex reports response.model first; the fork's guard withholds output until it does.
+				first = "data: { \"type\":\"response.created\", \"response\":{\"id\":\"r1\",\"model\":\"gpt-5.6-sol\"}}\n\ndata: { \"type\":\"response.output_item.added\", \"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"a1\",\"call_id\":\"c1\",\"name\":\"apply_patch\",\"input\":\"\"}}\n\ndata: { \"type\":\"response.custom_tool_call_input.delta\", \"output_index\":0,\"item_id\":\"a1\",\"call_id\":\"c1\",\"delta\":\"*** Begin Patch\\n*** Add File: a.txt\\n+hello\\n\"}\n\n"
 				item := fmt.Sprintf(`{ "type":"custom_tool_call", "id":"a1","call_id":"c1","name":"apply_patch","input":%q}`, applyPatchTestInput)
 				last = fmt.Sprintf("data: { \"type\":\"response.custom_tool_call_input.delta\", \"output_index\":0,\"item_id\":\"a1\",\"call_id\":\"c1\",\"delta\":\"*** End Patch\\n\"}\n\ndata: { \"type\":\"response.custom_tool_call_input.done\", \"item_id\":\"a1\",\"call_id\":\"c1\",\"input\":%q}\n\ndata: { \"type\":\"response.output_item.done\", \"output_index\":0,\"item\":%s}\n\ndata: { \"type\":\"response.completed\", \"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[%s]}}\n\n", applyPatchTestInput, item, item)
 			}

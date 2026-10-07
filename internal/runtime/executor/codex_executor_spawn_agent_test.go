@@ -214,7 +214,8 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 func TestCodexExecutorsMultiAgentV2UsesSelectedHomeModel(t *testing.T) {
 	capturedPayload := make(chan []byte, 1)
 	upgrader := websocket.Upgrader{}
-	completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}`)
+	// Every case dispatches gpt-5.4 upstream (suffix stripped); the fork's model guard requires response.model.
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-5.4","status":"completed","output":[]}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if websocket.IsWebSocketUpgrade(request) {
 			conn, errUpgrade := upgrader.Upgrade(w, request, nil)
@@ -335,7 +336,8 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+		// Echo the dispatched model; the fork's fail-closed guard requires response.model.
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":%q,\"status\":\"completed\",\"output\":[]}}\n\n", gjson.GetBytes(upstreamBody, "model").String())
 	}))
 	defer server.Close()
 
@@ -524,7 +526,8 @@ func TestCodexExecutor_IsCompat_V8Layout_ClientScope_Issue6233(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+		// Echo the dispatched model; the fork's fail-closed guard requires response.model.
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":%q,\"status\":\"completed\",\"output\":[]}}\n\n", gjson.GetBytes(upstreamBody, "model").String())
 	}))
 	defer server.Close()
 
