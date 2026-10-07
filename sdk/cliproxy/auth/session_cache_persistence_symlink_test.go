@@ -34,10 +34,9 @@ func TestSessionCachePersistenceRefusesSymlinkedDirectoryAfterEnable(t *testing.
 			if err := cache.EnablePersistence(filepath.Join(dir, "session-affinity.state")); err != nil {
 				t.Fatal(err)
 			}
-			if existing {
-				if err := os.Remove(dir); err != nil {
-					t.Fatal(err)
-				}
+			// EnablePersistence creates and pins a missing directory too.
+			if err := os.Remove(dir); err != nil {
+				t.Fatal(err)
 			}
 			if err := os.Symlink(other, dir); err != nil {
 				t.Fatal(err)
@@ -67,7 +66,8 @@ func TestSessionCachePersistenceReplacesSymlinkedStateFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "session-affinity.state")
-	if err := os.Symlink(target, path); err != nil {
+	// os.Root follows only relative links that stay inside the state directory.
+	if err := os.Symlink(filepath.Base(target), path); err != nil {
 		t.Fatal(err)
 	}
 	cache := newPersistenceTestCache(t, 100)

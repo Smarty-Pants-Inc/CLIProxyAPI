@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,7 @@ type SessionCache struct {
 	stopOnce         sync.Once
 	selectorRefs     int
 	persistencePath  string
-	persistenceDir   string // resolved directory identity at enable time
+	persistenceRoot  *os.Root // state directory pinned at enable time
 	persistenceErr   error
 	persistenceDirty bool
 }
