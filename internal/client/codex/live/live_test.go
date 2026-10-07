@@ -888,7 +888,6 @@ func TestHomeLiveSessionExpiryReleasesSelection(t *testing.T) {
 
 	handler := NewHandler(manager, nil)
 	handler.mediaRelay = echoMediaRelay{}
-	handler.sessions.lifetime = 20 * time.Millisecond
 	router := gin.New()
 	router.POST("/v1/live", handler.Handle)
 
@@ -906,18 +905,14 @@ func TestHomeLiveSessionExpiryReleasesSelection(t *testing.T) {
 		t.Fatalf("stored Home live session = %#v, ok=%t", stored, ok)
 	}
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		_, stillStored := handler.sessions.peek("call-123")
-		if !stillStored && !stored.homeSelection.Active() {
-			if errDrain := registry.Drain(context.Background()); errDrain != nil {
-				t.Fatalf("Drain() error = %v", errDrain)
-			}
-			return
-		}
-		time.Sleep(time.Millisecond)
+	// Trigger the same expiry callback as the timer without wall-clock ordering.
+	handler.sessions.expire(stored.callID, stored.token)
+	if _, stillStored := handler.sessions.peek(stored.callID); stillStored || stored.homeSelection.Active() {
+		t.Fatal("expired Home live session remained active")
 	}
-	t.Fatal("expired Home live session remained active")
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
 }
 
 func TestHandleSidebandPinsAuthAndRelaysBidirectionally(t *testing.T) {
@@ -1272,7 +1267,6 @@ func TestHeadersForLoggingRedactsAttestation(t *testing.T) {
 
 func TestSessionStoreClaimsAndExpiresSessions(t *testing.T) {
 	store := newSessionStore()
-	store.lifetime = 20 * time.Millisecond
 	store.put("call-claim", liveSession{authID: "auth-1", model: defaultLiveModel})
 
 	session, claim := store.claim("call-claim")
@@ -1286,16 +1280,15 @@ func TestSessionStoreClaimsAndExpiresSessions(t *testing.T) {
 	if _, retryClaim := store.claim("call-claim"); retryClaim != sessionClaimAcquired {
 		t.Fatalf("retry claim = %v, want acquired", retryClaim)
 	}
-	store.release(session)
-
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := store.peek("call-claim"); !ok {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	store.expire(session.callID, session.token)
+	if _, ok := store.peek(session.callID); !ok {
+		t.Fatal("claimed live session expired")
 	}
-	t.Fatal("released live session did not expire")
+	store.release(session)
+	store.expire(session.callID, session.token)
+	if _, ok := store.peek(session.callID); ok {
+		t.Fatal("released live session did not expire")
+	}
 }
 
 func TestSessionStoreCloseAllReleasesMediaAndResources(t *testing.T) {
