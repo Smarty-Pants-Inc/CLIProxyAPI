@@ -200,7 +200,7 @@ func TestClaudeExecutorCompatThinkingReplayRestoresOmittedBlockInStream(t *testi
 			_, _ = w.Write([]byte(claudeReplayThinkingStream()))
 			return
 		}
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-synthetic-4772\",\"id\":\"msg-2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
 			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 	}))
 	defer server.Close()
@@ -247,7 +247,7 @@ func TestClaudeExecutorCompatThinkingReplayRestoresOmittedBlockInStream(t *testi
 
 func claudeReplayThinkingStream() string {
 	return "event: message_start\n" +
-		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-synthetic-4772\",\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
 		"event: content_block_start\n" +
 		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n" +
 		"event: content_block_delta\n" +

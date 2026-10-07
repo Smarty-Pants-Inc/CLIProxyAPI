@@ -42,10 +42,11 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 			return
 		}
 		if connections.Add(1) == 1 {
-			_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": "response-1"}})
+			_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"model": "gpt-5-codex", "id": "response-1"}})
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"hello"}`))
 			_ = conn.WriteJSON(map[string]any{"type": "error", "status": http.StatusBadGateway, "error": map[string]any{"message": "terminal failure"}})
 		} else {
-			_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": "response-2", "output": []any{}}})
+			_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"model": "gpt-5-codex", "id": "response-2", "output": []any{}}})
 		}
 		for {
 			if _, _, errRead := conn.ReadMessage(); errRead != nil {
