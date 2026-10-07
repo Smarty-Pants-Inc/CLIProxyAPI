@@ -227,8 +227,13 @@ func LoadConfigBytes(data []byte, configFile string, optional bool) (*Config, er
 		return nil, errLayout
 	}
 	if changed {
-		if errWrite := os.WriteFile(configFile, cleaned, 0600); errWrite != nil {
+		// Publish through the revision-checked atomic path, then bind cfg to the
+		// bytes actually written so a later save is not refused as stale.
+		if errWrite := writeConfigRevision(configFile, cleaned, sourceRevision(current)); errWrite != nil {
 			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
+		}
+		if cfg.sourceRevision.matches(current) {
+			cfg.sourceRevision = sourceRevision(cleaned)
 		}
 	}
 

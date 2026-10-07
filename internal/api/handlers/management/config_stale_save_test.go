@@ -182,6 +182,32 @@ func TestRespondStaleConfigConflictClassifiesOnlySentinel(t *testing.T) {
 	}
 }
 
+// A load that removes conflicting legacy fields must bind the snapshot to the
+// cleaned bytes it wrote; otherwise the next management save is refused as stale.
+func TestManagementSaveAfterLegacyCleanupOnLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	baseline := []byte("debug: false\nport: 8317\ntls: null\nserver:\n  tls:\n    enable: false\n")
+	writeConfigFixtureBytes(t, path, baseline)
+	h := NewHandler(loadConfigFixture(t, path), path, nil)
+	cleaned, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(cleaned, baseline) {
+		t.Fatal("fixture did not trigger the legacy cleanup on load")
+	}
+	router := gin.New()
+	router.PUT("/v0/management/debug", h.PutDebug)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v0/management/debug", strings.NewReader(`{"value":true}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save after load cleanup status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if persisted := loadConfigFixture(t, path); !persisted.Debug {
+		t.Fatal("save after load cleanup did not persist debug=true")
+	}
+}
+
 func writeConfigFixtureBytes(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o600); err != nil {
