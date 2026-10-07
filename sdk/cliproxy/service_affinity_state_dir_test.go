@@ -68,6 +68,21 @@ func TestServiceAffinityStateSavesDoNotTouchAuthDirectory(t *testing.T) {
 	}
 }
 
+func TestServiceAffinityOffReloadIgnoresUnresolvedDefault(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	cfg := &internalconfig.Config{AuthDir: filepath.Join(t.TempDir(), "auth")}
+	service := &Service{cfg: &internalconfig.Config{}}
+	if commit := service.commitConfigUpdate(cfg); commit.cfg == nil {
+		t.Fatal("affinity-off reload rejected for an unresolvable default state directory")
+	}
+	cfg = &internalconfig.Config{AuthDir: cfg.AuthDir, Routing: internalconfig.RoutingConfig{SessionAffinity: true}}
+	if commit := service.commitConfigUpdate(cfg); commit.cfg != nil {
+		t.Fatal("affinity-on reload accepted without a resolvable state directory")
+	}
+}
+
 func TestServiceAffinityUnsafeSDKDirectoryFailsClosed(t *testing.T) {
 	authDir := t.TempDir()
 	cfg := &internalconfig.Config{AuthDir: authDir, Routing: internalconfig.RoutingConfig{SessionAffinity: true, SessionAffinityStateDir: filepath.Join(authDir, "state")}}

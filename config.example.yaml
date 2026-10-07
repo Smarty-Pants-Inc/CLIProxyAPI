@@ -281,6 +281,7 @@ routing:
   # Empty defaults to $XDG_STATE_HOME/cliproxyapi, or ~/.local/state/cliproxyapi.
   # Must be outside auth-dir; paths resolving into it (including symlinks) are rejected.
   # No automatic import of legacy state from auth-dir. See DESIGN-409.md for recovery.
+  # The default is per user: give each instance on the same account its own directory.
   session-affinity-state-dir: ""
   # How long session-to-auth bindings are retained. Default: 6h
   session-affinity-ttl: "6h"

@@ -71,6 +71,12 @@ func (c *SessionCache) EnablePersistence(path string) error {
 		}
 	}
 
+	persistenceDir, errDir := resolveSessionCacheDir(filepath.Dir(path))
+	if errDir != nil {
+		c.persistenceErr = errors.New("session cache persistence: resolve directory failed")
+		return c.persistenceErr
+	}
+
 	c.ensureInitializedLocked()
 	now := time.Now()
 	// Restore complete groups before enforcing capacity, including protection.
@@ -97,6 +103,7 @@ func (c *SessionCache) EnablePersistence(path string) error {
 	}
 	c.persistenceDirty = false
 	c.persistencePath = path
+	c.persistenceDir = persistenceDir
 	return nil
 }
 
@@ -130,14 +137,49 @@ func (c *SessionCache) persistLocked() {
 	sort.Slice(state.Groups, func(i, j int) bool {
 		return state.Groups[i].Aliases[0] < state.Groups[j].Aliases[0]
 	})
-	if errSave := writeSessionCacheFile(c.persistencePath, state); errSave != nil {
+	if errSave := writeSessionCacheFile(c.persistencePath, c.persistenceDir, state); errSave != nil {
 		c.persistenceErr = errSave
 		return
 	}
 	c.persistenceDirty = false
 }
 
-func writeSessionCacheFile(path string, state sessionCacheFile) error {
+// resolveSessionCacheDir resolves symlinks in dir's longest existing ancestor.
+// A dangling symlink is an error, not a missing directory.
+func resolveSessionCacheDir(dir string) (string, error) {
+	missing := ""
+	for ancestor := dir; ; {
+		realDir, errReal := filepath.EvalSymlinks(ancestor)
+		if errReal == nil {
+			return filepath.Join(realDir, missing), nil
+		}
+		if !errors.Is(errReal, os.ErrNotExist) {
+			return "", errReal
+		}
+		if info, errLstat := os.Lstat(ancestor); errLstat == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", errReal
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", errReal
+		}
+		missing = filepath.Join(filepath.Base(ancestor), missing)
+		ancestor = parent
+	}
+}
+
+// sessionCacheDirUnchanged refuses saves after a symlink was planted in the
+// state path since EnablePersistence (narrows, does not close, the race).
+func sessionCacheDirUnchanged(dir, want string) error {
+	if got, errResolve := resolveSessionCacheDir(dir); errResolve != nil || got != want {
+		return errors.New("session cache persistence: state directory changed")
+	}
+	return nil
+}
+
+// writeSessionCacheFile replaces path atomically (temp file + rename). Rename
+// replaces a symlinked state file rather than writing through it.
+func writeSessionCacheFile(path, wantDir string, state sessionCacheFile) error {
 	data, errMarshal := json.Marshal(state)
 	if errMarshal != nil {
 		return errors.New("session cache persistence: encode failed")
@@ -150,6 +192,9 @@ func writeSessionCacheFile(path string, state sessionCacheFile) error {
 			break
 		}
 		syncDirs = append(syncDirs, filepath.Dir(missing))
+	}
+	if errDir := sessionCacheDirUnchanged(dir, wantDir); errDir != nil {
+		return errDir
 	}
 	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
 		return errors.New("session cache persistence: create directory failed")
@@ -168,6 +213,9 @@ func writeSessionCacheFile(path string, state sessionCacheFile) error {
 	errClose := file.Close()
 	if errWrite != nil || errClose != nil {
 		return errors.New("session cache persistence: write temporary file failed")
+	}
+	if errDir := sessionCacheDirUnchanged(dir, wantDir); errDir != nil {
+		return errDir
 	}
 	if errRename := os.Rename(tmp, path); errRename != nil {
 		return errors.New("session cache persistence: replace file failed")

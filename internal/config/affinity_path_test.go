@@ -19,6 +19,7 @@ func TestAffinityStateDirectoryDefaultsAndExplicit(t *testing.T) {
 		{"home fallback", "", "", filepath.Join(home, ".local", "state", "cliproxyapi")},
 		{"explicit", filepath.Join(root, "xdg"), filepath.Join(root, "custom"), filepath.Join(root, "custom")},
 		{"tilde", "", "~/custom", filepath.Join(home, "custom")},
+		{"relative XDG ignored", "relative", "", filepath.Join(home, ".local", "state", "cliproxyapi")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", tc.xdg)

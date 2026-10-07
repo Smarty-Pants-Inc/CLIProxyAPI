@@ -45,7 +45,7 @@ unknown signed block to any account. If the transcript is unavailable, require
 explicit user recovery rather than guessing or fabricating signer evidence.
 
 For state that *does* contain recorded signer evidence, an authorized operator
-may copy a vetted, intact legacy state snapshot to the new directory while the
+may copy (never symlink) a vetted, intact legacy state snapshot to the new directory while the
 process is stopped, preserving auth IDs, digest bindings, and protection metadata.
 No automatic legacy-state read/write or migration is added: this patch must never
 write in auth-dir and cannot certify provenance in a state file that never recorded

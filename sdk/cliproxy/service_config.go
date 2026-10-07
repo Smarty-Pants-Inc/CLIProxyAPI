@@ -135,7 +135,7 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if newCfg == nil {
 		return configCommit{}
 	}
-	if _, errResolve := newCfg.ResolveSessionAffinityStateDir(); errResolve != nil {
+	if errResolve := newCfg.ValidateSessionAffinityStateDir(); errResolve != nil {
 		log.WithError(errResolve).Warn("rejected config update with invalid session affinity state directory")
 		return configCommit{}
 	}

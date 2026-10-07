@@ -35,6 +35,7 @@ type SessionCache struct {
 	stopOnce         sync.Once
 	selectorRefs     int
 	persistencePath  string
+	persistenceDir   string // resolved directory identity at enable time
 	persistenceErr   error
 	persistenceDirty bool
 }
