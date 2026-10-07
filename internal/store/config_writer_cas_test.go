@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,9 +93,23 @@ func TestObjectStoreConfigSyncDoesNotOverwriteConcurrentManagementEdit(t *testin
 	assertNoLostManagementEdit(t, errSync, configPath, managementContents)
 }
 
+// hookSQLDriverSeq keeps sql.Register names unique across -count reruns.
+var hookSQLDriverSeq atomic.Int64
+
 type hookSQLDriver struct {
 	content     string
+	noRows      bool
 	beforeQuery func()
+	beforeExec  func()
+
+	mu       sync.Mutex
+	execArgs string
+}
+
+func (d *hookSQLDriver) lastExec() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.execArgs
 }
 
 func (d *hookSQLDriver) Open(string) (driver.Conn, error) { return &hookSQLConn{driver: d}, nil }
@@ -109,7 +124,22 @@ func (c *hookSQLConn) QueryContext(context.Context, string, []driver.NamedValue)
 	if c.driver.beforeQuery != nil {
 		c.driver.beforeQuery()
 	}
-	return &hookSQLRows{content: c.driver.content}, nil
+	return &hookSQLRows{content: c.driver.content, done: c.driver.noRows}, nil
+}
+
+// ExecContext records the upserted config content (the second argument).
+func (c *hookSQLConn) ExecContext(_ context.Context, _ string, args []driver.NamedValue) (driver.Result, error) {
+	if c.driver.beforeExec != nil {
+		c.driver.beforeExec()
+	}
+	if len(args) > 1 {
+		if content, ok := args[1].Value.(string); ok {
+			c.driver.mu.Lock()
+			c.driver.execArgs = content
+			c.driver.mu.Unlock()
+		}
+	}
+	return driver.RowsAffected(1), nil
 }
 
 type hookSQLRows struct {
@@ -148,7 +178,7 @@ func TestPostgresStoreConfigSyncDoesNotOverwriteConcurrentManagementEdit(t *test
 
 func newHookPostgresStore(t *testing.T, fake *hookSQLDriver, configPath string) *PostgresStore {
 	t.Helper()
-	driverName := "cpa51-hook-" + strings.ReplaceAll(t.Name(), "/", "-")
+	driverName := "cpa51-hook-" + strconv.FormatInt(hookSQLDriverSeq.Add(1), 10)
 	sql.Register(driverName, fake)
 	db, errOpen := sql.Open(driverName, "")
 	if errOpen != nil {
@@ -209,4 +239,199 @@ func TestRemoteConfigSyncStillPublishesWithoutConcurrentWriter(t *testing.T) {
 		}
 		assertLocalFileContents(t, configPath, "operator: edit\n")
 	})
+}
+
+// Round 8 P1: when the remote config is absent, the seed upload must not publish a
+// stale local snapshot over a newer local config.
+type seedRace struct {
+	name string
+	// edit changes the local config while the seed upload is in flight. persist mirrors
+	// the change to the remote, as the config watcher does after a save.
+	edit func(t *testing.T, configPath string, persist func() error)
+	want string
+}
+
+func seedRaces() []seedRace {
+	return []seedRace{
+		{
+			name: "management CAS edit",
+			edit: func(t *testing.T, configPath string, persist func() error) {
+				managementEdit(t, configPath, "management: edit\n")
+				if errPersist := persist(); errPersist != nil {
+					t.Errorf("persist management edit: %v", errPersist)
+				}
+			},
+			want: "management: edit\n",
+		},
+		{
+			name: "unlocked editor write",
+			edit: func(t *testing.T, configPath string, _ func() error) {
+				if errWrite := os.WriteFile(configPath, []byte("editor: edit\n"), 0o600); errWrite != nil {
+					t.Errorf("editor write: %v", errWrite)
+				}
+			},
+			want: "editor: edit\n",
+		},
+	}
+}
+
+// runDuringFirstUpload runs edit while the first remote write is in flight and holds that
+// write until edit finishes or a bounded wait expires. A seed that holds the shared
+// config lock blocks a CAS edit, so the wait expires and the edit lands afterwards.
+// ponytail: the bounded wait only affects the RED; GREEN never depends on it.
+func runDuringFirstUpload(edit func()) (hook func(), wait func(t *testing.T)) {
+	done := make(chan struct{})
+	var started atomic.Bool
+	hook = func() {
+		if !started.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer close(done)
+			edit()
+		}()
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	wait = func(t *testing.T) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("concurrent edit did not finish")
+		}
+	}
+	return hook, wait
+}
+
+type fakeS3Config struct {
+	mu        sync.Mutex
+	remote    string
+	hasRemote bool
+	beforePut func()
+}
+
+func (f *fakeS3Config) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.URL.Path, "/bucket/config/config.yaml") {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodHead:
+		f.mu.Lock()
+		has := f.hasRemote
+		f.mu.Unlock()
+		if !has {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Last-Modified", time.Unix(0, 0).UTC().Format(http.TimeFormat))
+		w.Header().Set("ETag", `"0123456789abcdef0123456789abcdef"`)
+	case http.MethodPut:
+		body, _ := io.ReadAll(r.Body)
+		body = decodeAWSChunked(body)
+		if f.beforePut != nil {
+			f.beforePut()
+		}
+		f.mu.Lock()
+		f.remote, f.hasRemote = string(body), true
+		f.mu.Unlock()
+		w.Header().Set("ETag", `"0123456789abcdef0123456789abcdef"`)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func TestObjectStoreSeedDoesNotPublishStaleSnapshot(t *testing.T) {
+	for _, race := range seedRaces() {
+		t.Run(race.name, func(t *testing.T) {
+			fake := &fakeS3Config{}
+			server := httptest.NewServer(fake)
+			defer server.Close()
+			objectStore, errNew := NewObjectTokenStore(ObjectStoreConfig{
+				Endpoint:  strings.TrimPrefix(server.URL, "http://"),
+				Bucket:    "bucket",
+				AccessKey: "access",
+				SecretKey: "secret",
+				Region:    "us-east-1",
+				LocalRoot: t.TempDir(),
+				PathStyle: true,
+			})
+			if errNew != nil {
+				t.Fatalf("NewObjectTokenStore: %v", errNew)
+			}
+			configPath := objectStore.ConfigPath()
+			if errWrite := os.WriteFile(configPath, []byte("local: seed\n"), 0o600); errWrite != nil {
+				t.Fatalf("seed local config: %v", errWrite)
+			}
+			hook, wait := runDuringFirstUpload(func() {
+				race.edit(t, configPath, func() error { return objectStore.PersistConfig(context.Background()) })
+			})
+			fake.beforePut = hook
+
+			if errSync := objectStore.syncConfigFromBucket(context.Background(), ""); errSync != nil {
+				t.Fatalf("seed sync: %v", errSync)
+			}
+			wait(t)
+			assertLocalFileContents(t, configPath, race.want)
+			fake.mu.Lock()
+			remote := fake.remote
+			fake.mu.Unlock()
+			if remote != race.want {
+				t.Fatalf("stale seed published: remote config = %q, want newer local %q", remote, race.want)
+			}
+		})
+	}
+}
+
+func TestPostgresStoreSeedDoesNotPublishStaleSnapshot(t *testing.T) {
+	for _, race := range seedRaces() {
+		t.Run(race.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config", "config.yaml")
+			if errMkdir := os.MkdirAll(filepath.Dir(configPath), 0o700); errMkdir != nil {
+				t.Fatalf("mkdir: %v", errMkdir)
+			}
+			if errWrite := os.WriteFile(configPath, []byte("local: seed\n"), 0o600); errWrite != nil {
+				t.Fatalf("seed local config: %v", errWrite)
+			}
+			fake := &hookSQLDriver{noRows: true}
+			pgStore := newHookPostgresStore(t, fake, configPath)
+			hook, wait := runDuringFirstUpload(func() {
+				race.edit(t, configPath, func() error { return pgStore.PersistConfig(context.Background()) })
+			})
+			fake.beforeExec = hook
+
+			if errSync := pgStore.syncConfigFromDatabase(context.Background(), ""); errSync != nil {
+				t.Fatalf("seed sync: %v", errSync)
+			}
+			wait(t)
+			assertLocalFileContents(t, configPath, race.want)
+			if remote := fake.lastExec(); remote != race.want {
+				t.Fatalf("stale seed published: remote config = %q, want newer local %q", remote, race.want)
+			}
+		})
+	}
+}
+
+// decodeAWSChunked strips minio's streaming-signature framing from an HTTP PUT body.
+func decodeAWSChunked(body []byte) []byte {
+	if !strings.Contains(string(body), ";chunk-signature=") {
+		return body
+	}
+	var out []byte
+	rest := string(body)
+	for {
+		header, after, found := strings.Cut(rest, "\r\n")
+		if !found {
+			return out
+		}
+		size, errSize := strconv.ParseInt(strings.SplitN(header, ";", 2)[0], 16, 64)
+		if errSize != nil || size == 0 || int(size) > len(after) {
+			return out
+		}
+		out = append(out, after[:size]...)
+		rest = strings.TrimPrefix(after[size:], "\r\n")
+	}
 }

@@ -378,14 +378,14 @@ func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example str
 		if errSeed := seedLocalConfig(s.configPath, example); errSeed != nil {
 			return fmt.Errorf("object store: create local config: %w", errSeed)
 		}
-		data, errRead := os.ReadFile(s.configPath)
-		if errRead != nil {
-			return fmt.Errorf("object store: read local config: %w", errRead)
-		}
-		if len(data) > 0 {
-			if errPut := s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml"); errPut != nil {
-				return errPut
+		errSeed := seedRemoteConfig(ctx, s.configPath, func(data []byte) error {
+			if len(data) == 0 {
+				return nil
 			}
+			return s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml")
+		})
+		if errSeed != nil {
+			return fmt.Errorf("object store: seed remote config: %w", errSeed)
 		}
 	default:
 		return fmt.Errorf("object store: stat config: %w", err)

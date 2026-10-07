@@ -454,12 +454,11 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 		if errSeed := seedLocalConfig(s.configPath, exampleConfigPath); errSeed != nil {
 			return fmt.Errorf("postgres store: create local config: %w", errSeed)
 		}
-		data, errRead := os.ReadFile(s.configPath)
-		if errRead != nil {
-			return fmt.Errorf("postgres store: read local config: %w", errRead)
-		}
-		if errPersist := s.persistConfig(ctx, data); errPersist != nil {
-			return errPersist
+		errSeed := seedRemoteConfig(ctx, s.configPath, func(data []byte) error {
+			return s.persistConfig(ctx, data)
+		})
+		if errSeed != nil {
+			return fmt.Errorf("postgres store: seed database config: %w", errSeed)
 		}
 	case err != nil:
 		return fmt.Errorf("postgres store: load config from database: %w", err)

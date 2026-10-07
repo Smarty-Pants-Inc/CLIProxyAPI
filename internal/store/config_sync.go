@@ -1,8 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 
@@ -53,3 +55,32 @@ func seedLocalConfig(path, example string) error {
 	_, err := cpaconfig.CreateConfigFile(path, data)
 	return err
 }
+
+// seedRemoteConfig uploads the local config when the remote has none. It holds the shared
+// config lock from the read through the upload, so no CAS publication can land in between.
+// After the upload it re-verifies the local revision: if a writer that bypasses the lock
+// (a text editor) changed the file, the stale upload is superseded by a retry with the
+// newer bytes.
+func seedRemoteConfig(ctx context.Context, path string, upload func([]byte) error) error {
+	return cpaconfig.WithConfigFileLock(ctx, path, func() error {
+		for attempt := 0; attempt < seedRemoteConfigAttempts; attempt++ {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if err = upload(data); err != nil {
+				return err
+			}
+			current, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(current, data) {
+				return nil
+			}
+		}
+		return fmt.Errorf("local config kept changing during the seed upload: %w", cpaconfig.ErrConfigConflict)
+	})
+}
+
+const seedRemoteConfigAttempts = 3
