@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
@@ -195,20 +196,8 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 	if err != nil {
 		return fmt.Errorf("meta token storage: encode token file: %w", err)
 	}
-	file, err := os.CreateTemp(filepath.Dir(authFilePath), ".meta-token-*")
-	if err != nil {
-		return fmt.Errorf("meta token storage: create token file: %w", err)
-	}
-	defer func() { _ = os.Remove(file.Name()) }()
-	if _, errWrite := file.Write(append(raw, '\n')); errWrite != nil {
-		_ = file.Close()
+	if errWrite := misc.WriteAuthFileAtomic(authFilePath, append(raw, '\n')); errWrite != nil {
 		return fmt.Errorf("meta token storage: write token file: %w", errWrite)
-	}
-	if errClose := file.Close(); errClose != nil {
-		return fmt.Errorf("meta token storage: close token file: %w", errClose)
-	}
-	if errRename := os.Rename(file.Name(), authFilePath); errRename != nil {
-		return fmt.Errorf("meta token storage: replace token file: %w", errRename)
 	}
 
 	return nil
