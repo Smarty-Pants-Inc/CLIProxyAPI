@@ -84,6 +84,8 @@ requires atomic hash persistence, and a mounted file cannot be replaced using
 rename. Already-bcrypt and empty management keys remain supported. This is a
 deployment migration, not permission to use lock-ignoring live editors.
 
+Management API config writes replace config.yaml atomically (write then rename). Mount the config directory, not a single config.yaml file: a single-file bind mount is unsupported for management writes, because rename cannot replace a bind-mounted file.
+
 ## Remaining scope of smarty-dev#3101
 
 This closes the cooperating-writer late-publication revocation race, not the

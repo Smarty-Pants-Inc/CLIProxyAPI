@@ -180,6 +180,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	// Save the validated canonical tree directly: projecting runtime defaults
 	// back onto it loses explicit nulls, empty maps, and opaque plugin settings.
 	// Fork: WriteConfig publishes atomically (staged file + rename).
+	// ponytail: rename cannot replace a single-file bind-mounted config.yaml; mount the config directory instead.
 	if err = WriteConfig(h.configFilePath, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
