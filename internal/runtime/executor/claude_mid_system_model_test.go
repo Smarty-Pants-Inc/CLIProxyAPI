@@ -15,6 +15,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // midSystemLegacyPayload is a caller body pairing a legacy model with a
@@ -232,6 +233,11 @@ func TestClaudeExecutor_PayloadOverrideDoesNotRerunSystemPlacement(t *testing.T)
 			return err
 		}},
 		{name: "execute stream", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error {
+			// Native Claude callers own the payload; ask the mock for an SSE response.
+			payload, err := sjson.SetBytes(payload, "stream", true)
+			if err != nil {
+				return err
+			}
 			result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})

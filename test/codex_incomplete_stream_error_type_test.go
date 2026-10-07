@@ -30,7 +30,7 @@ import (
 func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	const model = "gpt-5.4"
 	events := []string{
-		`{"type":"response.created","response":{"id":"resp_truncated"}}`,
+		`{"type":"response.created","response":{"model":"gpt-5.4","id":"resp_truncated"}}`,
 		`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"edit","arguments":""}}`,
 		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"path\":\"app/page.tsx\"","sequence_number":3}`,
 		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":",\"text\":\"editor","sequence_number":4}`,

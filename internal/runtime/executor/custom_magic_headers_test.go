@@ -264,7 +264,7 @@ func TestCustomMagicHeaders_Claude(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-7-sonnet-20250219","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]}`))
 	}))
 	defer server.Close()
 
@@ -369,7 +369,7 @@ func TestCustomMagicHeaders_Codex(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = body
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null,\"output\":[]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5-codex\",\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null,\"output\":[]}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -552,7 +552,7 @@ func TestCustomMagicHeaders_CPASessionID_Claude(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-7-sonnet-20250219","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]}`))
 	}))
 	defer server.Close()
 
@@ -594,7 +594,7 @@ func TestCustomMagicHeaders_CPASessionID_Codex(t *testing.T) {
 		gotHeaders = r.Header.Clone()
 		_, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null,\"output\":[]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5-codex\",\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null,\"output\":[]}}\n\n"))
 	}))
 	defer server.Close()
 

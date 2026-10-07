@@ -267,6 +267,9 @@ func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
 }
 
 func TestGetDevinModelsFallback(t *testing.T) {
+	originalDevin, originalModels := devinCatalogStore, modelsCatalogStore
+	devinCatalogStore, modelsCatalogStore = &devinModelsStore{}, &modelStore{data: &staticModelsJSON{}}
+	t.Cleanup(func() { devinCatalogStore, modelsCatalogStore = originalDevin, originalModels })
 	devinModels := GetDevinModels()
 	if len(devinModels) == 0 {
 		t.Fatal("GetDevinModels() returned empty list")

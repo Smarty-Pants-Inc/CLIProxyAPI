@@ -19,6 +19,8 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
@@ -42,8 +44,11 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 				}
 				if transport == "sse" {
 					w.Header().Set("Content-Type", "text/event-stream")
-					if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", created, terminal); errWrite != nil {
-						t.Errorf("write SSE: %v", errWrite)
+					body, _ := io.ReadAll(r.Body)
+					for _, event := range codexQuotaFixtureEvents(body, created, terminal) {
+						if _, errWrite := fmt.Fprintf(w, "data: %s\n\n", event); errWrite != nil {
+							t.Errorf("write SSE: %v", errWrite)
+						}
 					}
 					return
 				}
@@ -57,11 +62,12 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 						t.Errorf("close websocket: %v", errClose)
 					}
 				}()
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				_, body, errRead := conn.ReadMessage()
+				if errRead != nil {
 					t.Errorf("read websocket request: %v", errRead)
 					return
 				}
-				for _, event := range []string{created, terminal} {
+				for _, event := range codexQuotaFixtureEvents(body, created, terminal) {
 					if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
 						t.Errorf("write websocket event: %v", errWrite)
 						return
@@ -186,7 +192,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 							terminal = `{"type":"response.failed","response":{"error":` + quota + `}}`
 						}
 					}
-					for _, event := range []string{created, terminal} {
+					for _, event := range codexQuotaFixtureEvents([]byte(reqText), created, terminal) {
 						if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
 							t.Errorf("write websocket event: %v", errWrite)
 							return
@@ -198,8 +204,10 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 					terminal = `{"type":"error","status":429,"error":` + quota + `}`
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
-				if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", created, terminal); errWrite != nil {
-					t.Errorf("write SSE: %v", errWrite)
+				for _, event := range codexQuotaFixtureEvents([]byte(reqText), created, terminal) {
+					if _, errWrite := fmt.Fprintf(w, "data: %s\n\n", event); errWrite != nil {
+						t.Errorf("write SSE: %v", errWrite)
+					}
 				}
 			}))
 			defer server.Close()
@@ -283,4 +291,17 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// codexQuotaFixtureEvents verifies the exact outbound model and emits real output
+// before the terminal quota frame. These tests exercise post-commit cooling, not
+// the mandatory pre-identity quarantine or bootstrap failover.
+func codexQuotaFixtureEvents(request []byte, created, terminal string) []string {
+	model := gjson.GetBytes(request, "model").String()
+	created, _ = sjson.Set(created, "response.model", model)
+	if gjson.Get(terminal, "response").Exists() {
+		terminal, _ = sjson.Set(terminal, "response.model", model)
+	}
+	const delta = `{"type":"response.output_text.delta","item_id":"msg_quota","output_index":0,"content_index":0,"delta":"hello"}`
+	return []string{created, delta, terminal}
 }

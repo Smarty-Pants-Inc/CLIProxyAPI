@@ -18,6 +18,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 type retryAfterProvider interface {
@@ -311,7 +312,7 @@ func TestClaudeExecutor_RateLimit_FastModeAuthoritativeRejectionHeadersOverrideB
 		attemptsCred2.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"msg-fast-ok","type":"message","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-5-sonnet-20241022","id":"msg-fast-ok","type":"message","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
 	}))
 	defer server2.Close()
 
@@ -536,7 +537,7 @@ func TestClaudeExecutor_AuthManager_OrdinaryModel429DoesNotBlockSiblingModels(t 
 		attemptsOpus.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"msg-opus","type":"message","role":"assistant","content":[{"type":"text","text":"hello from opus"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-opus-20240229","id":"msg-opus","type":"message","role":"assistant","content":[{"type":"text","text":"hello from opus"}]}`))
 	}))
 	defer server.Close()
 
@@ -621,7 +622,7 @@ func TestClaudeExecutor_AuthManager_AlternativeCredentialCanBeSelected(t *testin
 		attemptsCred2.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"msg-123","type":"message","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-5-sonnet-20241022","id":"msg-123","type":"message","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
 	}))
 	defer server2.Close()
 
@@ -723,9 +724,10 @@ func TestClaudeExecutor_AuthManager_MultiModelPoolStreamStopsProbingOn429(t *tes
 
 	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attemptsCred2.Add(1)
+		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"model\":\"claude-3-5-sonnet-20241022\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"" + gjson.GetBytes(body, "model").String() + "\",\"id\":\"msg-1\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 	}))
 	defer server2.Close()
 
