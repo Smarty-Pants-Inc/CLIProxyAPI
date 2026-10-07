@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -86,5 +87,22 @@ func TestWriteAuthFileAtomicRemovesTempOnRenameError(t *testing.T) {
 			names = append(names, entry.Name())
 		}
 		t.Fatalf("temp file left behind: %v", names)
+	}
+}
+
+// A valid auth name at the 255-byte component limit must still be writable: the temp
+// name may not grow with the target name (CLIProxyAPI#81 review P2).
+func TestWriteAuthFileAtomicAcceptsMaxLengthName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, strings.Repeat("a", 250)+".json")
+	if errWrite := os.WriteFile(path, []byte(`{"old":true}`), 0o600); errWrite != nil {
+		t.Skipf("filesystem refuses a 255-byte name: %v", errWrite)
+	}
+	if errWrite := WriteAuthFileAtomic(path, []byte(`{"new":true}`)); errWrite != nil {
+		t.Fatalf("WriteAuthFileAtomic: %v", errWrite)
+	}
+	got, errRead := os.ReadFile(path)
+	if errRead != nil || string(got) != `{"new":true}` {
+		t.Fatalf("content = %q, %v", got, errRead)
 	}
 }

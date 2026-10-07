@@ -18,7 +18,9 @@ import (
 // already exist.
 func WriteAuthFileAtomic(path string, data []byte) (err error) {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	// ponytail: a short fixed prefix, not the auth file's own name, so a valid name near the
+	// filesystem's component-length limit still fits; watchers only react to .json names.
+	tmp, err := os.CreateTemp(dir, ".auth-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp auth file: %w", err)
 	}
