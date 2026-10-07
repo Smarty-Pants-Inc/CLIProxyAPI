@@ -561,8 +561,14 @@ func main() {
 				log.Errorf("failed to find template config file: %v", errExample)
 				return
 			}
-			if errCopy := misc.CopyConfigTemplate(examplePath, configFilePath); errCopy != nil {
-				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
+			template, errTemplate := os.ReadFile(examplePath)
+			if errTemplate != nil {
+				log.Errorf("failed to read template config file: %v", errTemplate)
+				return
+			}
+			// Create through the shared config lock; never replace a concurrently created config.
+			if _, errCreate := config.CreateConfigFile(configFilePath, template); errCreate != nil {
+				log.Errorf("failed to bootstrap git-backed config: %v", errCreate)
 				return
 			}
 			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {

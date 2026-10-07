@@ -95,6 +95,26 @@ func withConfigFileLockContext(ctx context.Context, configFile string, fn func(s
 	return fn(configFile)
 }
 
+// WithConfigFileLock runs fn under the shared config publication lock. Writers that
+// cannot publish through AtomicWriteConfigCAS (a git worktree update) use it so they
+// never interleave with a management, SDK or operator CAS publication.
+func WithConfigFileLock(ctx context.Context, configFile string, fn func() error) error {
+	return withConfigFileLockContext(ctx, configFile, func(string) error { return fn() })
+}
+
+// CreateConfigFile atomically creates configFile and its directory. It never replaces
+// an existing file: created is false when another writer created it first.
+func CreateConfigFile(configFile string, data []byte) (created bool, err error) {
+	if err = os.MkdirAll(filepath.Dir(configFile), 0o700); err != nil {
+		return false, err
+	}
+	err = AtomicWriteConfig(configFile, data)
+	if errors.Is(err, ErrConfigVersionRequired) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // AtomicWriteConfig creates a config atomically; replacing an existing file requires CAS.
 func AtomicWriteConfig(configFile string, data []byte) error {
 	return withConfigFileLock(configFile, func(configFile string) error {

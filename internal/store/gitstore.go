@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	cpaconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -115,7 +116,21 @@ func (s *GitTokenStore) EnsureRepository() error {
 	return s.ensureRepositoryLocked()
 }
 
-func (s *GitTokenStore) ensureRepositoryLocked() (errResult error) {
+// ensureRepositoryLocked syncs the worktree. Pull, reconcile and recovery rewrite
+// config.yaml, so they run under the shared config lock and never interleave with a
+// management, SDK or operator CAS publication (CLIProxyAPI#51). A fresh clone has no
+// config directory yet and so no concurrent config writer to exclude.
+func (s *GitTokenStore) ensureRepositoryLocked() error {
+	configPath := s.ConfigPath()
+	if configPath != "" {
+		if info, err := os.Stat(filepath.Dir(configPath)); err == nil && info.IsDir() {
+			return cpaconfig.WithConfigFileLock(context.Background(), configPath, s.syncRepositoryLocked)
+		}
+	}
+	return s.syncRepositoryLocked()
+}
+
+func (s *GitTokenStore) syncRepositoryLocked() (errResult error) {
 	s.dirLock.Lock()
 	if s.remote == "" {
 		s.dirLock.Unlock()
