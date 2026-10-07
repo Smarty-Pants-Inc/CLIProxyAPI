@@ -6,17 +6,18 @@ import (
 	"testing"
 )
 
-// A Scanner comment line inside a held multiline data event is a new SSE line,
-// not JSON: the event must register and every original unit must be released.
+// Once a complete delimiter-free event has established Scanner framing, a
+// comment inside a held multiline data event is a new SSE line, not JSON.
+// The event must register and every original unit must be released.
 func TestCompactionOutputRound5ScannerCommentInsideMultilineEvent(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		units []string
 		data  string
 	}{
-		{"after comma", []string{`data: {"a":1,`, `: keepalive`, `data: "b":2}`}, "{\"a\":1,\n\"b\":2}"},
-		{"after value", []string{`data: {"a":[1`, `: keepalive`, `data: ,2]}`}, "{\"a\":[1\n,2]}"},
-		{"after array string", []string{`data: {"a":["x"`, `:`, `data: ]}`}, "{\"a\":[\"x\"\n]}"},
+		{"after comma", []string{`data: {"type":"response.created"}`, `data: {"a":1,`, `: keepalive`, `data: "b":2}`}, "{\"a\":1,\n\"b\":2}"},
+		{"after value", []string{`data: {"type":"response.created"}`, `data: {"a":[1`, `: keepalive`, `data: ,2]}`}, "{\"a\":[1\n,2]}"},
+		{"after array string", []string{`data: {"type":"response.created"}`, `data: {"a":["x"`, `:`, `data: ]}`}, "{\"a\":[\"x\"\n]}"},
 		// A line may end after an object key. Once the stream has proven
 		// Scanner framing (a complete event and no wire LF), a leading ':'
 		// unit is still a new line.

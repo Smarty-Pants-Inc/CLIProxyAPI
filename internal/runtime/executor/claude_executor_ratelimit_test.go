@@ -312,7 +312,7 @@ func TestClaudeExecutor_RateLimit_FastModeAuthoritativeRejectionHeadersOverrideB
 		attemptsCred2.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"msg-fast-ok","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-5-sonnet-20241022","id":"msg-fast-ok","type":"message","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
 	}))
 	defer server2.Close()
 
@@ -537,7 +537,7 @@ func TestClaudeExecutor_AuthManager_OrdinaryModel429DoesNotBlockSiblingModels(t 
 		attemptsOpus.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"msg-opus","type":"message","model":"claude-3-opus-20240229","role":"assistant","content":[{"type":"text","text":"hello from opus"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-opus-20240229","id":"msg-opus","type":"message","role":"assistant","content":[{"type":"text","text":"hello from opus"}]}`))
 	}))
 	defer server.Close()
 
@@ -622,7 +622,7 @@ func TestClaudeExecutor_AuthManager_AlternativeCredentialCanBeSelected(t *testin
 		attemptsCred2.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"msg-123","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
+		_, _ = w.Write([]byte(`{"model":"claude-3-5-sonnet-20241022","id":"msg-123","type":"message","role":"assistant","content":[{"type":"text","text":"hello from cred2"}]}`))
 	}))
 	defer server2.Close()
 

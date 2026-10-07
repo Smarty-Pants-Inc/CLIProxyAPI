@@ -238,6 +238,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
 			}
+			m.beginExecutionAttempt(execOpts)
 			startHomeExec := time.Now()
 			response, errExecute = execute()
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)

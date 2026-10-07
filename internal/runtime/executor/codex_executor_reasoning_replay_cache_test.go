@@ -613,7 +613,6 @@ func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSig
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"Invalid signature in thinking block","type":"invalid_request_error","code":"invalid_request_error"}}}` + "\n\n"))
 	}))
 	defer server.Close()
@@ -632,18 +631,11 @@ func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSig
 		SourceFormat: sdktranslator.FromString("claude"),
 		Stream:       true,
 	})
-	if err != nil {
-		t.Fatalf("ExecuteStream setup error: %v", err)
+	if err == nil || streamResult != nil {
+		t.Fatalf("unverified response.failed must fail at setup without chunks: result=%v error=%v", streamResult, err)
 	}
-
-	gotChunkErr := false
-	for chunk := range streamResult.Chunks {
-		if chunk.Err != nil {
-			gotChunkErr = true
-		}
-	}
-	if !gotChunkErr {
-		t.Fatal("expected stream chunk error for invalid signature response.failed")
+	if got := gjson.Get(err.Error(), "error.code").String(); got != "thinking_signature_invalid" {
+		t.Fatalf("error code = %q, want thinking_signature_invalid; err=%v", got, err)
 	}
 	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-stream:agent:main"); ok {
 		t.Fatal("invalid signature response.failed should clear cached replay item")

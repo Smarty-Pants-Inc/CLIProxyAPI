@@ -40,6 +40,7 @@ func TestPatchAPIKeyWeightForEveryFamily(t *testing.T) {
 			cfg := &config.Config{}
 			test.setup(cfg)
 			h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			loadHandlerConfigBaseline(t, h)
 
 			rec := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(rec)
@@ -61,6 +62,7 @@ func TestPatchAPIKeyWeightResetAndStrictValidation(t *testing.T) {
 	initial := 5
 	cfg := &config.Config{GeminiKey: []config.GeminiKey{{APIKey: "key", Weight: &initial}}}
 	h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+	loadHandlerConfigBaseline(t, h)
 
 	patch := func(raw string) *httptest.ResponseRecorder {
 		t.Helper()

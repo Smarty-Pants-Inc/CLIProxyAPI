@@ -30,7 +30,6 @@ func LoadConfig(configFile string) (*Config, error) {
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
-	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		if optional {
@@ -43,10 +42,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	return LoadConfigBytes(data, configFile, optional)
+}
 
+// LoadConfigBytes parses an already-read configuration snapshot. The path is
+// used only for conditional persistence of normalized secrets. Keeping the
+// bytes and revision together prevents a watcher from applying one snapshot
+// while recording another snapshot's revision.
+func LoadConfigBytes(data []byte, configFile string, optional bool) (*Config, error) {
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
-		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), sourceRevision: sourceRevision(data)}
 		cfg.NormalizePluginsConfig()
 		return cfg, nil
 	}
@@ -60,6 +66,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
+	cfg.sourceRevision = sourceRevision(data)
 	// Set defaults before unmarshal so that absent keys keep defaults.
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false
@@ -79,7 +86,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
-	if err = yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
@@ -115,9 +122,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		cfg.RemoteManagement.SecretKey = hashed
 
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
+		// Persist only against the bytes that produced cfg. Never bind newer,
+		// unrelated bytes to this snapshot or overwrite a completed key rotation.
+		written, errSave := saveConfigNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed, &cfg.sourceRevision)
+		if errSave != nil {
+			return nil, fmt.Errorf("failed to persist hashed management key: %w", errSave)
+		}
+		cfg.sourceRevision = sourceRevision(written)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)

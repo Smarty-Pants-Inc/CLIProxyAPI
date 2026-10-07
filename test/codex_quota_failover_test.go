@@ -20,15 +20,14 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 	for _, transport := range []string{"sse", "websocket-error", "websocket-failed"} {
 		t.Run(transport, func(t *testing.T) {
 			const model, siblingModel = "gpt-5.4", "gpt-5.4-mini"
-			created := func(payload []byte) string {
-				return fmt.Sprintf(`{"type":"response.created","response":{"id":"quota-test-response","model":%q}}`, gjson.GetBytes(payload, "model").String())
-			}
+			const created = `{"type":"response.created","response":{"id":"quota-test-response"}}`
 			const quota = `{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}`
 			const completed = `{"type":"response.completed","response":{"id":"quota-test-success","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 			attempts := make(chan string, 8)
@@ -44,14 +43,12 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 					}
 				}
 				if transport == "sse" {
-					payload, errRead := io.ReadAll(r.Body)
-					if errRead != nil {
-						t.Errorf("read SSE request: %v", errRead)
-						return
-					}
 					w.Header().Set("Content-Type", "text/event-stream")
-					if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\ndata: %s\n\n", created(payload), `{"type":"response.output_text.delta","delta":"hello"}`, terminal); errWrite != nil {
-						t.Errorf("write SSE: %v", errWrite)
+					body, _ := io.ReadAll(r.Body)
+					for _, event := range codexQuotaFixtureEvents(body, created, terminal) {
+						if _, errWrite := fmt.Fprintf(w, "data: %s\n\n", event); errWrite != nil {
+							t.Errorf("write SSE: %v", errWrite)
+						}
 					}
 					return
 				}
@@ -65,12 +62,12 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 						t.Errorf("close websocket: %v", errClose)
 					}
 				}()
-				_, payload, errRead := conn.ReadMessage()
+				_, body, errRead := conn.ReadMessage()
 				if errRead != nil {
 					t.Errorf("read websocket request: %v", errRead)
 					return
 				}
-				for _, event := range []string{created(payload), `{"type":"response.output_text.delta","delta":"hello"}`, terminal} {
+				for _, event := range codexQuotaFixtureEvents(body, created, terminal) {
 					if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
 						t.Errorf("write websocket event: %v", errWrite)
 						return
@@ -158,9 +155,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 	for _, transport := range []string{"sse", "websocket-error", "websocket-failed"} {
 		t.Run(transport, func(t *testing.T) {
 			const model, siblingModel = "gpt-5.3-codex-spark", "gpt-5.6-sol"
-			created := func(payload string) string {
-				return fmt.Sprintf(`{"type":"response.created","response":{"id":"quota-test-response","model":%q}}`, gjson.Get(payload, "model").String())
-			}
+			const created = `{"type":"response.created","response":{"id":"quota-test-response"}}`
 			const quota = `{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}`
 			const completed = `{"type":"response.completed","response":{"id":"quota-test-success","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 			attempts := make(chan string, 8)
@@ -197,7 +192,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 							terminal = `{"type":"response.failed","response":{"error":` + quota + `}}`
 						}
 					}
-					for _, event := range []string{created(reqText), `{"type":"response.output_text.delta","delta":"hello"}`, terminal} {
+					for _, event := range codexQuotaFixtureEvents([]byte(reqText), created, terminal) {
 						if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
 							t.Errorf("write websocket event: %v", errWrite)
 							return
@@ -209,8 +204,10 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 					terminal = `{"type":"error","status":429,"error":` + quota + `}`
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
-				if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\ndata: %s\n\n", created(reqText), `{"type":"response.output_text.delta","delta":"hello"}`, terminal); errWrite != nil {
-					t.Errorf("write SSE: %v", errWrite)
+				for _, event := range codexQuotaFixtureEvents([]byte(reqText), created, terminal) {
+					if _, errWrite := fmt.Fprintf(w, "data: %s\n\n", event); errWrite != nil {
+						t.Errorf("write SSE: %v", errWrite)
+					}
 				}
 			}))
 			defer server.Close()
@@ -294,4 +291,17 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// codexQuotaFixtureEvents verifies the exact outbound model and emits real output
+// before the terminal quota frame. These tests exercise post-commit cooling, not
+// the mandatory pre-identity quarantine or bootstrap failover.
+func codexQuotaFixtureEvents(request []byte, created, terminal string) []string {
+	model := gjson.GetBytes(request, "model").String()
+	created, _ = sjson.Set(created, "response.model", model)
+	if gjson.Get(terminal, "response").Exists() {
+		terminal, _ = sjson.Set(terminal, "response.model", model)
+	}
+	const delta = `{"type":"response.output_text.delta","item_id":"msg_quota","output_index":0,"content_index":0,"delta":"hello"}`
+	return []string{created, delta, terminal}
 }

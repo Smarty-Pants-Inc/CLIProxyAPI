@@ -967,7 +967,7 @@ func TestAuditHomeCodex426WebsocketToHTTPFreshSelection(t *testing.T) {
 		}
 		httpFallbackCalls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-5-codex\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5-codex\",\"id\":\"response-1\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
 	}))
 	defer httpFallback.Close()
 

@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/sse"
 	"strings"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -183,7 +184,7 @@ type compactionOutputStream struct {
 	linePrefix     []byte
 	lineMode       byte // 0 prefix, 1 data, 2 control, 3 raw JSON
 	lineBytes      int
-	lineCR         bool
+	lines          sse.Lines
 	dataSpace      bool
 	jsonDepth      int
 	jsonStarted    bool
@@ -441,7 +442,7 @@ func (s *compactionOutputStream) dataByte(b byte) error {
 func (s *compactionOutputStream) resetLine() {
 	s.linePrefix = nil
 	s.lineMode, s.lineBytes = 0, 0
-	s.lineCR, s.dataSpace, s.controlLine, s.lineAfterLF = false, false, false, false
+	s.dataSpace, s.controlLine, s.lineAfterLF = false, false, false
 }
 
 func (s *compactionOutputStream) resetData() {
@@ -490,29 +491,21 @@ func (s *compactionOutputStream) endLine() error {
 	return nil
 }
 
-// continuesLine reports a payload that can only be a fragment of the open
-// line, so it must not end that line even though it looks like a Scanner unit.
-// A partial field name ("data" + ": {") or a JSON string cannot span a line.
-// A leading ':' in an open data value is a fragment when the line began after
-// a wire LF (a raw byte stream, not a Scanner), or when JSON needs ':' after
-// an object key and Scanner framing is not proven. Otherwise it is a Scanner
-// comment line: ':' cannot legally continue that JSON anyway.
-func (s *compactionOutputStream) continuesLine(payload []byte) bool {
-	if s.lineBytes == 0 || len(payload) == 0 {
-		return false
-	}
-	if s.jsonString || (s.lineMode == 0 && len(s.linePrefix) > 0) {
-		return true
-	}
-	scanner := s.events > 0 && !s.sawLF
-	return s.lineMode == 1 && payload[0] == ':' && s.jsonStarted && !s.jsonDone &&
-		(s.lineAfterLF || (s.jsonColon && !scanner))
+// startsLine shares the handler's lexer-aware Scanner boundary rule. Physical
+// CR, LF and CRLF boundaries are handled separately by s.lines, so a comment
+// after an object key is unambiguous when the transport carries a terminator.
+func (s *compactionOutputStream) startsLine(payload []byte) bool {
+	return sse.StartsLine(payload, sse.LexicalBoundary{
+		InString: s.jsonString, PartialField: s.lineMode == 0 && len(s.linePrefix) > 0,
+		RawJSON: s.jsonStarted && !s.sse, DataLine: s.lineMode == 1,
+		Open: s.jsonStarted && !s.jsonDone, AfterBreak: s.lineAfterLF,
+		Colon: s.jsonColon, Scanner: s.events > 0 && !s.sawLF,
+	})
 }
 
 func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 	s.released = nil
-	_, _, scannerLine := extractSSEDataLine(payload)
-	recognized := (scannerLine || compactionControlLine(payload)) && !s.continuesLine(payload)
+	recognized := s.startsLine(payload)
 	if s.lineBytes > 0 && recognized && !(s.jsonStarted && !s.sse) {
 		// Scanner strips delimiters; only the new unit's prefix is examined.
 		if err := s.endLine(); err != nil {
@@ -555,8 +548,12 @@ func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 		}
 		s.pending = append(s.pending, b)
 		s.framingWork(1)
-		if b == '\n' {
-			blank := s.lineBytes == 0 || (s.lineBytes == 1 && s.lineCR)
+		lineBreak, skip := s.lines.Step(b)
+		if skip {
+			continue
+		}
+		if lineBreak {
+			blank := s.lineBytes == 0
 			if s.lineMode == 1 {
 				s.framed = true
 			}
@@ -585,7 +582,6 @@ func (s *compactionOutputStream) pushEvent(payload []byte) ([]byte, error) {
 			continue
 		}
 		s.lineBytes++
-		s.lineCR = b == '\r'
 		switch s.lineMode {
 		case 1:
 			if s.dataSpace {

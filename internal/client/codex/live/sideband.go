@@ -60,6 +60,10 @@ type liveSession struct {
 type liveSessionResources struct {
 	mu      sync.Mutex
 	closed  bool
+	closers []*liveResourceRegistration
+}
+
+type liveResourceRegistration struct {
 	closers []func() error
 }
 
@@ -257,18 +261,34 @@ func endHomeSelection(session liveSession, reason string) {
 	}
 }
 
-func (r *liveSessionResources) add(closers ...func() error) {
+// add registers resources until close or removal. The returned function only
+// detaches the registration: callers must close completed resources first. If
+// close already took ownership, removal cannot prevent it from closing them.
+func (r *liveSessionResources) add(closers ...func() error) func() {
 	if r == nil {
-		return
+		return func() {}
 	}
+	registration := &liveResourceRegistration{closers: closers}
 	r.mu.Lock()
-	if !r.closed {
-		r.closers = append(r.closers, closers...)
+	if r.closed {
 		r.mu.Unlock()
-		return
+		closeSessionResources(closers)
+		return func() {}
 	}
+	r.closers = append(r.closers, registration)
 	r.mu.Unlock()
-	closeSessionResources(closers)
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for i, entry := range r.closers {
+			if entry == registration {
+				copy(r.closers[i:], r.closers[i+1:])
+				r.closers[len(r.closers)-1] = nil
+				r.closers = r.closers[:len(r.closers)-1]
+				return
+			}
+		}
+	}
 }
 
 func (r *liveSessionResources) close() {
@@ -284,7 +304,9 @@ func (r *liveSessionResources) close() {
 	closers := r.closers
 	r.closers = nil
 	r.mu.Unlock()
-	closeSessionResources(closers)
+	for _, registration := range closers {
+		closeSessionResources(registration.closers)
+	}
 }
 
 func closeSessionResources(closers []func() error) {
@@ -349,15 +371,6 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		writeRealtimeError(c, http.StatusForbidden, "Realtime call belongs to another API principal", "invalid_request_error", "realtime_call_scope_mismatch")
 		return
 	}
-	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
-	defer releaseRaw()
-	// F28: the call owns this join attempt before any selection or dial. Owner hangup,
-	// expiry or shutdown closes session.resources, which cancels ctx (aborting a
-	// pending handshake) and closes any socket attached later. If the call already
-	// completed, add runs the closer at once.
-	if session.resources != nil {
-		session.resources.add(func() error { rawResources.close(); return nil })
-	}
 	consumeSession := false
 	defer func() {
 		if consumeSession {
@@ -365,6 +378,18 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 			return
 		}
 		h.sessions.release(session)
+	}()
+	ctx, rawResources, releaseRaw := h.trackRawRelay(c)
+	// F28: the call owns this join attempt before any selection or dial. Owner hangup,
+	// expiry or shutdown closes session.resources, which cancels ctx (aborting a
+	// pending handshake) and closes any socket attached later. If the call already
+	// completed, add runs the closer at once.
+	unregister := session.resources.add(func() error { rawResources.close(); return nil })
+	defer func() {
+		// Close before detaching so concurrent completion always cancels active
+		// attempts. Detach before releasing the claim for another retry.
+		releaseRaw()
+		unregister()
 	}()
 
 	ctx = context.WithValue(ctx, "gin", c)
@@ -727,7 +752,7 @@ func proxyURLForAuth(cfg *config.Config, selected *auth.Auth) string {
 
 // closeDialOnCancel closes the dialed transport when ctx ends. gorilla/websocket
 // honors only the context deadline during the handshake, not cancellation, so a
-// cancelled join would otherwise wait for HandshakeTimeout.
+// cancelled join would otherwise leave the HTTP upgrade blocked indefinitely.
 func closeDialOnCancel(dialer *websocket.Dialer, ctx context.Context) {
 	next := dialer.NetDialContext
 	if next == nil {
@@ -742,12 +767,10 @@ func closeDialOnCancel(dialer *websocket.Dialer, ctx context.Context) {
 	}
 }
 
-// sidebandHandshakeTimeout bounds an upstream sideband handshake; it matches the
-// Codex Responses websocket handshake timeout.
-const sidebandHandshakeTimeout = 30 * time.Second
-
 func newSidebandDialer(proxyURL string) *websocket.Dialer {
-	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: sidebandHandshakeTimeout}
+	// Credentials are already acquired. Only the owning request/call may cancel
+	// the network handshake; do not impose a fixed handshake timeout.
+	dialer := &websocket.Dialer{Proxy: http.ProxyFromEnvironment}
 	if strings.TrimSpace(proxyURL) == "" {
 		return dialer
 	}

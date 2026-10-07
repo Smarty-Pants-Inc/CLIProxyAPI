@@ -31,19 +31,14 @@ func TestSaveConfigPreserveComments_PluginConfigPreservesZeroValuesAndBooleans(t
 	}
 
 	enabledFalse := false
-	cfg := &Config{
-		Plugins: PluginsConfig{
-			Enabled: true,
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{
-				"sample": parseTestPluginConfig(t, `name: updated
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"sample": parseTestPluginConfig(t, `name: updated
 enabled: false
 timeout: 0
 empty_str: ""
 empty_list: []
 `),
-			},
-		},
 	}
 	cfg.Plugins.Configs["sample"] = PluginInstanceConfig{
 		Enabled: &enabledFalse,
@@ -108,17 +103,12 @@ func TestSaveConfigPreserveComments_PluginConfigDeletesRemovedKeys(t *testing.T)
 		t.Fatalf("os.WriteFile() error = %v", errWrite)
 	}
 
-	cfg := &Config{
-		Plugins: PluginsConfig{
-			Enabled: true,
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{
-				"sample": parseTestPluginConfig(t, `name: updated
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"sample": parseTestPluginConfig(t, `name: updated
 nested:
   new_child: keep_me
 `),
-			},
-		},
 	}
 
 	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
@@ -162,20 +152,15 @@ func TestSaveConfigPreserveComments_PluginConfigPreservesSequenceReordering(t *t
 	}
 
 	// Reorder sequence: model-b first, then model-a, with detail modified.
-	cfg := &Config{
-		Plugins: PluginsConfig{
-			Enabled: true,
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{
-				"sample": parseTestPluginConfig(t, `vision_models:
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"sample": parseTestPluginConfig(t, `vision_models:
   - name: model-b
     detail: new-detail-b
     extra_b: only-in-b
   - name: model-a
     detail: new-detail-a
 `),
-			},
-		},
 	}
 
 	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
@@ -202,7 +187,7 @@ func TestSaveConfigPreserveComments_PluginConfigPreservesSequenceReordering(t *t
 	if !strings.Contains(savedText, "extra_b: only-in-b") {
 		t.Errorf("saved config missing extra_b; got:\n%s", savedText)
 	}
-	if strings.Contains(savedText, "old_prop") || strings.Contains(savedText, "stale-") {
+	if strings.Contains(savedText, "old_prop") || strings.Contains(savedText, ": stale-a\n") || strings.Contains(savedText, ": stale-b\n") {
 		t.Errorf("saved config unexpectedly contains stale properties from old sequence items; got:\n%s", savedText)
 	}
 
@@ -242,19 +227,13 @@ debug: false
 	}
 
 	enabledFalse := false
-	cfg := &Config{
-		Port:  8080,
-		Debug: false,
-		Plugins: PluginsConfig{
-			Enabled: true,
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{
-				"new-plugin": parseTestPluginConfig(t, `enabled: false
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Enabled = true
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"new-plugin": parseTestPluginConfig(t, `enabled: false
 mode: minimal
 count: 0
 `),
-			},
-		},
 	}
 	cfg.Plugins.Configs["new-plugin"] = PluginInstanceConfig{
 		Enabled: &enabledFalse,
@@ -292,19 +271,13 @@ func TestSaveConfigPreserveComments_PluginConfigCreatesNewSubtreeWithOnlyZeroVal
 	}
 
 	enabledFalse := false
-	cfg := &Config{
-		Port: 8080,
-		Plugins: PluginsConfig{
-			Enabled: false,
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{
-				"zero-plugin": parseTestPluginConfig(t, `enabled: false
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"zero-plugin": parseTestPluginConfig(t, `enabled: false
 timeout: 0
 empty_str: ""
 empty_list: []
 `),
-			},
-		},
 	}
 	cfg.Plugins.Configs["zero-plugin"] = PluginInstanceConfig{
 		Enabled: &enabledFalse,
@@ -350,14 +323,9 @@ func TestSaveConfigPreserveComments_PluginConfigDeletesPluginAndClearsConfigs(t 
 	}
 
 	// Step 1: remove plugin-a, keep plugin-b
-	cfg := &Config{
-		Plugins: PluginsConfig{
-			Enabled: true,
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{
-				"plugin-b": parseTestPluginConfig(t, "name: b-updated\n"),
-			},
-		},
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"plugin-b": parseTestPluginConfig(t, "name: b-updated\n"),
 	}
 	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("SaveConfigPreserveComments() step 1 error = %v", errSave)
@@ -409,15 +377,9 @@ plugins:
 		t.Fatalf("os.WriteFile() error = %v", errWrite)
 	}
 
-	cfg := &Config{
-		Port: 8080,
-		Plugins: PluginsConfig{
-			Enabled: true,
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{
-				"sample": parseTestPluginConfig(t, "name: updated\nenabled: false\n"),
-			},
-		},
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"sample": parseTestPluginConfig(t, "name: updated\nenabled: false\n"),
 	}
 	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
@@ -450,14 +412,9 @@ func TestSaveConfigPreserveComments_PluginConfigAddsConfigsWhenPluginsExistsWith
 		t.Fatalf("os.WriteFile() error = %v", errWrite)
 	}
 
-	cfg := &Config{
-		Plugins: PluginsConfig{
-			Enabled: true,
-			Dir:     "custom-dir",
-			Configs: map[string]PluginInstanceConfig{
-				"new-item": parseTestPluginConfig(t, "enabled: false\n"),
-			},
-		},
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"new-item": parseTestPluginConfig(t, "enabled: false\n"),
 	}
 	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)

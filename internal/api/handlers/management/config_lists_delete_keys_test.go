@@ -63,6 +63,8 @@ func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 		configFilePath: writeTestConfigFile(t),
 	}
 
+	loadHandlerConfigBaseline(t, h)
+
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/gemini-api-key?api-key=shared-key&base-url=https://a.example.com", nil)
@@ -160,6 +162,9 @@ func TestPatchGeminiStyleKeyRoutingIdentity(t *testing.T) {
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodPatch, path, strings.NewReader(`{"match":"shared-key","value":{"prefix":"updated"}}`))
 
+			if tc.wantStatus == http.StatusOK {
+				loadHandlerConfigBaseline(t, handler)
+			}
 			if tc.interactions {
 				handler.PatchInteractionsKey(ctx)
 			} else {
@@ -197,6 +202,8 @@ func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T)
 		configFilePath: writeTestConfigFile(t),
 	}
 
+	loadHandlerConfigBaseline(t, h)
+
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/claude-api-key?api-key=shared-key&base-url=", nil)
@@ -226,6 +233,8 @@ func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 		},
 		configFilePath: writeTestConfigFile(t),
 	}
+
+	loadHandlerConfigBaseline(t, h)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)

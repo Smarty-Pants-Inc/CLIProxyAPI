@@ -1708,13 +1708,26 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	server := newTestServer(t)
-	enabled := true
-	server.cfg.Plugins.Configs = map[string]proxyconfig.PluginInstanceConfig{
-		"sample": {Enabled: &enabled, Priority: 4},
+	server.cfg.CredentialInFlight = proxyconfig.DefaultCredentialInFlightConfig()
+	var pluginConfig proxyconfig.PluginInstanceConfig
+	if errUnmarshal := yaml.Unmarshal([]byte("enabled: true\npriority: 4\n"), &pluginConfig); errUnmarshal != nil {
+		t.Fatalf("failed to parse plugin config: %v", errUnmarshal)
 	}
-	if errWrite := os.WriteFile(server.configFilePath, []byte("{}\n"), 0o600); errWrite != nil {
+	server.cfg.Plugins.Configs = map[string]proxyconfig.PluginInstanceConfig{
+		"sample": pluginConfig,
+	}
+	configData, errMarshal := yaml.Marshal(server.cfg)
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal config file: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(server.configFilePath, configData, 0o600); errWrite != nil {
 		t.Fatalf("failed to write config file: %v", errWrite)
 	}
+	loadedConfig, errLoad := proxyconfig.LoadConfig(server.configFilePath)
+	if errLoad != nil {
+		t.Fatalf("failed to load config file: %v", errLoad)
+	}
+	*server.cfg = *loadedConfig
 
 	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
 	req.Header.Set("Authorization", "Bearer test-management-key")

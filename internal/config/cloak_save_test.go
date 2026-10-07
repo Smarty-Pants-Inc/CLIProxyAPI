@@ -21,15 +21,14 @@ func TestSaveConfigPreserveComments_ClaudeCloakUpdates(t *testing.T) {
 	}
 
 	// Test case 1: Disable strict-mode, clear mode, remove cache-user-id.
-	cfg := &Config{
-		ClaudeKey: []ClaudeKey{
-			{
-				APIKey: "sk-ant-test",
-				Cloak: &CloakConfig{
-					Mode:        "",
-					StrictMode:  false,
-					CacheUserID: nil,
-				},
+	cfg := fenceLoad(t, configPath)
+	cfg.ClaudeKey = []ClaudeKey{
+		{
+			APIKey: "sk-ant-test",
+			Cloak: &CloakConfig{
+				Mode:        "",
+				StrictMode:  false,
+				CacheUserID: nil,
 			},
 		},
 	}
@@ -93,15 +92,14 @@ func TestSaveConfigPreserveComments_ClaudeCloakExplicitFalse(t *testing.T) {
 	}
 
 	cacheFalse := false
-	cfg := &Config{
-		ClaudeKey: []ClaudeKey{
-			{
-				APIKey: "sk-ant-test",
-				Cloak: &CloakConfig{
-					Mode:        "auto",
-					StrictMode:  false,
-					CacheUserID: &cacheFalse,
-				},
+	cfg := fenceLoad(t, configPath)
+	cfg.ClaudeKey = []ClaudeKey{
+		{
+			APIKey: "sk-ant-test",
+			Cloak: &CloakConfig{
+				Mode:        "auto",
+				StrictMode:  false,
+				CacheUserID: &cacheFalse,
 			},
 		},
 	}
@@ -158,14 +156,13 @@ func TestSaveConfigPreserveComments_ClaudeCloakExplicitFalseWhenFieldPreviouslyA
 	}
 
 	cacheFalse := false
-	cfg := &Config{
-		ClaudeKey: []ClaudeKey{
-			{
-				APIKey: "sk-ant-test",
-				Cloak: &CloakConfig{
-					Mode:        "always",
-					CacheUserID: &cacheFalse,
-				},
+	cfg := fenceLoad(t, configPath)
+	cfg.ClaudeKey = []ClaudeKey{
+		{
+			APIKey: "sk-ant-test",
+			Cloak: &CloakConfig{
+				Mode:        "always",
+				CacheUserID: &cacheFalse,
 			},
 		},
 	}
@@ -212,12 +209,11 @@ func TestSaveConfigPreserveComments_ClaudeCloakRemovedWhenNil(t *testing.T) {
 	}
 
 	// Cloak explicitly set to nil (removed)
-	cfg := &Config{
-		ClaudeKey: []ClaudeKey{
-			{
-				APIKey: "sk-ant-test",
-				Cloak:  nil,
-			},
+	cfg := fenceLoad(t, configPath)
+	cfg.ClaudeKey = []ClaudeKey{
+		{
+			APIKey: "sk-ant-test",
+			Cloak:  nil,
 		},
 	}
 
@@ -258,16 +254,12 @@ claude-api-key:
 		t.Fatalf("os.WriteFile() error = %v", errWrite)
 	}
 
-	cfg := &Config{
-		RemoteManagement: RemoteManagement{
-			AllowRemote: true,
-		},
-		ClaudeKey: []ClaudeKey{
-			{
-				APIKey: "sk-ant-test",
-				Headers: map[string]string{
-					"Custom-A": "valA",
-				},
+	cfg := fenceLoad(t, configPath)
+	cfg.ClaudeKey = []ClaudeKey{
+		{
+			APIKey: "sk-ant-test",
+			Headers: map[string]string{
+				"Custom-A": "valA",
 			},
 		},
 	}

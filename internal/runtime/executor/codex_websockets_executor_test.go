@@ -126,7 +126,7 @@ func TestCodexWebsocketsExecuteRestoresClaudeAgentReasoningReplay(t *testing.T) 
 			t.Fatalf("read upstream websocket message: %v", errRead)
 		}
 		capturedPayload <- bytes.Clone(payload)
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-ws-replay","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"next answer"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5.4","id":"resp-ws-replay","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"next answer"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -206,7 +206,7 @@ func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *
 		}
 		capturedPayload <- bytes.Clone(payload)
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5.6-sol","id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -273,7 +273,7 @@ func TestCodexWebsocketsExecuteStreamResponsesLiteForcesParallelToolCallsFalse(t
 		}
 		capturedPayload <- bytes.Clone(payload)
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-luna","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5.6-luna","id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Errorf("write completed websocket message: %v", errWrite)
 		}
@@ -348,7 +348,7 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 		}
 		capturedPayload <- bytes.Clone(payload)
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","model":"gpt-5-codex","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5-codex","id":"resp-2","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -652,7 +652,7 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
 	delta := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
-	completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5-codex","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+	completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5-codex","id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -765,8 +765,9 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 
 	result, err := exec.ExecuteStream(ctx, auth, req, opts)
 	if err == nil || result != nil {
-		t.Fatalf("expected call-time upstream error without a stream, got result=%v err=%v", result, err)
+		t.Fatalf("unverified failure must fail at setup without chunks: result=%v error=%v", result, err)
 	}
+
 	statusErr, ok := err.(interface{ StatusCode() int })
 	if !ok {
 		t.Fatalf("error type %T does not expose StatusCode", err)
@@ -979,8 +980,9 @@ func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 
 	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
 	if err == nil || result != nil {
-		t.Fatalf("expected call-time message-too-big error without a stream, got result=%v err=%v", result, err)
+		t.Fatalf("unverified failure must fail at setup without chunks: result=%v error=%v", result, err)
 	}
+
 	statusErr, ok := err.(interface{ StatusCode() int })
 	if !ok {
 		t.Fatalf("error type %T does not expose StatusCode", err)
@@ -2142,10 +2144,6 @@ func TestCodexWebsocketTerminalFailureInvalidatesRetainedLifecycle(t *testing.T)
 		if _, _, errRead := conn.ReadMessage(); errRead != nil {
 			return
 		}
-		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","model":"gpt-5-codex"}}`)); errWrite != nil {
-			t.Errorf("write created response: %v", errWrite)
-			return
-		}
 		terminal := []byte(`{"type":"response.failed","response":{"error":{"type":"authentication_error","code":"invalid_api_key","message":"Invalid token."}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, terminal); errWrite != nil {
 			t.Errorf("write terminal response: %v", errWrite)
@@ -2170,13 +2168,11 @@ func TestCodexWebsocketTerminalFailureInvalidatesRetainedLifecycle(t *testing.T)
 	}
 
 	result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
-	if errExecute != nil {
-		t.Fatalf("first ExecuteStream() error = %v", errExecute)
+	if errExecute == nil || result != nil {
+		t.Fatalf("unverified terminal failure must fail at setup: result=%v error=%v", result, errExecute)
 	}
-	for chunk := range result.Chunks {
-		if chunk.Err == nil {
-			continue
-		}
+	if got := gjson.Get(errExecute.Error(), "error.code").String(); got != "auth_unavailable" {
+		t.Fatalf("error code = %q, want auth_unavailable; err=%v", got, errExecute)
 	}
 	lifecycle := opts.ExecutionLifecycle.(*terminalFailureLifecycle)
 	if lifecycle.active.Load() {
@@ -2196,10 +2192,8 @@ func TestCodexWebsocketTerminalFailureInvalidatesRetainedLifecycle(t *testing.T)
 
 	opts.ExecutionLifecycle = newTerminalFailureLifecycle()
 	result, errExecute = exec.ExecuteStream(context.Background(), auth, req, opts)
-	if errExecute != nil {
-		t.Fatalf("second ExecuteStream() error = %v", errExecute)
-	}
-	for range result.Chunks {
+	if errExecute == nil || result != nil {
+		t.Fatalf("second unverified terminal failure must fail at setup: result=%v error=%v", result, errExecute)
 	}
 	if got := connections.Load(); got != 2 {
 		t.Fatalf("websocket connections = %d, want 2 after terminal invalidation", got)
@@ -2233,7 +2227,7 @@ func TestCodexWebsocketNonstreamLifecycleBindFailureDetachesConnection(t *testin
 		if _, _, errRead := conn.ReadMessage(); errRead != nil {
 			return
 		}
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5-codex","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5-codex","id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Errorf("write completed response: %v", errWrite)
 		}
@@ -2359,7 +2353,7 @@ func TestCodexWebsocketsExecuteObservesWebSocketResponseEvents(t *testing.T) {
 			t.Fatalf("write rate limit websocket message: %v", errWrite)
 		}
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5.6-sol","id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -2437,7 +2431,7 @@ func TestCodexWebsocketsExecuteStreamObservesWebSocketResponseEvents(t *testing.
 			t.Fatalf("write rate limit websocket message: %v", errWrite)
 		}
 
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"model":"gpt-5.6-sol","id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}

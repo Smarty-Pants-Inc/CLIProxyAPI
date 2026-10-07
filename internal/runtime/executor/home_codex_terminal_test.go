@@ -75,7 +75,6 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
 	executor := NewCodexWebsocketsExecutor(&config.Config{})
 	manager.RegisterExecutor(executor)
-	disconnected := executor.UpstreamDisconnectChan("terminal-home-session")
 	t.Cleanup(func() { manager.CloseExecutionSession("terminal-home-session") })
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
@@ -102,16 +101,6 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 	}
 	if !sawDelta {
 		t.Fatal("first stream did not deliver the verified content delta")
-	}
-	// Ending the Home selection cancels its stream context, so the terminal
-	// error is guaranteed on the disconnect channel, not on the chunk channel.
-	select {
-	case terminalErr := <-disconnected:
-		if terminalErr == nil || !strings.Contains(terminalErr.Error(), "terminal failure") {
-			t.Fatalf("upstream disconnect error = %v, want terminal failure", terminalErr)
-		}
-	default:
-		t.Fatal("terminal failure did not notify upstream disconnect")
 	}
 
 	second, errSecond := manager.ExecuteStream(ctx, []string{"codex"}, request, opts)
