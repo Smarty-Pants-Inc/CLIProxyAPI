@@ -375,8 +375,12 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	}
 	if err != nil {
 		status := clienterror.HTTPStatusFromErrorOr(err, http.StatusServiceUnavailable)
-		for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
+		safeHeaders := auth.SafeResponseHeaders(err)
+		for _, value := range safeHeaders.Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
+		}
+		if value := safeHeaders.Get("X-Should-Retry"); value != "" {
+			c.Writer.Header().Set("X-Should-Retry", value)
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
