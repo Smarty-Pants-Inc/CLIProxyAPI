@@ -128,9 +128,9 @@ func TestCodexRestrictedAuthorityHTTPAndSSE(t *testing.T) {
 					if tc.host == "fixed-tenant.example" {
 						wantHost = tc.host
 					}
-					if !tc.restricted && i == 1 {
-						wantHost = "other-tenant.example"
-					}
+					// client_host_unpolicied is the unrestricted F27 regression
+					// (smarty-dev#3203): a dynamic Host is dropped, so even an
+					// unpolicied send keeps the endpoint authority.
 					wantProbe := u.Host
 					if i == 1 {
 						wantProbe = "other-tenant.example"
