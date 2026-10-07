@@ -16,14 +16,14 @@ func TestSessionCachePersistenceSyncsDirectoriesAfterRename(t *testing.T) {
 	var synced []string
 	restore := sessionCacheSyncDir
 	t.Cleanup(func() { sessionCacheSyncDir = restore })
-	sessionCacheSyncDir = func(dir string) error {
+	sessionCacheSyncDir = func(dir string, root *os.Root) error {
 		if dir == filepath.Dir(path) {
 			if _, err := os.Stat(path); err != nil {
 				t.Errorf("directory synced before the rename: %v", err)
 			}
 		}
 		synced = append(synced, dir)
-		return restore(dir)
+		return restore(dir, root)
 	}
 	cache := newPersistenceTestCache(t, 100)
 	if err := cache.EnablePersistence(path); err != nil {
@@ -47,7 +47,7 @@ func TestSessionCachePersistenceSyncsDirectoriesAfterRename(t *testing.T) {
 		t.Fatalf("existing directory: synced %v, want only the parent", synced)
 	}
 
-	sessionCacheSyncDir = func(string) error { return errors.New("sync failed") }
+	sessionCacheSyncDir = func(string, *os.Root) error { return errors.New("sync failed") }
 	cache.Set("conversation-3", "account-one")
 	errSave := cache.PersistenceError()
 	if errSave == nil {
