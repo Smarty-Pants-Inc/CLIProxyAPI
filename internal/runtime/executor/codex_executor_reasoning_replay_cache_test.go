@@ -631,18 +631,11 @@ func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSig
 		SourceFormat: sdktranslator.FromString("claude"),
 		Stream:       true,
 	})
-	if err != nil {
-		t.Fatalf("ExecuteStream setup error: %v", err)
+	if err == nil || streamResult != nil {
+		t.Fatalf("unverified response.failed must fail at setup without chunks: result=%v error=%v", streamResult, err)
 	}
-
-	gotChunkErr := false
-	for chunk := range streamResult.Chunks {
-		if chunk.Err != nil {
-			gotChunkErr = true
-		}
-	}
-	if !gotChunkErr {
-		t.Fatal("expected stream chunk error for invalid signature response.failed")
+	if got := gjson.Get(err.Error(), "error.code").String(); got != "thinking_signature_invalid" {
+		t.Fatalf("error code = %q, want thinking_signature_invalid; err=%v", got, err)
 	}
 	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-invalid-stream:agent:main"); ok {
 		t.Fatal("invalid signature response.failed should clear cached replay item")

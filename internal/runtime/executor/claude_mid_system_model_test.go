@@ -14,6 +14,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // midSystemLegacyPayload is a caller body pairing a legacy model with a
@@ -55,7 +56,7 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 		u.called = true
 		u.headers = req.Header.Clone()
 		contentType := "application/json"
-		responseBody := `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+		responseBody := `{"id":"msg_1","type":"message","role":"assistant","model":"` + gjson.GetBytes(payload, "model").String() + `","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
 		if strings.Contains(req.URL.Path, "count_tokens") {
 			responseBody = `{"input_tokens":18}`
 		} else if gjson.GetBytes(payload, "stream").Bool() {
@@ -63,7 +64,7 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 			// A translated caller aggregates the stream back into one message, so
 			// the stub has to complete the block and report a stop reason.
 			responseBody = strings.Join([]string{
-				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"` + gjson.GetBytes(payload, "model").String() + `","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
 				`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 				`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
 				`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
@@ -228,6 +229,11 @@ func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testin
 			return err
 		}},
 		{name: "execute stream", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error {
+			// Native Claude callers own the payload; ask the mock for an SSE response.
+			payload, err := sjson.SetBytes(payload, "stream", true)
+			if err != nil {
+				return err
+			}
 			result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
