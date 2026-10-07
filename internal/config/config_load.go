@@ -89,6 +89,9 @@ func LoadConfigBytes(data []byte, configFile string, optional bool) (*Config, er
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	if errResolve := cfg.ValidateSessionAffinityStateDir(); errResolve != nil {
+		return nil, errResolve
+	}
 	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
 		return nil, errValidate
 	}
