@@ -124,7 +124,13 @@ func LoadConfigBytes(data []byte, configFile string, optional bool) (*Config, er
 
 		// Persist only against the bytes that produced cfg. Never bind newer,
 		// unrelated bytes to this snapshot or overwrite a completed key rotation.
-		written, errSave := saveConfigNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed, &cfg.sourceRevision)
+		// Upstream v8 layout keeps the key at management.secret-key.
+		secretPath := []string{"remote-management", "secret-key"}
+		var source yaml.Node
+		if yaml.Unmarshal(data, &source) == nil && len(source.Content) > 0 && yamlPath(expandConfigAliases(source.Content[0]), "management.secret-key") != nil {
+			secretPath[0] = "management"
+		}
+		written, errSave := saveConfigNestedScalar(configFile, secretPath, hashed, &cfg.sourceRevision)
 		if errSave != nil {
 			return nil, fmt.Errorf("failed to persist hashed management key: %w", errSave)
 		}
@@ -201,11 +207,30 @@ func LoadConfigBytes(data []byte, configFile string, optional bool) (*Config, er
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize global OAuth model settings.
+	cfg.SanitizeOAuthSettings()
+
 	// Normalize global OAuth request-scoped error rules.
 	cfg.SanitizeOAuthRequestScopedErrors()
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
+
+	// Only conflicting legacy fields are removed on load. A legacy-only document
+	// stays legacy until a v8 configuration write explicitly migrates it.
+	current, errRead := os.ReadFile(configFile)
+	if errRead != nil {
+		return nil, errRead
+	}
+	cleaned, changed, errLayout := NormalizeConfigLayout(current, false)
+	if errLayout != nil {
+		return nil, errLayout
+	}
+	if changed {
+		if errWrite := os.WriteFile(configFile, cleaned, 0600); errWrite != nil {
+			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
+		}
+	}
 
 	// Return the populated configuration struct.
 	return &cfg, nil

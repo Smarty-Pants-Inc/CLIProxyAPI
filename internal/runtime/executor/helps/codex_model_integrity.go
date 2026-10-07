@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // CodexModelGuard checks the authoritative Responses model before translation.
@@ -15,7 +15,7 @@ type CodexModelGuard struct {
 }
 
 func NewCodexModelGuard(expected string) *CodexModelGuard {
-	return &CodexModelGuard{expected: normalizeCodexModelName(expected)}
+	return &CodexModelGuard{expected: normalizeModelName(expected)}
 }
 
 func (g *CodexModelGuard) Authoritative() bool { return g.observed }
@@ -32,7 +32,7 @@ func (g *CodexModelGuard) Observe(payload []byte) error {
 		}
 		return nil
 	}
-	if normalizeCodexModelName(model) != g.expected {
+	if normalizeModelName(model) != g.expected {
 		return newCodexModelMismatchError(fmt.Sprintf("upstream response.model %q does not match requested upstream model %q", model, g.expected))
 	}
 	g.observed = true
