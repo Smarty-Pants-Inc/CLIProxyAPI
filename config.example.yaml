@@ -258,6 +258,7 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to use credits as last-resort fallback when all free-tier auths are exhausted for Claude models
+  # exhausted-reading-max-age-seconds: 21600 # A quota reading older than this no longer skips a credential as exhausted (default 6h; 0 = never expire)
 
 # Routing strategy for selecting credentials when multiple match.
 routing:

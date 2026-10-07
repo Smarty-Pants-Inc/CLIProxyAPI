@@ -347,6 +347,12 @@ type QuotaExceeded struct {
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
 	// an auth that has available Google One AI credits.
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+
+	// ExhaustedReadingMaxAgeSeconds bounds how long a passive quota reading may keep
+	// a credential skipped as exhausted. An older reading counts as unknown, so the
+	// credential is tried again and its next response refreshes the reading.
+	// Unset uses the default (6 hours); 0 or negative never expires a reading.
+	ExhaustedReadingMaxAgeSeconds *int `yaml:"exhausted-reading-max-age-seconds,omitempty" json:"exhausted-reading-max-age-seconds,omitempty"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
