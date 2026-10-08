@@ -3056,12 +3056,12 @@ func TestServerCodexAPIKeyResponsesStreamingRequestLog(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5-codex\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5-codex\",\"output\":[]}}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.added\"}\n\n"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5-codex\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5-codex\",\"output\":[]}}\n\n"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}

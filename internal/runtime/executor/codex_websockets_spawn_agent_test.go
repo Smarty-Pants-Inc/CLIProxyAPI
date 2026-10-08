@@ -172,7 +172,7 @@ func TestCodexWebsocketsExecutorOptimizeMultiAgentV2(t *testing.T) {
 	defer modelRegistry.UnregisterClient(clientID)
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	capturedPayload := make(chan []byte, 2)
+	capturedPayload := make(chan []byte, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		conn, errUpgrade := upgrader.Upgrade(w, request, nil)
 		if errUpgrade != nil {

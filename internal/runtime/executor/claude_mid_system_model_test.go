@@ -236,7 +236,7 @@ func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testin
 			}
 			result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
-			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true})
 			if err != nil {
 				return err
 			}
