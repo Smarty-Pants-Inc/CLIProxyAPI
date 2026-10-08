@@ -220,11 +220,13 @@ func TestWarnLogOnAuthUnavailable_SingleProvider(t *testing.T) {
 	for _, entry := range hook.AllEntries() {
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "auth unavailable") {
 			warnCount++
-			if !strings.Contains(entry.Message, "claude-key-1.json") ||
+			if !strings.Contains(entry.Message, "auth_ref="+authLogRef(auth1)) ||
 				!strings.Contains(entry.Message, "rate_limit_exceeded") ||
-				!strings.Contains(entry.Message, "claude-key-2.json") ||
+				!strings.Contains(entry.Message, "auth_ref="+authLogRef(auth2)) ||
 				!strings.Contains(entry.Message, "quota_exceeded") ||
-				!strings.Contains(entry.Message, "remaining=") {
+				!strings.Contains(entry.Message, "remaining=") ||
+				strings.Contains(entry.Message, "claude-key-1.json") ||
+				strings.Contains(entry.Message, auth2.ID) {
 				t.Fatalf("unexpected Warn log content: %s", entry.Message)
 			}
 		}
@@ -289,7 +291,7 @@ func TestWarnLogOnAuthUnavailable_SessionAffinityLegacyPath(t *testing.T) {
 	for _, entry := range hook.AllEntries() {
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "auth unavailable") {
 			warnCount++
-			if !strings.Contains(entry.Message, "claude-legacy.json") ||
+			if !strings.Contains(entry.Message, "auth_ref="+authLogRef(auth1)) ||
 				!strings.Contains(entry.Message, "rate_limit_exceeded") {
 				t.Fatalf("unexpected Warn log content: %s", entry.Message)
 			}
@@ -368,8 +370,8 @@ func TestWarnLogOnAuthUnavailable_MixedProviders(t *testing.T) {
 	for _, entry := range hook.AllEntries() {
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "auth unavailable") {
 			warnCount++
-			if !strings.Contains(entry.Message, "claude.json") ||
-				!strings.Contains(entry.Message, "codex.json") ||
+			if !strings.Contains(entry.Message, "auth_ref="+authLogRef(auth1)) ||
+				!strings.Contains(entry.Message, "auth_ref="+authLogRef(auth2)) ||
 				!strings.Contains(entry.Message, "providers=claude,codex") {
 				t.Fatalf("unexpected mixed Warn log: %s", entry.Message)
 			}
@@ -430,7 +432,7 @@ func TestWarnLogOnUpstreamFailure_NonStream(t *testing.T) {
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream execution failed") {
 			if strings.Contains(entry.Message, "provider=codex") &&
 				strings.Contains(entry.Message, "model=gpt-4o") &&
-				strings.Contains(entry.Message, "codex-prod.json") &&
+				strings.Contains(entry.Message, "auth_ref="+authLogRef(auth)) &&
 				strings.Contains(entry.Message, "duration=") &&
 				strings.Contains(entry.Message, "upstream timeout") {
 				foundWarn = true
@@ -605,7 +607,7 @@ func TestWarnLogOnStreamUpstreamFailure(t *testing.T) {
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream execution failed") {
 			if strings.Contains(entry.Message, "provider=claude") &&
 				strings.Contains(entry.Message, "model=claude-sonnet-4") &&
-				strings.Contains(entry.Message, "claude-stream.json") &&
+				strings.Contains(entry.Message, "auth_ref="+authLogRef(auth)) &&
 				strings.Contains(entry.Message, "duration=") &&
 				strings.Contains(entry.Message, "connection dropped") {
 				foundWarn = true
@@ -677,7 +679,7 @@ func TestWarnLogOnStreamBootstrapFailure(t *testing.T) {
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream execution failed") {
 			if strings.Contains(entry.Message, "provider=claude") &&
 				strings.Contains(entry.Message, "model=claude-sonnet-4") &&
-				strings.Contains(entry.Message, "claude-bootstrap.json") &&
+				strings.Contains(entry.Message, "auth_ref="+authLogRef(auth)) &&
 				strings.Contains(entry.Message, "ttfb timeout") {
 				foundWarn = true
 				break
@@ -742,7 +744,10 @@ func TestWarnLogUpstreamFailureRedactsSecretsInUpstreamMessage(t *testing.T) {
 
 	for _, statusCode := range []int{http.StatusTooManyRequests, 0} {
 		hook := setupTestLoggerHook(t)
-		warnLogUpstreamFailure(context.Background(), nil, "codex", "gpt-6", &Auth{ID: "auth-1", Provider: "codex"}, time.Millisecond,
+		// Production auth ids are auth file names that carry the account email.
+		const authID = "claude-96a7ecf3-dev07@smartypants.ai.json"
+		auth := &Auth{ID: authID, FileName: "/auths/" + authID, Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}}
+		warnLogUpstreamFailure(context.Background(), nil, "claude", "gpt-6", auth, time.Millisecond,
 			statusErrorLogTestError{message: message, statusCode: statusCode})
 		found := false
 		for _, entry := range hook.AllEntries() {
@@ -750,10 +755,13 @@ func TestWarnLogUpstreamFailureRedactsSecretsInUpstreamMessage(t *testing.T) {
 				continue
 			}
 			found = true
-			for _, secret := range secrets {
+			for _, secret := range append(secrets, authID, "dev07@smartypants.ai", "smartypants.ai", "96a7ecf3") {
 				if strings.Contains(entry.Message, secret) {
 					t.Fatalf("status %d: warning log leaks %q: %s", statusCode, secret, entry.Message)
 				}
+			}
+			if want := "auth=provider=claude auth_ref=" + authLogRef(auth); !strings.Contains(entry.Message, want) {
+				t.Fatalf("status %d: warning log lacks %q: %s", statusCode, want, entry.Message)
 			}
 			if !strings.Contains(entry.Message, "usage limit reached") {
 				t.Fatalf("status %d: warning log lost the diagnostic: %s", statusCode, entry.Message)

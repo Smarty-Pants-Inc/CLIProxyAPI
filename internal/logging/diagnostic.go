@@ -7,13 +7,16 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 const (
 	diagnosticLogRuneLimit     = 300
 	diagnosticLogScanRuneLimit = 600
+	diagnosticDecodeRounds     = 2
 )
 
 var (
@@ -30,6 +33,14 @@ var (
 	apiKeyLogPattern      = regexp.MustCompile(`\b(?:sk|rt|sess|org)-[A-Za-z0-9_-]{8,}`)
 	emailLogPattern       = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
 	uuidLogPattern        = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+
+	// Encoded forms (smarty-dev#5423 security round 1): decode a bounded copy of
+	// URL (%XX) and JSON (\uXXXX, \", \/, \\) escapes before matching, then
+	// redact opaque base64/base64url values that the shape patterns cannot see.
+	urlEscapeLogPattern    = regexp.MustCompile(`%[0-9A-Fa-f]{2}`)
+	jsonEscapeLogPattern   = regexp.MustCompile(`\\u[0-9A-Fa-f]{4}|\\["/\\]`)
+	secretFieldLogPattern  = regexp.MustCompile(`(?i)((?:key|sig|signature|auth|session)["']?\s*[:=]\s*["']?)[A-Za-z0-9+/_.~-]{16,}={0,2}`)
+	opaqueBase64LogPattern = regexp.MustCompile(`[A-Za-z0-9+/_-]{32,}={0,2}`)
 )
 
 // SafeDiagnosticForLog returns a bounded, single-line diagnostic suitable for
@@ -47,6 +58,7 @@ func SafeDiagnosticForLog(message string) string {
 	if excerpt == "" {
 		return ""
 	}
+	excerpt = decodeDiagnosticEscapes(excerpt)
 	excerpt = urlUserinfoLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]@`)
 	excerpt = sensitiveLogAssignmentPattern.ReplaceAllString(excerpt, `${1}"[REDACTED]"`)
 	excerpt = authorizationLogPattern.ReplaceAllString(excerpt, `${1} [REDACTED]`)
@@ -54,8 +66,63 @@ func SafeDiagnosticForLog(message string) string {
 	for _, pattern := range []*regexp.Regexp{jwtLogPattern, apiKeyLogPattern, emailLogPattern, uuidLogPattern} {
 		excerpt = pattern.ReplaceAllString(excerpt, "[REDACTED]")
 	}
+	excerpt = secretFieldLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]`)
+	excerpt = opaqueBase64LogPattern.ReplaceAllStringFunc(excerpt, redactOpaqueBase64)
 
 	return truncateDiagnosticLogExcerpt(excerpt, sourceTruncated)
+}
+
+// decodeDiagnosticEscapes decodes URL and JSON escapes in an already bounded
+// excerpt, up to diagnosticDecodeRounds times for double encoding. Decoding
+// only shortens the text; invalid sequences stay as they are, and invalid
+// UTF-8 or control characters from decoded bytes are replaced.
+func decodeDiagnosticEscapes(excerpt string) string {
+	for round := 0; round < diagnosticDecodeRounds; round++ {
+		decoded := urlEscapeLogPattern.ReplaceAllStringFunc(excerpt, func(escape string) string {
+			value, _ := strconv.ParseUint(escape[1:], 16, 8)
+			return string([]byte{byte(value)})
+		})
+		decoded = jsonEscapeLogPattern.ReplaceAllStringFunc(decoded, func(escape string) string {
+			if len(escape) == 2 {
+				return escape[1:]
+			}
+			value, _ := strconv.ParseUint(escape[2:], 16, 32)
+			return string(rune(value))
+		})
+		if decoded == excerpt {
+			break
+		}
+		excerpt = decoded
+	}
+	excerpt = strings.ToValidUTF8(excerpt, "?")
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, excerpt)), " ")
+}
+
+// redactOpaqueBase64 redacts a long base64/base64url run that mixes upper case,
+// lower case and digits. ponytail: the mix test keeps lower-case paths and hex
+// request ids readable; a long single-case secret outside a named field (see
+// secretFieldLogPattern) still passes.
+func redactOpaqueBase64(run string) string {
+	var upper, lower, digit bool
+	for _, r := range run {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			upper = true
+		case r >= 'a' && r <= 'z':
+			lower = true
+		case r >= '0' && r <= '9':
+			digit = true
+		}
+	}
+	if upper && lower && digit {
+		return "[REDACTED]"
+	}
+	return run
 }
 
 // SafeErrorDiagnostic extracts only allowlisted failure signals from an

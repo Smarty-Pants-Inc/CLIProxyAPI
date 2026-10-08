@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -2040,28 +2042,38 @@ func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string
 	return strings.Join(parts, " ")
 }
 
+// formatAuthIdentity names an auth in warning lines without identifying the
+// account: auth ids and file names carry account emails (for example
+// claude-<hash>-<user>@<domain>.json), so the line carries the provider and a
+// short sha256 prefix of the id instead (smarty-dev#5423). Map a ref back with
+// `printf %s "$AUTH_ID" | sha256sum | cut -c1-12`.
 func formatAuthIdentity(auth *Auth, provider string) string {
 	if auth == nil {
 		return "auth=nil"
 	}
-	accountType, accountInfo := auth.AccountInfo()
-	switch accountType {
-	case "api_key":
-		return fmt.Sprintf("api_key=%s", util.HideAPIKey(accountInfo))
-	case "oauth":
-		return formatOauthIdentity(auth, provider, accountInfo)
-	default:
-		if auth.FileName != "" {
-			return fmt.Sprintf("auth_file=%s", filepath.Base(auth.FileName))
-		}
-		if auth.ID != "" {
-			return fmt.Sprintf("auth_id=%s", auth.ID)
-		}
-		if accountInfo != "" {
-			return accountInfo
-		}
+	providerName := strings.TrimSpace(auth.Provider)
+	if providerName == "" {
+		providerName = strings.TrimSpace(provider)
+	}
+	ref := authLogRef(auth)
+	if providerName == "" {
+		return "auth_ref=" + ref
+	}
+	return "provider=" + providerName + " auth_ref=" + ref
+}
+
+// authLogRef returns a stable, non-identifying reference for an auth: the first
+// 12 hex digits of sha256(auth.ID), falling back to the file base name.
+func authLogRef(auth *Auth) string {
+	key := strings.TrimSpace(auth.ID)
+	if key == "" {
+		key = filepath.Base(strings.TrimSpace(auth.FileName))
+	}
+	if key == "" || key == "." {
 		return "unknown"
 	}
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:6])
 }
 
 func warnLogHomeCredentialFailure(ctx context.Context, operation, provider string, auth *Auth, err error) {

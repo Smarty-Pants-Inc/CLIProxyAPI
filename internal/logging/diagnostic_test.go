@@ -109,3 +109,38 @@ func TestSafeErrorDiagnosticDoesNotExtractURLQueryValues(t *testing.T) {
 		}
 	}
 }
+
+// smarty-dev#5423 security round 1: encoded secrets are normalized before matching.
+func TestSafeDiagnosticForLogRedactsEncodedSecrets(t *testing.T) {
+	const base64Token = "QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ1Njc4OTBhYmNkZWY="
+	cases := []struct {
+		name    string
+		message string
+		secrets []string
+	}{
+		{"url-encoded email", "quota exceeded for user=person%40example.com", []string{"person", "example.com"}},
+		{"double url-encoded email", "quota exceeded for person%2540example.com", []string{"person", "example.com"}},
+		{"url-encoded key separator", "GET /v1/models?api_key%3Dsk-live%2BAbC%2F123 failed", []string{"sk-live", "AbC"}},
+		{"json-escaped email", `{"error":{"message":"limit for person\u0040example.com","email":\"other@example.org\"}}`, []string{"person", "other@example.org", "example.org"}},
+		{"base64 token in query field", "upstream rejected https://api.example/v1?q=1&state=" + base64Token + "&x=y", []string{base64Token, "QWxhZGRpbjpvcGVu"}},
+		{"base64 key in key field", "invalid key=" + "AIzaSyD-abcdefghijklmnop0123", []string{"AIzaSyD-abcdefghijklmnop0123"}},
+	}
+	for _, tc := range cases {
+		got := SafeDiagnosticForLog(tc.message)
+		for _, secret := range tc.secrets {
+			if strings.Contains(got, secret) {
+				t.Errorf("%s: leaked %q: %q", tc.name, secret, got)
+			}
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("%s: no redaction marker: %q", tc.name, got)
+		}
+	}
+}
+
+func TestSafeDiagnosticForLogKeepsBenignLineReadable(t *testing.T) {
+	const benign = "429 Too Many Requests: rate_limit_exceeded for model gpt-6 at /v1/responses/compact, retry after 30s (request 0123456789abcdef0123456789abcdef)"
+	if got := SafeDiagnosticForLog(benign); got != benign {
+		t.Fatalf("benign diagnostic changed:\n got %q\nwant %q", got, benign)
+	}
+}
