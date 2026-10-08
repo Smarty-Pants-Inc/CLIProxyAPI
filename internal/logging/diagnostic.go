@@ -41,6 +41,7 @@ var (
 	jsonEscapeLogPattern   = regexp.MustCompile(`\\u[0-9A-Fa-f]{4}|\\["/\\]`)
 	secretFieldLogPattern  = regexp.MustCompile(`(?i)((?:key|sig|signature|auth|session)["']?\s*[:=]\s*["']?)[A-Za-z0-9+/_.~-]{16,}={0,2}`)
 	opaqueBase64LogPattern = regexp.MustCompile(`[A-Za-z0-9+/_-]{32,}={0,2}`)
+	hexRequestIDLogPattern = regexp.MustCompile(`^[0-9A-Fa-f]{32}$`)
 )
 
 // SafeDiagnosticForLog returns a bounded, single-line diagnostic suitable for
@@ -103,24 +104,23 @@ func decodeDiagnosticEscapes(excerpt string) string {
 	}, excerpt)), " ")
 }
 
-// redactOpaqueBase64 redacts a long base64/base64url run that mixes upper case,
-// lower case and digits. ponytail: the mix test keeps lower-case paths and hex
-// request ids readable; a long single-case secret outside a named field (see
-// secretFieldLogPattern) still passes.
+// redactOpaqueBase64 redacts a 32+ char base64/base64url run unless it reads
+// as a path, identifier or request id: split on '/', '-' and '_', every piece
+// must be a 32-hex request id or a short (<16) piece without upper case.
+// That keeps /v1/responses/compact, model names and hex request ids readable
+// and redacts any opaque token, whatever its case mix (smarty-dev#5423).
+// ponytail: a 32-hex secret, or a secret made only of short lower-case pieces,
+// still passes outside a named field (see secretFieldLogPattern).
 func redactOpaqueBase64(run string) string {
-	var upper, lower, digit bool
-	for _, r := range run {
-		switch {
-		case r >= 'A' && r <= 'Z':
-			upper = true
-		case r >= 'a' && r <= 'z':
-			lower = true
-		case r >= '0' && r <= '9':
-			digit = true
+	for _, piece := range strings.FieldsFunc(strings.TrimRight(run, "="), func(r rune) bool {
+		return r == '/' || r == '-' || r == '_'
+	}) {
+		if hexRequestIDLogPattern.MatchString(piece) {
+			continue
 		}
-	}
-	if upper && lower && digit {
-		return "[REDACTED]"
+		if len(piece) >= 16 || strings.IndexFunc(piece, func(r rune) bool { return r >= 'A' && r <= 'Z' }) >= 0 || strings.Contains(piece, "+") {
+			return "[REDACTED]"
+		}
 	}
 	return run
 }

@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
@@ -770,5 +772,61 @@ func TestWarnLogUpstreamFailureRedactsSecretsInUpstreamMessage(t *testing.T) {
 		if !found {
 			t.Fatalf("status %d: no upstream failure warning logged", statusCode)
 		}
+	}
+}
+
+// smarty-dev#5423 round 2: the debug "Use OAuth" line and the warning lines
+// carry no account identity, and auth_ref is a keyed (per-process) hash.
+func TestWarnLogAuthIdentityKeyedAndNoEmailInDebugOrWarnings(t *testing.T) {
+	const authID = "claude-96a7ecf3-dev07@smartypants.ai.json"
+	auth := &Auth{
+		ID:         authID,
+		FileName:   "/auths/" + authID,
+		Provider:   "claude",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"email": "dev07@smartypants.ai"},
+	}
+	hook := setupTestLoggerHook(t)
+	log.SetLevel(log.DebugLevel)
+
+	debugLogAuthSelection(log.NewEntry(log.StandardLogger()), auth, "claude", "gpt-6")
+	warnLogHomeCredentialFailure(context.Background(), "refresh", "claude", auth, errors.New("boom"))
+	warnLogUpstreamFailure(context.Background(), nil, "claude", "gpt-6", auth, time.Millisecond,
+		statusErrorLogTestError{message: "rate limited", statusCode: http.StatusTooManyRequests})
+
+	ref := authLogRef(auth)
+	if ref != authLogRef(auth) || ref != authLogRef(&Auth{ID: authID}) {
+		t.Fatalf("auth_ref not stable within the process: %s", ref)
+	}
+	plain := sha256.Sum256([]byte(authID))
+	if ref == hex.EncodeToString(plain[:6]) {
+		t.Fatalf("auth_ref equals the unkeyed sha256 prefix: %s", ref)
+	}
+	if len(ref) != 12 {
+		t.Fatalf("auth_ref length = %d, want 12", len(ref))
+	}
+
+	var sawDebug, sawHome, sawUpstream bool
+	for _, entry := range hook.AllEntries() {
+		line, _ := entry.String()
+		for _, leak := range []string{authID, "dev07@smartypants.ai", "smartypants.ai", "96a7ecf3"} {
+			if strings.Contains(line, leak) {
+				t.Fatalf("log line leaks %q: %s", leak, line)
+			}
+		}
+		if !strings.Contains(line, "auth_ref="+ref) {
+			continue
+		}
+		switch {
+		case strings.Contains(entry.Message, "Use OAuth"):
+			sawDebug = true
+		case entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream execution failed"):
+			sawUpstream = true
+		case entry.Level == log.WarnLevel:
+			sawHome = true
+		}
+	}
+	if !sawDebug || !sawHome || !sawUpstream {
+		t.Fatalf("missing auth_ref line: debug=%v home=%v upstream=%v entries=%d", sawDebug, sawHome, sawUpstream, len(hook.AllEntries()))
 	}
 }
