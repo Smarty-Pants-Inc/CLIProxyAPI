@@ -92,6 +92,7 @@ type Host struct {
 	modelStreams           *modelStreamBridge
 	callbackContexts       *callbackContextRegistry
 	snapshot               atomic.Value
+	builtinQuota           *capabilityRecord // independent of dynamic plugin configuration
 }
 
 func New() *Host {
@@ -858,6 +859,9 @@ func (h *Host) retireLoadedPluginLocked(lp *loadedPlugin) {
 }
 
 func (h *Host) recordCurrent(record capabilityRecord) bool {
+	if record.builtin {
+		return true
+	}
 	return h.pluginIdentityCurrent(record.id, record.path, record.version)
 }
 

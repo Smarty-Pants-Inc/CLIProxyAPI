@@ -9,6 +9,7 @@ import (
 )
 
 type capabilityRecord struct {
+	builtin  bool
 	id       string
 	path     string
 	version  string

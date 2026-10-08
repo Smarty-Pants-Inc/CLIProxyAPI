@@ -148,6 +148,9 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	if h == nil {
 		return
 	}
+	if host != nil {
+		host.RegisterBuiltinQuotaProvider(h.newBuiltinQuotaProvider())
+	}
 	h.mu.Lock()
 	h.pluginHost = host
 	h.mu.Unlock()

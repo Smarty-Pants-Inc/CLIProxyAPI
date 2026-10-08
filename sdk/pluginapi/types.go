@@ -1635,6 +1635,8 @@ type QuotaMetric struct {
 
 // QuotaFetchResponse carries normalized quota information for management UI rendering.
 type QuotaFetchResponse struct {
+	// Status is "known" or "unknown" for built-in probes. Unknown responses have no numeric buckets.
+	Status             string             `json:"status,omitempty"`
 	Subscription       *QuotaSubscription `json:"subscription,omitempty"`
 	Summary            []QuotaMetric      `json:"summary,omitempty"`
 	ServerTimeOffsetMs int64              `json:"serverTimeOffsetMs,omitempty"`
