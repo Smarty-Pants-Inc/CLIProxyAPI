@@ -724,10 +724,14 @@ func TestClaudeExecutor_AuthManager_MultiModelPoolStreamStopsProbingOn429(t *tes
 
 	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attemptsCred2.Add(1)
-		body, _ := io.ReadAll(r.Body)
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Error(errRead)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"" + gjson.GetBytes(body, "model").String() + "\",\"id\":\"msg-1\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		_, _ = w.Write([]byte(claudeTestMessageStart(gjson.GetBytes(body, "model").String()) + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 	}))
 	defer server2.Close()
 

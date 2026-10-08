@@ -399,7 +399,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		emitResponseError := func(errResponse error) {
 			if _, identityFailure := errResponse.(*helps.ClaudeModelMismatchError); !identityFailure {
-				errResponse = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errResponse)
+				status := httpResp.StatusCode
+				if statusErr, ok := errResponse.(interface{ StatusCode() int }); ok && statusErr.StatusCode() > 0 {
+					status = statusErr.StatusCode()
+				}
+				errResponse = wrapClaudeFastRequestError(fastRequest, status, errResponse)
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errResponse)
 			streamUsage.PublishFailure(ctx, reporter, errResponse)

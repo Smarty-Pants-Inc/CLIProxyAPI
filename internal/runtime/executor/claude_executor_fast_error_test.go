@@ -7,14 +7,20 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	claudehandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestClaudeExecutorFastHTTPErrorPassesThroughWithoutRetry(t *testing.T) {
@@ -237,6 +243,162 @@ func TestClaudeExecutorFastTransportErrorIsRequestScopedWithoutRetry(t *testing.
 	requestScoped, ok := errExecute.(cliproxyexecutor.RequestScopedError)
 	if !ok || !requestScoped.IsRequestScoped() {
 		t.Fatalf("Fast transport error = %T, want request-scoped", errExecute)
+	}
+}
+
+func TestClaudeExecutorFastNonStreamPreIdentityOverloadDoesNotRotateOrCool(t *testing.T) {
+	const model = "claude-opus-5-5"
+	var attempts atomic.Int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if !isAnthropicUpstreamURL(req.URL) || !claudeRequestIsFast(req, body) || !gjson.GetBytes(body, "stream").Bool() {
+			t.Fatalf("expected Fast Anthropic upstream SSE request, got %s: %s", req.URL, body)
+		}
+		if got := gjson.GetBytes(body, "model").String(); got != model {
+			t.Fatalf("upstream model = %q, want %q", got, model)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"MUST_NOT_LEAK\"}}\n\n")),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	cfg := &config.Config{DisableCooling: false}
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.SetRetryConfig(0, 0, 2)
+	manager.RegisterExecutor(NewClaudeExecutor(cfg))
+	reg := registry.GetGlobalRegistry()
+	credentials := []*cliproxyauth.Auth{
+		{ID: t.Name() + "-1", Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-synthetic-1"}},
+		{ID: t.Name() + "-2", Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-synthetic-2"}},
+	}
+	for _, credential := range credentials {
+		reg.RegisterClient(credential.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { reg.UnregisterClient(credential.ID) })
+		if _, errRegister := manager.Register(ctx, credential); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+	response, errExecute := manager.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"model":"claude-opus-5-5","max_tokens":16,"speed":"fast","messages":[{"role":"user","content":"reply OK"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatOpenAI})
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("upstream attempts = %d, want exactly 1 (no credential rotation)", got)
+	}
+	var statusErr interface{ StatusCode() int }
+	if !errors.As(errExecute, &statusErr) || statusErr.StatusCode() != http.StatusBadGateway {
+		t.Errorf("error = %T %v, want status 502", errExecute, errExecute)
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(errExecute, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Errorf("error = %T %v, want request scope", errExecute, errExecute)
+	}
+	if errExecute == nil || errExecute.Error() != "overloaded_error: upstream overloaded" || len(response.Payload) != 0 {
+		t.Errorf("want sanitized overload without output, got payload=%q error=%v", response.Payload, errExecute)
+	}
+	for _, credential := range credentials {
+		registered, ok := manager.GetByID(credential.ID)
+		if !ok || registered == nil {
+			t.Fatalf("credential %q not found", credential.ID)
+		}
+		if registered.Unavailable || !registered.NextRetryAfter.IsZero() || registered.Quota.Exceeded || !registered.Quota.NextRecoverAt.IsZero() {
+			t.Errorf("credential %q cooled: unavailable=%t retry=%v quota=%+v", credential.ID, registered.Unavailable, registered.NextRetryAfter, registered.Quota)
+		}
+		for name, state := range registered.ModelStates {
+			if state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero()) {
+				t.Errorf("credential %q model %q cooled: %+v", credential.ID, name, state)
+			}
+		}
+	}
+}
+
+func TestClaudeExecutorFastStreamPreIdentityOverloadDoesNotRotateOrCool(t *testing.T) {
+	const model = "claude-opus-5-5"
+	var attempts atomic.Int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if !isAnthropicUpstreamURL(req.URL) || !claudeRequestIsFast(req, body) || !gjson.GetBytes(body, "stream").Bool() {
+			t.Fatalf("expected Fast Anthropic upstream SSE request, got %s: %s", req.URL, body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"MUST_NOT_LEAK\"}}\n\n" +
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"MUST_NOT_LEAK\"}}\n\n")),
+			Request: req,
+		}, nil
+	})
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	cfg := &config.Config{DisableCooling: false}
+	cfg.Claude.ModelLevelCooling = true
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.SetRetryConfig(0, 0, 2)
+	manager.RegisterExecutor(NewClaudeExecutor(cfg))
+	reg := registry.GetGlobalRegistry()
+	credentials := []*cliproxyauth.Auth{
+		{ID: t.Name() + "-1", Provider: "claude", Attributes: map[string]string{"api_key": "[REDACTED:api-key]"}},
+		{ID: t.Name() + "-2", Provider: "claude", Attributes: map[string]string{"api_key": "[REDACTED:api-key]"}},
+	}
+	for _, credential := range credentials {
+		reg.RegisterClient(credential.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { reg.UnregisterClient(credential.ID) })
+		if _, errRegister := manager.Register(ctx, credential); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+	handler := claudehandlers.NewClaudeCodeAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+	data, _, errs := handler.ExecuteStreamWithAuthManager(ctx, "claude", model, []byte(`{"model":"claude-opus-5-5","stream":true,"max_tokens":16,"speed":"fast","messages":[{"role":"user","content":"reply OK"}]}`), "")
+	if data != nil {
+		for chunk := range data {
+			t.Errorf("unverified stream payload reached client: %q", chunk)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	var errorCount int
+	for errMsg := range errs {
+		errorCount++
+		handler.WriteErrorResponse(c, errMsg)
+	}
+	if errorCount != 1 {
+		t.Errorf("client errors = %d, want exactly 1", errorCount)
+	}
+	if recorder.Code != http.StatusBadGateway {
+		t.Errorf("client status = %d, want 502", recorder.Code)
+	}
+	const wantBody = `{"type":"error","error":{"type":"api_error","message":"overloaded_error: upstream overloaded"}}`
+	if got := recorder.Body.String(); got != wantBody || recorder.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("client body = %q, content-type = %q, want sanitized JSON %q", got, recorder.Header().Get("Content-Type"), wantBody)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("upstream attempts = %d, want exactly 1 (no credential rotation)", got)
+	}
+	for _, credential := range credentials {
+		registered, ok := manager.GetByID(credential.ID)
+		if !ok || registered == nil {
+			t.Fatalf("credential %q not found", credential.ID)
+		}
+		if registered.Unavailable || !registered.NextRetryAfter.IsZero() || registered.Quota.Exceeded || !registered.Quota.NextRecoverAt.IsZero() {
+			t.Errorf("credential %q cooled: %+v", credential.ID, registered)
+		}
+		for name, state := range registered.ModelStates {
+			if state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero()) {
+				t.Errorf("credential %q model %q cooled: %+v", credential.ID, name, state)
+			}
+		}
 	}
 }
 

@@ -3,9 +3,28 @@ package helps
 import (
 	"errors"
 	"io"
+	"net/http"
 	"strings"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"testing"
 )
+
+func TestClaudeModelStreamOverloadBeforeIdentity(t *testing.T) {
+	stream := "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"MUST_NOT_LEAK\"}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"MUST_NOT_LEAK\"}}\n\n"
+	r, err := GuardClaudeModelStream(strings.NewReader(stream), "expected")
+	var upstreamErr *cliproxyauth.Error
+	if r != nil || !errors.As(err, &upstreamErr) {
+		t.Fatalf("unverified overload returned reader %v, error %v", r, err)
+	}
+	if upstreamErr.Code != "overloaded_error" || upstreamErr.StatusCode() != http.StatusBadGateway || !upstreamErr.Retryable {
+		t.Fatalf("overload classification lost: %+v", upstreamErr)
+	}
+	if err.Error() != "overloaded_error: upstream overloaded" || strings.Contains(err.Error(), "MUST_NOT_LEAK") {
+		t.Fatalf("overload message was not sanitized: %v", err)
+	}
+}
 
 func TestClaudeModelJSONIdentity(t *testing.T) {
 	for _, tc := range []struct {
