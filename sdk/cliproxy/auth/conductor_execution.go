@@ -3,6 +3,10 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -2004,64 +2008,60 @@ func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model 
 	case "api_key":
 		entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
 	case "oauth":
-		ident := formatOauthIdentity(auth, provider, accountInfo)
-		entry.Debugf("Use OAuth %s for model %s%s", ident, model, suffix)
+		// accountInfo and the auth file name carry the account email; log the
+		// same keyed reference as the warning lines (smarty-dev#5423).
+		entry.Debugf("Use OAuth %s for model %s%s", formatAuthIdentity(auth, provider), model, suffix)
 	}
 }
 
-func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string {
-	if auth == nil {
-		return ""
-	}
-	// Prefer the auth's provider when available.
-	providerName := strings.TrimSpace(auth.Provider)
-	if providerName == "" {
-		providerName = strings.TrimSpace(provider)
-	}
-	// Only log the basename to avoid leaking host paths.
-	// FileName may be unset for some auth backends; fall back to ID.
-	authFile := strings.TrimSpace(auth.FileName)
-	if authFile == "" {
-		authFile = strings.TrimSpace(auth.ID)
-	}
-	if authFile != "" {
-		authFile = filepath.Base(authFile)
-	}
-	parts := make([]string, 0, 3)
-	if providerName != "" {
-		parts = append(parts, "provider="+providerName)
-	}
-	if authFile != "" {
-		parts = append(parts, "auth_file="+authFile)
-	}
-	if len(parts) == 0 {
-		return accountInfo
-	}
-	return strings.Join(parts, " ")
-}
-
+// formatAuthIdentity names an auth in log lines without identifying the
+// account: auth ids and file names carry account emails (for example
+// claude-<hash>-<user>@<domain>.json), so the line carries the provider and a
+// keyed reference instead (smarty-dev#5423).
 func formatAuthIdentity(auth *Auth, provider string) string {
 	if auth == nil {
 		return "auth=nil"
 	}
-	accountType, accountInfo := auth.AccountInfo()
-	switch accountType {
-	case "api_key":
-		return fmt.Sprintf("api_key=%s", util.HideAPIKey(accountInfo))
-	case "oauth":
-		return formatOauthIdentity(auth, provider, accountInfo)
-	default:
-		if auth.FileName != "" {
-			return fmt.Sprintf("auth_file=%s", filepath.Base(auth.FileName))
-		}
-		if auth.ID != "" {
-			return fmt.Sprintf("auth_id=%s", auth.ID)
-		}
-		if accountInfo != "" {
-			return accountInfo
-		}
+	providerName := strings.TrimSpace(auth.Provider)
+	if providerName == "" {
+		providerName = strings.TrimSpace(provider)
+	}
+	ref := authLogRef(auth)
+	if providerName == "" {
+		return "auth_ref=" + ref
+	}
+	return "provider=" + providerName + " auth_ref=" + ref
+}
+
+var (
+	authLogRefKeyOnce sync.Once
+	authLogRefKey     []byte
+)
+
+// authLogRef returns a non-identifying reference for an auth: the first 12 hex
+// digits of HMAC-SHA256(auth.ID), falling back to the file base name, under a
+// random key generated once per process. An unkeyed hash (and Auth.Index, an
+// unkeyed sha256 of the auth path) can be matched offline against candidate
+// emails; the keyed one cannot.
+// ponytail: the key is never persisted, so a ref correlates log lines within
+// one process lifetime only; after a restart the same auth gets a new ref.
+func authLogRef(auth *Auth) string {
+	key := strings.TrimSpace(auth.ID)
+	if key == "" {
+		key = filepath.Base(strings.TrimSpace(auth.FileName))
+	}
+	if key == "" || key == "." {
 		return "unknown"
 	}
+	authLogRefKeyOnce.Do(func() {
+		authLogRefKey = make([]byte, 32)
+		if _, err := rand.Read(authLogRefKey); err != nil {
+			panic("auth log ref key: " + err.Error())
+		}
+	})
+	mac := hmac.New(sha256.New, authLogRefKey)
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil)[:6])
 }
 
 func warnLogHomeCredentialFailure(ctx context.Context, operation, provider string, auth *Auth, err error) {
