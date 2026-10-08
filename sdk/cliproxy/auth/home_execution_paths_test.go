@@ -147,7 +147,8 @@ func TestHomeNonStreamingExecutionLogsSelectedOAuthAuth(t *testing.T) {
 				t.Fatalf("execution error = %v", errRun)
 			}
 
-			const expected = "Use OAuth provider=home-execution auth_file=home-auth for model model-a via socks5 proxy"
+			// smarty-dev#5423: the line carries a keyed auth_ref, never the auth file/id.
+			expected := "Use OAuth provider=home-execution auth_ref=" + authLogRef(&Auth{ID: "home-auth"}) + " for model model-a via socks5 proxy"
 			for _, entry := range hook.AllEntries() {
 				if entry.Level == log.DebugLevel && entry.Message == expected {
 					if got := entry.Data["request_id"]; got != "req-home-log" {
