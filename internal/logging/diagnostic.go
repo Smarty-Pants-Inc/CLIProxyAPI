@@ -22,6 +22,14 @@ var (
 	authorizationLogPattern       = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[^\s,;]+`)
 	urlUserinfoLogPattern         = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`)
 	diagnosticStatusPattern       = regexp.MustCompile(`(?i)\bstatus(?:\s+code)?\s*[:=]?\s*([1-5][0-9]{2})\b`)
+
+	// Same identity and token shapes CLIProxyAPI#64 scrubs from client error frames
+	// (sdk/api/handlers/openai scrubResponsesWebsocketErrorText); smarty-dev#5423.
+	identityKeyLogPattern = regexp.MustCompile(`(?i)((?:"?(?:(?:refresh|id|session)[_-]?token|(?:chatgpt[_-]?)?account[_-]?id|org(?:anization)?[_-]?id|user[_-]?id|email|cookie)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
+	jwtLogPattern         = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)
+	apiKeyLogPattern      = regexp.MustCompile(`\b(?:sk|rt|sess|org)-[A-Za-z0-9_-]{8,}`)
+	emailLogPattern       = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+	uuidLogPattern        = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 )
 
 // SafeDiagnosticForLog returns a bounded, single-line diagnostic suitable for
@@ -42,6 +50,10 @@ func SafeDiagnosticForLog(message string) string {
 	excerpt = urlUserinfoLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]@`)
 	excerpt = sensitiveLogAssignmentPattern.ReplaceAllString(excerpt, `${1}"[REDACTED]"`)
 	excerpt = authorizationLogPattern.ReplaceAllString(excerpt, `${1} [REDACTED]`)
+	excerpt = identityKeyLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]`)
+	for _, pattern := range []*regexp.Regexp{jwtLogPattern, apiKeyLogPattern, emailLogPattern, uuidLogPattern} {
+		excerpt = pattern.ReplaceAllString(excerpt, "[REDACTED]")
+	}
 
 	return truncateDiagnosticLogExcerpt(excerpt, sourceTruncated)
 }

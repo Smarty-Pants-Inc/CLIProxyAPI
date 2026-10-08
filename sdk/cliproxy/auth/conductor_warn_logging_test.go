@@ -723,3 +723,44 @@ func (e *mockStreamErrorExecutor) CountTokens(ctx context.Context, auth *Auth, r
 func (e *mockStreamErrorExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
 }
+
+// smarty-dev#5423: secrets and identities embedded in free upstream message text
+// must not reach the warning log, with or without a status code.
+func TestWarnLogUpstreamFailureRedactsSecretsInUpstreamMessage(t *testing.T) {
+	secrets := []string{
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl",
+		"sk-proj-AbCdEf0123456789",
+		"rt-AbCdEf0123456789xyz",
+		"person@example.com",
+		"3f2b8c1e-9d4a-4b7e-8f60-1a2b3c4d5e6f",
+		"acct_live_998877",
+		"bearer-token-value-42",
+	}
+	message := "usage limit reached for user person@example.com: Bearer bearer-token-value-42 " +
+		"jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl key sk-proj-AbCdEf0123456789 " +
+		"refresh rt-AbCdEf0123456789xyz request 3f2b8c1e-9d4a-4b7e-8f60-1a2b3c4d5e6f account_id=acct_live_998877"
+
+	for _, statusCode := range []int{http.StatusTooManyRequests, 0} {
+		hook := setupTestLoggerHook(t)
+		warnLogUpstreamFailure(context.Background(), nil, "codex", "gpt-6", &Auth{ID: "auth-1", Provider: "codex"}, time.Millisecond,
+			statusErrorLogTestError{message: message, statusCode: statusCode})
+		found := false
+		for _, entry := range hook.AllEntries() {
+			if !strings.Contains(entry.Message, "upstream execution failed") {
+				continue
+			}
+			found = true
+			for _, secret := range secrets {
+				if strings.Contains(entry.Message, secret) {
+					t.Fatalf("status %d: warning log leaks %q: %s", statusCode, secret, entry.Message)
+				}
+			}
+			if !strings.Contains(entry.Message, "usage limit reached") {
+				t.Fatalf("status %d: warning log lost the diagnostic: %s", statusCode, entry.Message)
+			}
+		}
+		if !found {
+			t.Fatalf("status %d: no upstream failure warning logged", statusCode)
+		}
+	}
+}
