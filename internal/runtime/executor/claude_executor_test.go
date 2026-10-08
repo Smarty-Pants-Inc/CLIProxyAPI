@@ -30,6 +30,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// claudeTestMessageStart identifies the model served by a successful SSE fixture.
+// Callers must use the final wire model, not a public alias or thinking suffix.
+func claudeTestMessageStart(model string) string {
+	return fmt.Sprintf("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n", model)
+}
+
 func resetClaudeDeviceProfileCache() {
 	helps.ResetClaudeDeviceProfileCache()
 }
@@ -2847,14 +2853,20 @@ func TestClaudeExecutor_DefaultDoesNotInjectUserID(t *testing.T) {
 }
 
 func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testing.T) {
-	_, err := executeOpenAIChatCompletionThroughClaude(t, "")
-	if err == nil {
-		t.Fatal("Execute error = nil, want empty stream error")
+	resp, err := executeOpenAIChatCompletionThroughClaude(t, "")
+	// EOF before message_start cannot establish model identity. The integrity
+	// guard must reject it before the translated-stream completeness check.
+	var mismatch *helps.ClaudeModelMismatchError
+	if !errors.As(err, &mismatch) || mismatch.StatusCode() != http.StatusBadGateway || !mismatch.IsRequestScoped() {
+		t.Fatalf("Execute error = %v, want request-scoped 502 model_mismatch", err)
 	}
 	assertStatusErr(t, err, http.StatusBadGateway)
 	// No message_start identifies the upstream model: fail closed before parsing payload/error content.
 	if !strings.Contains(err.Error(), "model_mismatch") {
 		t.Fatalf("Execute error = %q, want model_mismatch", err.Error())
+	}
+	if len(resp.Payload) != 0 {
+		t.Fatalf("unverified stream released a response: %s", resp.Payload)
 	}
 }
 
@@ -2865,9 +2877,8 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsClaudeErrorEvent(t *testing
 		t.Fatal("Execute error = nil, want upstream error event")
 	}
 	assertStatusErr(t, err, http.StatusBadGateway)
-	// No message_start identifies the upstream model: fail closed before parsing payload/error content.
-	if !strings.Contains(err.Error(), "model_mismatch") {
-		t.Fatalf("Execute error = %q, want model_mismatch", err.Error())
+	if !strings.Contains(err.Error(), "upstream overloaded") {
+		t.Fatalf("Execute error = %q, want upstream overloaded", err.Error())
 	}
 }
 

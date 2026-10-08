@@ -392,7 +392,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		responseBody, err = helps.GuardClaudeModelStream(decodedBody, gjson.GetBytes(bodyForUpstream, "model").String())
 		if err != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
-			return resp, err
+			if _, identityFailure := err.(*helps.ClaudeModelMismatchError); identityFailure {
+				return resp, err
+			}
+			status := httpResp.StatusCode
+			if statusErr, ok := err.(interface{ StatusCode() int }); ok {
+				status = statusErr.StatusCode()
+			}
+			return resp, wrapClaudeFastRequestError(fastRequest, status, err)
 		}
 	}
 	data, err := io.ReadAll(responseBody)
