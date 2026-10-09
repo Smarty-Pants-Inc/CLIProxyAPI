@@ -421,8 +421,15 @@ func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexI
 	}
 	if state.promptCacheKey != "" && gjson.Get(rawTurnMetadata, "prompt_cache_key").Exists() {
 		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "prompt_cache_key", state.promptCacheKey)
-	} else if state.promptCacheKey != "" && state.originalPromptCacheKey != "" {
-		updatedTurnMetadata = strings.ReplaceAll(updatedTurnMetadata, state.originalPromptCacheKey, state.promptCacheKey)
+	} else if state.promptCacheKey != "" && state.originalPromptCacheKey != "" && gjson.Valid(rawTurnMetadata) {
+		// Without a top-level prompt_cache_key, remap only top-level string fields that hold exactly the
+		// client's key; nested or free-text occurrences are never rewritten (CLIProxyAPI#116 P3).
+		gjson.Parse(rawTurnMetadata).ForEach(func(field, value gjson.Result) bool {
+			if value.Type == gjson.String && value.String() == state.originalPromptCacheKey && codexPlainJSONField(field.String()) {
+				updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, field.String(), state.promptCacheKey)
+			}
+			return true
+		})
 	}
 	if turnID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "turn_id").String()); turnID != "" {
 		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "turn_id", state.confuseTurnID(turnID))
@@ -830,4 +837,17 @@ func codexImageGenerationToolModel(body []byte) string {
 		}
 	}
 	return codexDefaultImageToolModel
+}
+
+// codexPlainJSONField reports whether name can be used as an sjson path without escaping.
+func codexPlainJSONField(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !(r == '_' || r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
