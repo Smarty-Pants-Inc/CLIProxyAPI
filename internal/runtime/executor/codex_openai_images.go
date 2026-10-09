@@ -479,30 +479,61 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 
 		var needles [][]byte
 		maxLen := 0
-		addReplacement := func(from, to string) {
-			from, to = strings.TrimSpace(from), strings.TrimSpace(to)
-			if from == "" || to == "" || from == to {
+		mappings := make(map[string][2]string)
+		addToken := func(original, hidden, client string) {
+			original, hidden, client = strings.TrimSpace(original), strings.TrimSpace(hidden), strings.TrimSpace(client)
+			if original == "" || hidden == "" || client == "" {
 				return
 			}
-			needles = append(needles, []byte(from), []byte(to))
-			maxLen = max(maxLen, len(from), len(to))
+			if _, exists := mappings[original]; exists {
+				return
+			}
+			mappings[original] = [2]string{hidden, client}
+			needles = append(needles, []byte(original))
+			maxLen = max(maxLen, len(original))
 		}
-		addReplacement(identityState.originalPromptCacheKey, identityState.promptCacheKey)
+		addIdentity := func(original, confused string) {
+			original, confused = strings.TrimSpace(original), strings.TrimSpace(confused)
+			if original == "" || confused == "" || original == confused {
+				return
+			}
+			addToken(original, confused, original)
+			addToken(confused, confused, original)
+		}
+		// Exact source collisions retain the first registration: cache, rule, turns.
+		addIdentity(identityState.originalPromptCacheKey, identityState.promptCacheKey)
 		if identityState.enabled {
-			addReplacement(identityState.ruleKey, identityState.originalPromptCacheKey)
+			addToken(identityState.ruleKey, identityState.ruleKey, identityState.originalPromptCacheKey)
 		}
 		for _, turnID := range identityState.turnIDs {
-			addReplacement(turnID.original, turnID.confused)
+			addIdentity(turnID.original, turnID.confused)
 		}
+
+		// Match the same leftmost-longest tokens as the carry scan. Both maps
+		// consume raw tokens atomically without rematching generated values.
+		sort.SliceStable(needles, func(i, j int) bool { return len(needles[i]) > len(needles[j]) })
+		var hiddenPairs, clientPairs []string
+		for _, needle := range needles {
+			token := string(needle)
+			mapping := mappings[token]
+			hiddenPairs = append(hiddenPairs, token, mapping[0])
+			clientPairs = append(clientPairs, token, mapping[1])
+		}
+		hide := strings.NewReplacer(hiddenPairs...)
+		expose := strings.NewReplacer(clientPairs...)
 
 		var usageLines helps.StreamUsageLines
 		defer usageLines.Close(streamUsage.ObserveOpenAIStream)
 		emitChunk := func(chunk []byte) bool {
-			chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
-			helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
+			hiddenChunk, clientChunk := chunk, chunk
+			if maxLen > 0 {
+				raw := string(chunk)
+				hiddenChunk = []byte(hide.Replace(raw))
+				clientChunk = []byte(expose.Replace(raw))
+			}
+			helps.AppendAPIResponseChunk(ctx, e.cfg, hiddenChunk)
 			// Usage lines are reassembled across reads, bounded per line.
-			usageLines.Observe(chunk, streamUsage.ObserveOpenAIStream)
-			clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
+			usageLines.Observe(hiddenChunk, streamUsage.ObserveOpenAIStream)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
 				return true
@@ -1195,38 +1226,11 @@ func codexMimeTypeFromOutputFormat(outputFormat string) string {
 	}
 }
 
-// codexImageCarryCut returns how much of pending can be emitted now: everything except a tail that may hold the
-// start of an identifier continuing in the next read. The cut only moves back to the start of a match that
-// actually crosses it, using leftmost non-overlapping matches as bytes.ReplaceAll does, and never below a floor,
-// so the carry stays bounded even for self-overlapping identifiers ("aa" in "aaaa…") (CLIProxyAPI#115 r2 P2).
+// codexImageCarryCut preserves the executor test seam; the matcher retains only
+// an unresolved suffix, bounded by maxLen-1, and never splits a consumed match.
 func codexImageCarryCut(pending []byte, needles [][]byte, maxLen int) int {
 	if maxLen == 0 {
 		return len(pending)
 	}
-	cut := max(0, len(pending)-(maxLen-1))
-	floor := max(0, len(pending)-(maxLen-1)-len(needles)*maxLen)
-	var matches [][2]int
-	for _, needle := range needles {
-		if len(needle) == 0 {
-			continue
-		}
-		for i := max(0, floor-len(needle)); i < len(pending); {
-			j := bytes.Index(pending[i:], needle)
-			if j < 0 {
-				break
-			}
-			start := i + j
-			matches = append(matches, [2]int{start, start + len(needle)})
-			i = start + len(needle)
-		}
-	}
-	for moved := true; moved; {
-		moved = false
-		for _, m := range matches {
-			if m[0] < cut && m[1] > cut && m[0] >= floor {
-				cut, moved = m[0], true
-			}
-		}
-	}
-	return cut
+	return helps.CodexImageCarryCut(pending, needles)
 }
