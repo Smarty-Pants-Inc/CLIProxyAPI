@@ -10,6 +10,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// maxOAuthCallbackBodyBytes bounds the public, key-less callback body before decoding (smarty-dev#7643).
+// A callback carries a provider, a redirect URL, a code and a state: a few KiB at most.
+const maxOAuthCallbackBodyBytes = 64 << 10
+
 type oauthCallbackRequest struct {
 	Provider    string `json:"provider"`
 	RedirectURL string `json:"redirect_url"`
@@ -25,7 +29,13 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 
 	var req oauthCallbackRequest
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxOAuthCallbackBodyBytes)
 	if errBindJSON := c.ShouldBindJSON(&req); errBindJSON != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(errBindJSON, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"status": "error", "error": "body too large"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
 		return
 	}
