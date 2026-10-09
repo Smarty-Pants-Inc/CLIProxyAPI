@@ -179,29 +179,42 @@ func bindCodexHeadersToRuleKey(headers http.Header, state *codexIdentityConfuseS
 	if state.ruleKey == "" {
 		return
 	}
-	from := state.ruleKeyFrom
+	rebind := func(value string) string {
+		trimmed := strings.TrimSpace(value)
+		for _, from := range []string{state.ruleKeyFrom, state.originalPromptCacheKey} {
+			if from = strings.TrimSpace(from); from == "" {
+				continue
+			}
+			if trimmed == from {
+				return state.ruleKey
+			}
+			if trimmed == from+":0" {
+				return state.ruleKey + ":0"
+			}
+		}
+		return value
+	}
 	for key, values := range headers {
-		if len(values) == 0 {
-			continue
-		}
-		value := strings.TrimSpace(values[0])
-		for _, name := range codexSessionKeyHeaders {
-			if strings.EqualFold(key, name) {
-				headers[key] = []string{state.ruleKey}
+		switch strings.ToLower(key) {
+		case "session-id", "session_id", "conversation_id":
+			headers[key] = []string{state.ruleKey}
+		case "x-client-request-id", "thread-id", "x-codex-window-id":
+			for i, value := range values {
+				values[i] = rebind(value)
 			}
-		}
-		for _, name := range codexPromptCacheKeyHeaders {
-			if strings.EqualFold(key, name) && from != "" && value == from {
-				headers[key] = []string{state.ruleKey}
-			}
-		}
-		if strings.EqualFold(key, "X-Codex-Window-Id") && from != "" && value == from+":0" {
-			headers[key] = []string{state.ruleKey + ":0"}
-		}
-		if strings.EqualFold(key, "X-Codex-Turn-Metadata") && from != "" && gjson.Get(value, "prompt_cache_key").String() == from {
-			updated, errSet := sjson.Set(value, "prompt_cache_key", state.ruleKey)
-			if errSet == nil {
-				headers[key] = []string{updated}
+		case "x-codex-turn-metadata":
+			for i, value := range values {
+				// Each field may independently mirror the key. Do not require
+				// prompt_cache_key to be present before rebinding window_id.
+				for _, field := range []string{"prompt_cache_key", "window_id"} {
+					from := gjson.Get(value, field).String()
+					if to := rebind(from); to != from {
+						if updated, errSet := sjson.Set(value, field, to); errSet == nil {
+							value = updated
+						}
+					}
+				}
+				values[i] = value
 			}
 		}
 	}

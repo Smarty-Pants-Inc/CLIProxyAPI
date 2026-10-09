@@ -35,11 +35,13 @@ func TestCodexPromptCacheRemovalWithoutEarlierKey(t *testing.T) {
 	}
 	for _, transport := range []string{"http", "native-websocket"} {
 		for _, stream := range []bool{false, true} {
-			for _, enabled := range []bool{false, true} {
+			for _, mode := range []struct{ identity, disableCloaking bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
+				enabled := mode.identity
 				for _, earlier := range []string{"absent", "empty", "null"} {
 					for _, tc := range cases {
-						t.Run(fmt.Sprintf("%s/stream=%t/identity=%t/earlier=%s/%s", transport, stream, enabled, earlier, tc.name), func(t *testing.T) {
+						t.Run(fmt.Sprintf("%s/stream=%t/identity=%t/cloaking=%t/earlier=%s/%s", transport, stream, enabled, !mode.disableCloaking, earlier, tc.name), func(t *testing.T) {
 							cfg := identityTestConfig(enabled)
+							cfg.Codex.DisableCodexCloaking = mode.disableCloaking
 							cfg.Payload = tc.payload
 							capture := &identityTestCapture{}
 							newServer := newIdentityHTTPServer
