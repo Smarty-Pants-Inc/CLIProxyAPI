@@ -65,8 +65,74 @@ func authFilesWindowsSecurity(t *testing.T, path string) *windows.SECURITY_DESCR
 	return sd
 }
 
+func authFilesWindowsTokenOwner(t *testing.T) *windows.SID {
+	t.Helper()
+	token := windows.GetCurrentProcessToken()
+	var size uint32
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size); err != windows.ERROR_INSUFFICIENT_BUFFER {
+		t.Fatalf("query token owner size: %v", err)
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &buffer[0], size, &size); err != nil {
+		t.Fatal(err)
+	}
+	owner := *(**windows.SID)(unsafe.Pointer(&buffer[0]))
+	if owner == nil || !owner.IsValid() {
+		t.Fatal("missing or invalid token default owner")
+	}
+	copy, err := owner.Copy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return copy
+}
+
+func authFilesWindowsForeignOwner(t *testing.T, user, defaultOwner *windows.SID) *windows.SID {
+	t.Helper()
+	groups, err := windows.GetCurrentProcessToken().GetTokenGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups.AllGroups() {
+		if group.Attributes&windows.SE_GROUP_OWNER != 0 && !group.Sid.Equals(user) && !group.Sid.Equals(defaultOwner) {
+			owner, errCopy := group.Sid.Copy()
+			if errCopy != nil {
+				t.Fatal(errCopy)
+			}
+			return owner
+		}
+	}
+	t.Skip("token has no SE_GROUP_OWNER group other than the current user or token default owner to assign as a foreign file owner")
+	return nil
+}
+
+func setAuthFilesWindowsOwner(t *testing.T, path string, owner *windows.SID, skipIfDenied bool) {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.WRITE_OWNER, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if errClose := windows.CloseHandle(handle); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
+	if err = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+		if skipIfDenied && (errors.Is(err, windows.ERROR_INVALID_OWNER) || errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD)) {
+			t.Skipf("token cannot assign foreign file owner %s: %v", owner.String(), err)
+		}
+		t.Fatal(err)
+	}
+}
+
 func TestWindowsServiceAuthFilesStartup(t *testing.T) {
 	owner, account := authFilesWindowsUser(t)
+	defaultOwner := authFilesWindowsTokenOwner(t)
 	sid := owner.String()
 	for _, tc := range []struct {
 		name, fileDACL string
@@ -74,6 +140,8 @@ func TestWindowsServiceAuthFilesStartup(t *testing.T) {
 	}{
 		{"explicit Users read", "D:P(A;;FA;;;" + sid + ")(A;;FR;;;BU)", true},
 		{"owner only", "D:P(A;;FA;;;" + sid + ")", false},
+		{"token default owner", "D:P(A;;FA;;;" + sid + ")", false},
+		{"foreign owner", "D:P(A;;FA;;;" + sid + ")", true},
 		// CreateFileW implicitly asks for SYNCHRONIZE and FILE_READ_ATTRIBUTES;
 		// an owner ACE granting only RC therefore refuses startup fail-closed.
 		{"read control only", "D:P(A;;RC;;;" + sid + ")", true},
@@ -88,13 +156,29 @@ func TestWindowsServiceAuthFilesStartup(t *testing.T) {
 				t.Fatal(err)
 			}
 			setAuthFilesWindowsDACL(t, file, "O:"+sid+tc.fileDACL, true)
+			if tc.name == "token default owner" {
+				setAuthFilesWindowsOwner(t, file, defaultOwner, false)
+			} else if tc.name == "foreign owner" {
+				setAuthFilesWindowsOwner(t, file, authFilesWindowsForeignOwner(t, owner, defaultOwner), true)
+			}
 			before := authFilesWindowsSecurity(t, file).String()
+			if tc.name == "owner only" || tc.name == "token default owner" || tc.name == "foreign owner" {
+				for _, ignoreInherited := range []bool{true, false} {
+					errCheck := internalconfig.CheckAuthFilesOwnerOnly(dir, ignoreInherited)
+					if (errCheck != nil) != tc.refused {
+						t.Fatalf("owner check (ignoreInherited=%t) = %v, want refused=%t", ignoreInherited, errCheck, tc.refused)
+					}
+					if tc.refused && !strings.Contains(errCheck.Error(), "auth file owner is neither") {
+						t.Fatalf("foreign owner did not refuse at the owner check: %v", errCheck)
+					}
+				}
+			}
 			var events []string
 			s, stop := newAuthFilesStartupProbe(dir, &events)
 			err := s.Run(context.Background())
 			if tc.refused {
-				fix := fmt.Sprintf(`icacls "%s" /inheritance:r /grant:r "%s:F"`, file, account)
-				if err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), fix) || !strings.Contains(err.Error(), fmt.Sprintf(`icacls "%s" /reset`, file)) {
+				fix := fmt.Sprintf(`icacls "%s" /setowner "%s" && icacls "%s" /reset && icacls "%s" /inheritance:r /grant:r "%s:F"`, file, account, file, file, account)
+				if err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), fix) {
 					t.Fatalf("startup must refuse with file and exact fix command: %v", err)
 				}
 				if len(events) != 0 || len(s.coreManager.List()) != 0 {

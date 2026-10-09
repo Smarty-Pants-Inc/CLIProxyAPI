@@ -17,6 +17,10 @@ func TestWindowsAuthFileDACLTrustees(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defaultOwner, err := authFilesTokenOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
 	sid := user.User.Sid.String()
 	for _, tc := range []struct {
 		name, dacl string
@@ -40,7 +44,7 @@ func TestWindowsAuthFileDACLTrustees(t *testing.T) {
 				t.Fatal(errParse)
 			}
 			before := sd.String()
-			if errCheck := authFileDACLIsOwnerOnly(sd, user.User.Sid, false); (errCheck != nil) != tc.wantErr {
+			if errCheck := authFileDACLIsOwnerOnly(sd, user.User.Sid, defaultOwner, false); (errCheck != nil) != tc.wantErr {
 				t.Fatalf("DACL check = %v, want error=%t: %s", errCheck, tc.wantErr, before)
 			}
 			if after := sd.String(); after != before {
@@ -48,8 +52,44 @@ func TestWindowsAuthFileDACLTrustees(t *testing.T) {
 			}
 		})
 	}
-	if err = authFileDACLIsOwnerOnly(nil, user.User.Sid, false); err == nil {
+	if err = authFileDACLIsOwnerOnly(nil, user.User.Sid, defaultOwner, false); err == nil {
 		t.Fatal("accepted missing security descriptor")
+	}
+}
+
+func TestWindowsAuthFileOwners(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultOwner, err := authFilesTokenOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, owner string
+		wantErr     bool
+	}{
+		{"current user", "O:" + user.User.Sid.String(), false},
+		{"token default owner", "O:" + defaultOwner.String(), false},
+		{"foreign owner", "O:WD", true},
+		{"missing owner", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sd, errParse := windows.SecurityDescriptorFromString(tc.owner + "D:P(A;;FA;;;" + user.User.Sid.String() + ")")
+			if errParse != nil {
+				t.Fatal(errParse)
+			}
+			before := sd.String()
+			for _, ignoreInherited := range []bool{true, false} {
+				if errCheck := authFileDACLIsOwnerOnly(sd, user.User.Sid, defaultOwner, ignoreInherited); (errCheck != nil) != tc.wantErr {
+					t.Fatalf("owner check (ignoreInherited=%t) = %v, want error=%t", ignoreInherited, errCheck, tc.wantErr)
+				}
+			}
+			if after := sd.String(); after != before {
+				t.Fatalf("read-only check changed descriptor: before %s, after %s", before, after)
+			}
+		})
 	}
 }
 
