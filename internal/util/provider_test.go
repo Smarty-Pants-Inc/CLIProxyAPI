@@ -89,3 +89,15 @@ func TestMaskSensitiveQueryOAuthSecrets(t *testing.T) {
 		}
 	}
 }
+
+// MaskSensitiveQuery sees only the raw query, not the route, so "code" and
+// "state" are masked on every route, not just OAuth callbacks. This over-masks
+// unrelated access-log queries (e.g. ?state=open), which is accepted: the logs
+// lose detail, but a callback secret never leaks (CLIProxyAPI#111 review).
+func TestMaskSensitiveQueryMasksCodeAndStateOnEveryRoute(t *testing.T) {
+	query := "state=open-issues&code=region-eu-west&page=2"
+	want := "state=open...sues&code=regi...west&page=2"
+	if got := MaskSensitiveQuery(query); got != want {
+		t.Fatalf("MaskSensitiveQuery(%q) = %q, want %q (global masking is intentional)", query, got, want)
+	}
+}

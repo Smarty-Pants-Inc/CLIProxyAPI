@@ -186,7 +186,14 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 	}
 
 	state := codexIdentityConfuseState{enabled: true, authID: strings.TrimSpace(auth.ID)}
-	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
+	// Remap the effective key: the client's own key, or, when the client sent
+	// none, the key the executor generated from session metadata or the API key
+	// and inserted into the body. Both must be scoped per credential.
+	promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String())
+	if promptCacheKey == "" {
+		promptCacheKey = strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
+	}
+	if promptCacheKey != "" {
 		state.originalPromptCacheKey = promptCacheKey
 		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", state.promptCacheKey)
