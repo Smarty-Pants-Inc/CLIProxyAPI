@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -48,10 +48,16 @@ func GinLogrusLogger() gin.HandlerFunc {
 		var requestID string
 		var idWriter *responseIDWriter
 		if isAIAPIPath(path) {
-			requestID = GenerateRequestID()
-			SetGinRequestID(c, requestID)
-			ctx := WithRequestID(c.Request.Context(), requestID)
-			c.Request = c.Request.WithContext(ctx)
+			generatedID, errGenerate := GenerateRequestID()
+			if errGenerate != nil {
+				log.WithField("error", SafeErrorDiagnostic(errGenerate)).Error("failed to generate request ID")
+			} else {
+				requestID = generatedID
+				SetGinRequestID(c, requestID)
+				ctx := WithRequestID(c.Request.Context(), requestID)
+				c.Request = c.Request.WithContext(ctx)
+			}
+			// Join keys remain available even if request-ID entropy fails.
 			if c.Request.Method == http.MethodPost {
 				idWriter = &responseIDWriter{ResponseWriter: c.Writer}
 				c.Writer = idWriter
@@ -84,7 +90,7 @@ func GinLogrusLogger() gin.HandlerFunc {
 		statusCode := c.Writer.Status()
 		clientIP := c.ClientIP()
 		method := c.Request.Method
-		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
+		errorMessage := SafeDiagnosticForLog(c.Errors.ByType(gin.ErrorTypePrivate).String())
 
 		if requestID == "" {
 			requestID = "--------"
@@ -142,7 +148,7 @@ func GinLogrusRecovery() gin.HandlerFunc {
 		}
 
 		log.WithFields(log.Fields{
-			"panic": recovered,
+			"panic": SafeDiagnosticForLog(fmt.Sprint(recovered)),
 			"stack": string(debug.Stack()),
 			"path":  c.Request.URL.Path,
 		}).Error("recovered from panic")

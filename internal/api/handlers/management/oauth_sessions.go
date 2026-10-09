@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
 
 const (
@@ -451,27 +451,11 @@ func writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessag
 	if err != nil {
 		return "", fmt.Errorf("marshal oauth callback payload: %w", err)
 	}
-	// Publish complete JSON atomically so background waiters cannot read a partial callback.
-	tmp, errCreate := os.CreateTemp(authDir, ".oauth-callback-*")
-	if errCreate != nil {
-		return "", fmt.Errorf("create oauth callback file: %w", errCreate)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if errRemove := os.Remove(tmpPath); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
-			log.Warn("failed to remove temporary OAuth callback file")
-		}
-	}()
-	_, errWrite := tmp.Write(data)
-	errClose := tmp.Close()
-	if errWrite != nil {
+	// The callback carries the authorization code and state, so it goes through
+	// the single auth writer: owner-only 0600, fsync, then an atomic rename so
+	// background waiters never read a partial callback.
+	if errWrite := misc.WriteAuthFileAtomic(filePath, data); errWrite != nil {
 		return "", fmt.Errorf("write oauth callback file: %w", errWrite)
-	}
-	if errClose != nil {
-		return "", fmt.Errorf("close oauth callback file: %w", errClose)
-	}
-	if errRename := os.Rename(tmpPath, filePath); errRename != nil {
-		return "", fmt.Errorf("publish oauth callback file: %w", errRename)
 	}
 	return filePath, nil
 }

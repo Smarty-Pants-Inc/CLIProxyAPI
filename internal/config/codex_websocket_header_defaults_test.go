@@ -58,7 +58,7 @@ codex:
 	if !cfg.Codex.DisableCodexCloaking {
 		t.Fatal("DisableCodexCloaking = false, want true")
 	}
-	if !cfg.Codex.OptimizeMultiAgentV2 {
+	if !cfg.Client.Codex.OptimizeMultiAgentV2 {
 		t.Fatalf("OptimizeMultiAgentV2 = false, want true")
 	}
 }

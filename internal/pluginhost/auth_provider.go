@@ -12,9 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func (h *Host) hostConfigSummaryLocked() pluginapi.HostConfigSummary {
@@ -388,7 +389,17 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		data.Metadata = cloneAnyMap(auth.Metadata)
 	}
 	if len(data.Attributes) == 0 {
-		data.Attributes = cloneStringMap(auth.Attributes)
+		if auth != nil {
+			data.Attributes = cloneStringMap(auth.Attributes)
+		}
+	} else if auth != nil {
+		attributes := cloneStringMap(data.Attributes)
+		for key, value := range auth.Attributes {
+			if _, exists := attributes[key]; !exists {
+				attributes[key] = value
+			}
+		}
+		data.Attributes = attributes
 	}
 	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
@@ -399,7 +410,11 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	} else {
 		data.NextRefreshAfter = pluginResp.NextRefreshAfter
 	}
-	next := h.AuthDataToCoreAuth(data, "", data.FileName)
+	path := ""
+	if auth != nil && auth.Attributes != nil {
+		path = auth.Attributes[coreauth.AttributePath]
+	}
+	next := h.AuthDataToCoreAuth(data, path, data.FileName)
 	if next == nil {
 		return nil, true, fmt.Errorf("auth provider refresh returned invalid auth data")
 	}
@@ -551,6 +566,8 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 	return payload, nil
 }
 
+// atomicWriteFile persists plugin token storage 0600 through misc.WriteAuthFileAtomic
+// (temp file, fsync, rename), creating a missing auth directory 0700 first.
 func atomicWriteFile(path string, data []byte) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -560,27 +577,7 @@ func atomicWriteFile(path string, data []byte) error {
 	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
 		return fmt.Errorf("create auth directory: %w", errMkdir)
 	}
-	tmp, errCreate := os.CreateTemp(dir, ".plugin-auth-*.tmp")
-	if errCreate != nil {
-		return fmt.Errorf("create temp auth file: %w", errCreate)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpPath)
-	}()
-	if _, errWrite := tmp.Write(data); errWrite != nil {
-		if errClose := tmp.Close(); errClose != nil {
-			errWrite = fmt.Errorf("%w; close temp auth file: %v", errWrite, errClose)
-		}
-		return fmt.Errorf("write temp auth file: %w", errWrite)
-	}
-	if errClose := tmp.Close(); errClose != nil {
-		return fmt.Errorf("close temp auth file: %w", errClose)
-	}
-	if errRename := os.Rename(tmpPath, path); errRename != nil {
-		return fmt.Errorf("rename temp auth file: %w", errRename)
-	}
-	return nil
+	return misc.WriteAuthFileAtomic(path, data)
 }
 
 func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, authDir string) *coreauth.Auth {
@@ -601,9 +598,15 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	}
 	path = strings.TrimSpace(path)
 	if path != "" {
-		attributes[coreauth.AttributePath] = path
-		attributes[coreauth.AttributeSource] = path
-		attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		if attributes[coreauth.AttributePath] == "" {
+			attributes[coreauth.AttributePath] = path
+		}
+		if attributes[coreauth.AttributeSource] == "" {
+			attributes[coreauth.AttributeSource] = path
+		}
+		if attributes[coreauth.AttributeSourceBackend] == "" {
+			attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		}
 	}
 	fileName = strings.TrimSpace(firstNonEmpty(data.FileName, fileName))
 	if fileName != "" && attributes[coreauth.AttributeSource] == "" {

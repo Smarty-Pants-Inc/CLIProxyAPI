@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func claudeQuotaAuth(id string, util5h, util7d float64, reset time.Time, observedAt time.Time) *Auth {

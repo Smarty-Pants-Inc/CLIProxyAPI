@@ -3,11 +3,11 @@ package auth
 import (
 	"bytes"
 	"context"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/sse"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/sse"
 	"strings"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

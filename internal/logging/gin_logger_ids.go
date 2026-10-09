@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/tidwall/gjson"
 )
 
@@ -107,6 +108,16 @@ func (w *responseIDWriter) WriteString(data string) (int, error) {
 		w.prefix = append(w.prefix, data[:min(room, len(data))]...)
 	}
 	return w.ResponseWriter.WriteString(data)
+}
+
+// FlushError preserves the upstream transport-error contract through this
+// fork's response-ID wrapper; embedding Gin's Flush would discard errors.
+func (w *responseIDWriter) FlushError() error {
+	return httpwire.FlushResponse(w.ResponseWriter)
+}
+
+func (w *responseIDWriter) Flush() {
+	_ = w.FlushError()
 }
 
 // responseID returns the envelope ID of the response, or "" when the captured

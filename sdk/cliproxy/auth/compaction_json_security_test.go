@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/tidwall/gjson"
 )
 

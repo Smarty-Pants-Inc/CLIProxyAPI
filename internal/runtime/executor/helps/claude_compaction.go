@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -20,6 +21,12 @@ const ClaudeCompactionBeta = "compact-2026-09-04"
 // claudeCompactionCapsulePrefix marks a Responses compaction item whose
 // encrypted_content carries an Anthropic compaction block verbatim.
 const claudeCompactionCapsulePrefix = "cpa-claude-compact-v1:"
+
+// RecognizedClaudeCompactionCapsule identifies native signed blocks before
+// upstream's foreign-capsule filtering. Decoding still validates the block.
+func RecognizedClaudeCompactionCapsule(encrypted string) bool {
+	return strings.HasPrefix(encrypted, claudeCompactionCapsulePrefix)
+}
 
 // ClaudeResponsesCompaction records Responses compaction items removed before
 // Responses-to-Claude translation, which has no mapping for them.
@@ -125,9 +132,22 @@ func ClaudeBodyUsesCompaction(body []byte) bool {
 
 // ClaudeCompactionResult is the verified outcome of an on-demand summary.
 type ClaudeCompactionResult struct {
-	Capsule      string
-	InputTokens  int64
-	OutputTokens int64
+	Capsule             string
+	InputTokens         int64 // Responses input includes cache creation and read.
+	OutputTokens        int64
+	CachedTokens        int64
+	CacheCreationTokens int64
+}
+
+// UsageDetail publishes iteration usage in the canonical Anthropic accounting
+// representation; ordinary message_delta usage is zero on summary-only turns.
+func (result ClaudeCompactionResult) UsageDetail() usage.Detail {
+	payload := []byte(`{"usage":{}}`)
+	payload, _ = sjson.SetBytes(payload, "usage.input_tokens", result.InputTokens-result.CachedTokens-result.CacheCreationTokens)
+	payload, _ = sjson.SetBytes(payload, "usage.output_tokens", result.OutputTokens)
+	payload, _ = sjson.SetBytes(payload, "usage.cache_read_input_tokens", result.CachedTokens)
+	payload, _ = sjson.SetBytes(payload, "usage.cache_creation_input_tokens", result.CacheCreationTokens)
+	return ParseClaudeUsage(payload)
 }
 
 // ParseClaudeCompactionStream extracts exactly one compaction block from an
@@ -138,6 +158,8 @@ func ParseClaudeCompactionStream(data []byte) (ClaudeCompactionResult, error) {
 	var block []byte
 	blocks := 0
 	stopReason := ""
+	completed := false
+	usagePayload := []byte(`{}`)
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(nil, 52_428_800)
 	for scanner.Scan() {
@@ -145,8 +167,18 @@ func ParseClaudeCompactionStream(data []byte) (ClaudeCompactionResult, error) {
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
-		event := gjson.ParseBytes(bytes.TrimSpace(line[len("data:"):]))
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if !gjson.ValidBytes(payload) {
+			return result, claudeCompactionError("claude compaction returned malformed stream data")
+		}
+		event := gjson.ParseBytes(payload)
 		switch event.Get("type").String() {
+		case "error":
+			return result, claudeCompactionError("claude compaction returned an upstream error event")
+		case "message_start":
+			if initialUsage := event.Get("message.usage"); initialUsage.IsObject() {
+				usagePayload = []byte(initialUsage.Raw)
+			}
 		case "content_block_start":
 			if event.Get("content_block.type").String() == "compaction" {
 				blocks++
@@ -154,35 +186,46 @@ func ParseClaudeCompactionStream(data []byte) (ClaudeCompactionResult, error) {
 			}
 		case "message_delta":
 			stopReason = event.Get("delta.stop_reason").String()
-			result.InputTokens, result.OutputTokens = claudeCompactionUsage(event.Get("usage"))
+			event.Get("usage").ForEach(func(key, value gjson.Result) bool {
+				usagePayload, _ = sjson.SetRawBytes(usagePayload, key.String(), []byte(value.Raw))
+				return true
+			})
+		case "message_stop":
+			completed = true
 		}
 	}
 	if errScan := scanner.Err(); errScan != nil {
 		return result, errScan
 	}
-	if blocks != 1 || stopReason != "compaction" {
-		return result, claudeCompactionError(fmt.Sprintf("claude compaction returned %d compaction blocks with stop_reason %q", blocks, stopReason))
+	if blocks != 1 || stopReason != "compaction" || !completed {
+		return result, claudeCompactionError("claude compaction did not complete with exactly one compaction block")
 	}
 	if !gjson.GetBytes(block, "content").Exists() || gjson.GetBytes(block, "content").Type == gjson.Null {
 		return result, claudeCompactionError("claude compaction returned no summary")
 	}
+	result.InputTokens, result.OutputTokens, result.CachedTokens, result.CacheCreationTokens = claudeCompactionUsage(gjson.ParseBytes(usagePayload))
 	result.Capsule = claudeCompactionCapsulePrefix + base64.RawURLEncoding.EncodeToString(block)
 	return result, nil
 }
 
 // claudeCompactionUsage sums the billed iterations; top-level usage is zero on
 // a summary-only response.
-func claudeCompactionUsage(usage gjson.Result) (int64, int64) {
-	var input, output int64
-	iterations := usage.Get("iterations")
+func claudeCompactionUsage(usageNode gjson.Result) (input, output, cached, cacheCreation int64) {
+	add := func(node gjson.Result) {
+		input += node.Get("input_tokens").Int()
+		output += node.Get("output_tokens").Int()
+		cached += node.Get("cache_read_input_tokens").Int()
+		cacheCreation += node.Get("cache_creation_input_tokens").Int()
+	}
+	iterations := usageNode.Get("iterations")
 	if iterations.IsArray() && len(iterations.Array()) > 0 {
 		for _, iteration := range iterations.Array() {
-			input += iteration.Get("input_tokens").Int()
-			output += iteration.Get("output_tokens").Int()
+			add(iteration)
 		}
-		return input, output
+	} else {
+		add(usageNode)
 	}
-	return usage.Get("input_tokens").Int(), usage.Get("output_tokens").Int()
+	return input + cached + cacheCreation, output, cached, cacheCreation
 }
 
 func decodeClaudeCompactionCapsule(encrypted string) ([]byte, error) {
@@ -208,7 +251,23 @@ func claudeCompactionError(msg string) error { return claudeCompactionStatusErro
 // compaction item.
 func BuildClaudeCompactionStreamChunks(modelName string, result ClaudeCompactionResult) [][]byte {
 	total := result.InputTokens + result.OutputTokens
-	return buildResponsesCompactionStreamChunks("claude", modelName, result.Capsule, int(result.InputTokens), int(result.OutputTokens), int(total))
+	chunks := buildResponsesCompactionStreamChunks("claude", modelName, result.Capsule, int(result.InputTokens), int(result.OutputTokens), int(total))
+	for i, chunk := range chunks {
+		idx := bytes.Index(chunk, []byte("data: "))
+		if idx < 0 {
+			continue
+		}
+		data := bytes.TrimSpace(chunk[idx+len("data: "):])
+		path := "usage.input_tokens_details.cached_tokens"
+		if gjson.GetBytes(data, "response").Exists() {
+			path = "response." + path
+		}
+		if gjson.GetBytes(data, strings.TrimSuffix(path, ".input_tokens_details.cached_tokens")).Exists() {
+			data, _ = sjson.SetBytes(data, path, result.CachedTokens)
+			chunks[i] = append(append(bytes.Clone(chunk[:idx+len("data: ")]), data...), '\n', '\n')
+		}
+	}
+	return chunks
 }
 
 // BuildClaudeCompactionResponse returns a non-stream Responses object with one
@@ -219,6 +278,7 @@ func BuildClaudeCompactionResponse(modelName string, result ClaudeCompactionResu
 	item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("cmp_claude_compact_%d", now.UnixNano()))
 	item, _ = sjson.SetBytes(item, "encrypted_content", result.Capsule)
 	usage := []byte(`{"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}`)
+	usage, _ = sjson.SetBytes(usage, "input_tokens_details.cached_tokens", result.CachedTokens)
 	usage, _ = sjson.SetBytes(usage, "input_tokens", result.InputTokens)
 	usage, _ = sjson.SetBytes(usage, "output_tokens", result.OutputTokens)
 	usage, _ = sjson.SetBytes(usage, "total_tokens", result.InputTokens+result.OutputTokens)

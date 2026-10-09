@@ -11,19 +11,40 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var (
 	setupOnce      sync.Once
-	writerMu       sync.Mutex
+	writerMu       sync.RWMutex
+	consoleMu      sync.Mutex
 	logWriter      *lumberjack.Logger
 	ginInfoWriter  *io.PipeWriter
 	ginErrorWriter *io.PipeWriter
+	consoleWriter  io.Writer = os.Stderr
 )
+
+func init() {
+	config.SetV8MigrationWarnFunc(logV8MigrationWarning)
+}
+
+func logV8MigrationWarning(section, msg string) {
+	writerMu.RLock()
+	defer writerMu.RUnlock()
+
+	msg = SafeDiagnosticForLog(msg)
+	log.Warn(msg)
+	if logWriter != nil {
+		consoleMu.Lock()
+		if consoleWriter != nil {
+			_, _ = fmt.Fprintf(consoleWriter, "WARNING: %s\n", msg)
+		}
+		consoleMu.Unlock()
+	}
+}
 
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
@@ -36,12 +57,18 @@ var logFieldOrder = []string{
 	"plugin_id", "plugin_name", "source_id",
 	"version", "active_version", "retired_version", "overwritten",
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
-	"credential", "connection", "proxy_scheme", "remote_transport",
+	"credential", "auth_ref", "auth_id", "auth_index", "connection", "proxy_scheme", "remote_transport",
+	"operation", "upstream_host", "reused", "was_idle", "idle_time",
 	"media_session_id", "call_id", "peer", "state", "reason",
 }
 
 var quotedLogFields = map[string]struct{}{
 	"credential":       {},
+	"auth_ref":         {},
+	"auth_id":          {},
+	"auth_index":       {},
+	"upstream_host":    {},
+	"operation":        {},
 	"connection":       {},
 	"proxy_scheme":     {},
 	"remote_transport": {},
@@ -55,6 +82,28 @@ var quotedLogFields = map[string]struct{}{
 var pluginPathFieldOrder = []string{"path", "active_path", "retired_path"}
 
 func formatLogFieldValue(key string, value any) string {
+	// Upstream now displays auth identity and free-form error fields. Never
+	// render tokens, account IDs or email addresses from those new paths.
+	switch key {
+	case "auth_id":
+		if fmt.Sprint(value) != "" {
+			value = "[REDACTED]"
+		}
+	case "credential", "connection", "upstream_host":
+		if raw, ok := value.(string); ok {
+			safe := SafeDiagnosticForLog(raw)
+			// Preserve existing quoted whitespace for benign display labels.
+			if safe != strings.Join(strings.Fields(raw), " ") {
+				value = safe
+			}
+		}
+	case "error":
+		if err, ok := value.(error); ok {
+			value = SafeErrorDiagnostic(err)
+		} else {
+			value = SafeDiagnosticForLog(fmt.Sprint(value))
+		}
+	}
 	if _, quoted := quotedLogFields[key]; quoted {
 		if stringValue, ok := value.(string); ok {
 			return strconv.Quote(stringValue)
@@ -77,7 +126,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 	reqID := "--------"
 	if id, ok := entry.Data["request_id"].(string); ok && id != "" {
-		reqID = id
+		reqID = ShortRequestID(id)
 	}
 
 	level := entry.Level.String()

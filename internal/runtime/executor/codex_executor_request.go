@@ -5,20 +5,21 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,24 +36,39 @@ var dataTag = []byte("data:")
 func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte) {
 	return translateCodexRequestPairContext(context.Background(), from, to, model, originalPayload, payload, stream, preserveEmptyThinkingBlocks...)
 }
+
 func translateCodexRequestPairContext(ctx context.Context, from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte) {
+	original, body, _, _ := translateCodexRequestPairWithUpdateIntentContext(ctx, from, to, model, originalPayload, payload, stream, preserveEmptyThinkingBlocks...)
+	return original, body
+}
+
+func translateCodexRequestPairWithUpdateIntent(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte, bool, error) {
+	return translateCodexRequestPairWithUpdateIntentContext(context.Background(), from, to, model, originalPayload, payload, stream, preserveEmptyThinkingBlocks...)
+}
+
+func translateCodexRequestPairWithUpdateIntentContext(ctx context.Context, from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte, bool, error) {
+	// Restricted translation must retain the policy context so plugin normalization
+	// cannot introduce tools outside the admitted request. Ordinary calls keep the
+	// historical background context used by Codex translation.
 	if cliproxyauth.KeyPolicyFromContext(ctx) == nil {
 		ctx = context.Background()
 	}
 	isCompat := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
-	translate := func(raw []byte) []byte {
+	translate := func(raw []byte) ([]byte, bool, error) {
 		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
-			return helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, nil, nil, from, to, model, raw, stream, true)
+			body, err := helps.TranslateRequestReturningError(ctx, nil, nil, from, to, model, raw, stream, true)
+			return body, false, err
 		}
-		return sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw}).Body
+		translated := sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw})
+		return translated.Body, translated.ConfigurationUpdatesChanged, translated.Err
 	}
 	if bytes.Equal(originalPayload, payload) {
-		body := translate(payload)
-		return body, body
+		body, changed, err := translate(payload)
+		return body, body, changed, err
 	}
-	originalTranslated := translate(originalPayload)
-	body := translate(payload)
-	return originalTranslated, body
+	originalTranslated, _, _ := translate(originalPayload)
+	body, changed, err := translate(payload)
+	return originalTranslated, body, changed, err
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
@@ -96,6 +112,140 @@ type codexIdentityConfuseState struct {
 	originalPromptCacheKey string
 	promptCacheKey         string
 	turnIDs                []codexIdentityReplacement
+	// ruleKeyFrom/ruleKey record a payload rule that changed prompt_cache_key
+	// after the built-in mutations: ruleKeyFrom is the key before the rules
+	// and ruleKey the operator-owned key that went on the wire. Header mirrors
+	// of the key follow ruleKey so body and headers stay bound together.
+	ruleKeyFrom string
+	ruleKey     string
+	// keyRemoved records that a payload rule removed prompt_cache_key or set it
+	// empty/null; ruleKeyFrom then holds the removed key, and no header may
+	// keep carrying it.
+	keyRemoved bool
+}
+
+// bindCodexIdentityToFinalBody records a prompt_cache_key that a payload rule
+// set or changed, comparing the key before the payload finalizer (before)
+// with the final body.
+// It must run after the finalizer and before the identity headers are applied.
+// The rule-set value is operator-owned and is not remapped again.
+func bindCodexIdentityToFinalBody(state *codexIdentityConfuseState, before string, finalBody []byte) {
+	if state == nil {
+		return
+	}
+	final := codexPromptCacheKey(finalBody)
+	if final == before {
+		return
+	}
+	state.ruleKeyFrom = before
+	if final == "" {
+		state.keyRemoved = true
+		return
+	}
+	state.ruleKey = final
+}
+
+// codexPromptCacheKey returns the trimmed prompt_cache_key of a request body.
+func codexPromptCacheKey(body []byte) string {
+	return strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+}
+
+// codexSessionKeyHeaders carry the session identity that must match
+// prompt_cache_key; codexPromptCacheKeyHeaders additionally mirror it when the
+// executor derived them from the key.
+var (
+	codexSessionKeyHeaders     = []string{"Session-Id", "Session_id", "Conversation_id"}
+	codexPromptCacheKeyHeaders = []string{"X-Client-Request-Id", "Thread-Id"}
+)
+
+// bindCodexHeadersToRuleKey binds the session headers to the operator-owned key
+// that is on the wire and rewrites every other header that mirrored the
+// pre-rule key, so body and headers always carry the same identity.
+func bindCodexHeadersToRuleKey(headers http.Header, state *codexIdentityConfuseState) {
+	if headers == nil || state == nil {
+		return
+	}
+	if state.keyRemoved {
+		clearCodexHeadersForRemovedKey(headers, state.ruleKeyFrom, state.originalPromptCacheKey)
+		return
+	}
+	if state.ruleKey == "" {
+		return
+	}
+	from := state.ruleKeyFrom
+	for key, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		value := strings.TrimSpace(values[0])
+		for _, name := range codexSessionKeyHeaders {
+			if strings.EqualFold(key, name) {
+				headers[key] = []string{state.ruleKey}
+			}
+		}
+		for _, name := range codexPromptCacheKeyHeaders {
+			if strings.EqualFold(key, name) && from != "" && value == from {
+				headers[key] = []string{state.ruleKey}
+			}
+		}
+		if strings.EqualFold(key, "X-Codex-Window-Id") && from != "" && value == from+":0" {
+			headers[key] = []string{state.ruleKey + ":0"}
+		}
+		if strings.EqualFold(key, "X-Codex-Turn-Metadata") && from != "" && gjson.Get(value, "prompt_cache_key").String() == from {
+			updated, errSet := sjson.Set(value, "prompt_cache_key", state.ruleKey)
+			if errSet == nil {
+				headers[key] = []string{updated}
+			}
+		}
+	}
+	if codexSessionHeaderValue(headers) == "" {
+		setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.ruleKey)
+	}
+}
+
+// clearCodexHeadersForRemovedKey drops the session headers and every header
+// copy of a prompt_cache_key that a payload rule removed from the body, so no
+// header keeps carrying an identity the final body no longer has.
+func clearCodexHeadersForRemovedKey(headers http.Header, removed ...string) {
+	isRemoved := func(value string) bool {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return false
+		}
+		for _, key := range removed {
+			if key = strings.TrimSpace(key); key != "" && (value == key || value == key+":0") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range append([]string{"session_id"}, codexSessionKeyHeaders...) {
+		deleteHeaderCaseInsensitive(headers, name)
+	}
+	for key, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		value := values[0]
+		for _, name := range append([]string{"X-Codex-Window-Id"}, codexPromptCacheKeyHeaders...) {
+			if strings.EqualFold(key, name) && isRemoved(value) {
+				delete(headers, key)
+			}
+		}
+		if strings.EqualFold(key, "X-Codex-Turn-Metadata") {
+			updated := value
+			for _, field := range []string{"prompt_cache_key", "window_id"} {
+				if isRemoved(gjson.Get(updated, field).String()) {
+					if next, errDelete := sjson.Delete(updated, field); errDelete == nil {
+						updated = next
+					}
+				}
+			}
+			if updated != value {
+				headers[key] = []string{updated}
+			}
+		}
+	}
 }
 
 type codexIdentityReplacement struct {
@@ -147,10 +297,24 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
+	// Credential-scoped identity remapping is a built-in mutation, so it runs
+	// before the payload finalizer; configured payload rules stay the final barrier.
 	var identityState codexIdentityConfuseState
 	rawJSON, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON)
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
+	}
+	beforeRulesKey := codexPromptCacheKey(rawJSON)
+	rawJSON = helps.FinalizePayload(ctx, rawJSON)
+	// Bind the session headers to the key that is actually on the wire, which a
+	// payload rule may have set or changed.
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, rawJSON)
+	if identityState.ruleKey != "" {
+		cache.ID = identityState.ruleKey
+	}
+	if identityState.keyRemoved {
+		// The final body carries no key, so no session header may carry one.
+		cache.ID = ""
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
@@ -168,7 +332,14 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 	}
 
 	state := codexIdentityConfuseState{enabled: true, authID: strings.TrimSpace(auth.ID)}
-	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
+	// Remap the effective key: the client's own key, or, when the client sent
+	// none, the key the executor generated from session metadata or the API key
+	// and inserted into the body. Both must be scoped per credential.
+	promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String())
+	if promptCacheKey == "" {
+		promptCacheKey = strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
+	}
+	if promptCacheKey != "" {
 		state.originalPromptCacheKey = promptCacheKey
 		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", state.promptCacheKey)
@@ -189,10 +360,12 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 }
 
 func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityConfuseState) {
-	if headers == nil {
+	if headers == nil || state == nil {
 		return
 	}
-	if state == nil || !state.enabled {
+	// Runs last, after every other header source, so a payload rule's key wins.
+	defer bindCodexHeadersToRuleKey(headers, state)
+	if !state.enabled {
 		return
 	}
 
@@ -241,10 +414,66 @@ func applyCodexIdentityConfuseResponsePayload(payload []byte, state codexIdentit
 
 func applyCodexIdentityExposeResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
 	payload = replaceCodexIdentityResponsePayload(payload, state.promptCacheKey, state.originalPromptCacheKey)
+	if state.enabled {
+		// A payload rule's operator-owned key replaced the client's key on the
+		// wire; the client still sees its own key.
+		payload = replaceCodexIdentityResponsePayload(payload, state.ruleKey, state.originalPromptCacheKey)
+	}
 	for _, turnID := range state.turnIDs {
 		payload = replaceCodexIdentityResponsePayload(payload, turnID.confused, turnID.original)
 	}
 	return payload
+}
+
+// exposeCodexUnassignedIdentity restores client identifiers on a payload whose
+// owning request is unknown, given the identity state of every live request.
+// Only credential-scoped remapped values (UUIDs derived per credential and
+// original) that map to exactly one original are restored; a value that maps
+// to several originals is left alone. Payload rule keys are operator-owned and
+// may be shared by several requests, so they are never rewritten here.
+func exposeCodexUnassignedIdentity(payload []byte, states []codexIdentityConfuseState) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	originals := make(map[string]map[string]struct{})
+	add := func(confused, original string) {
+		confused = strings.TrimSpace(confused)
+		original = strings.TrimSpace(original)
+		if confused == "" || original == "" || confused == original {
+			return
+		}
+		if originals[confused] == nil {
+			originals[confused] = make(map[string]struct{})
+		}
+		originals[confused][original] = struct{}{}
+	}
+	for _, state := range states {
+		if !state.enabled {
+			continue
+		}
+		add(state.promptCacheKey, state.originalPromptCacheKey)
+		for _, turnID := range state.turnIDs {
+			add(turnID.confused, turnID.original)
+		}
+	}
+	confusedValues := make([]string, 0, len(originals))
+	for confused, set := range originals {
+		if len(set) == 1 && bytes.Contains(payload, []byte(confused)) {
+			confusedValues = append(confusedValues, confused)
+		}
+	}
+	if len(confusedValues) == 0 {
+		return payload
+	}
+	sort.Strings(confusedValues)
+	pairs := make([]string, 0, 2*len(confusedValues))
+	for _, confused := range confusedValues {
+		for original := range originals[confused] {
+			pairs = append(pairs, confused, original)
+		}
+	}
+	// One pass, so a restored value is never rewritten again.
+	return []byte(strings.NewReplacer(pairs...).Replace(string(payload)))
 }
 
 func (state *codexIdentityConfuseState) confuseTurnID(turnID string) string {
@@ -376,7 +605,62 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	applyCodexCloakingHeaders(r.Header, cfg, auth)
 }
 
+const codexRoutingHintHeader = "X-Codex-Routing-Hint"
+
+// applyCodexRoutingHint sends the routing hint native Codex attaches to every
+// ChatGPT-backend Responses request: "model=<slug>" plus ";tier=<service_tier>"
+// when the body requests a tier (openai/codex rust-v0.155.0,
+// codex-rs/core/src/client.rs build_routing_hint_header). Without it, a
+// translated request carries service_tier=priority only in the body. Whether
+// the backend needs the header to grant priority is undocumented.
+//
+// The model is the resolved model written to the upstream body, while the tier
+// is read from the final body so payload rules cannot make the hint stale. A
+// hint forwarded by a native client names its original model and is replaced.
+// Operator configuration keeps precedence: when an auth "header:" rule for the
+// hint resolves to a value (static, or a "$Header" reference the request
+// carries), that value is sent, and callers apply models.json override_header
+// afterwards. A rule that resolves to nothing falls back to the derived hint.
+// API-key requests are not touched, matching native Codex, which sends no hint
+// to API-key providers.
+func applyCodexRoutingHint(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, baseModel string, upstreamBody []byte, clientHeaders http.Header) {
+	if codexAuthUsesAPIKey(auth) {
+		return
+	}
+	deleteHeaderCaseInsensitive(headers, codexRoutingHintHeader)
+	if operatorHint := codexOperatorHeaderValue(ctx, auth, clientHeaders, codexRoutingHintHeader); operatorHint != "" {
+		headers.Set(codexRoutingHintHeader, operatorHint)
+		return
+	}
+	model := strings.TrimSpace(baseModel)
+	if model == "" {
+		return
+	}
+	hint := "model=" + model
+	if tier := gjson.GetBytes(upstreamBody, "service_tier"); tier.Type == gjson.String {
+		if value := strings.TrimSpace(tier.String()); value != "" {
+			hint += ";tier=" + value
+		}
+	}
+	headers.Set(codexRoutingHintHeader, hint)
+}
+
+// codexOperatorHeaderValue returns the value the auth's "header:" rules
+// resolve to for name, using the same resolver that applied them to the
+// request, so dynamic references that resolve to nothing report "".
+func codexOperatorHeaderValue(ctx context.Context, auth *cliproxyauth.Auth, clientHeaders http.Header, name string) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	resolved := (&http.Request{Header: http.Header{}}).WithContext(ctx)
+	util.ApplyCustomHeadersFromAttrs(resolved, auth.Attributes, clientHeaders)
+	return strings.TrimSpace(resolved.Header.Get(name))
+}
+
 func isCodexCloakingDisabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		cfg = cfg.ForAPIKey()
+	}
 	if auth != nil && len(auth.Attributes) > 0 {
 		if val, ok := auth.Attributes[cliproxyauth.AttributeCodexDisableCloaking]; ok {
 			if parsed, errParse := strconv.ParseBool(strings.TrimSpace(val)); errParse == nil {

@@ -15,12 +15,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -183,7 +183,7 @@ func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnaps
 		c.JSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 		return configReloadSnapshot{}, false
 	}
-	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
 		if respondStaleConfigConflict(c, errSave) {
 			return configReloadSnapshot{}, false
 		}
@@ -304,7 +304,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		switch c.Request.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 		default:
-			if !policyFreezeExempt[strings.TrimPrefix(c.FullPath(), "/v0/management")] && h.policyConfigFrozen() {
+			if !policyFreezeExempt[managementPolicyPath(c.FullPath())] && h.policyConfigFrozen() {
 				c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": errPolicyConfigFrozen})
 				return
 			}
@@ -436,6 +436,32 @@ var policyFreezeExempt = map[string]bool{
 	"/plugins/:id/quota": true, "/plugins/:id/quota/reset": true, "/logs": true, "/oauth-session": true,
 }
 
+// managementPolicyPath maps both API versions' non-config operations to the
+// exemption names. Unknown/new mutation routes remain frozen by default.
+func managementPolicyPath(path string) string {
+	if strings.HasPrefix(path, "/v0/management") {
+		return strings.TrimPrefix(path, "/v0/management")
+	}
+	path = strings.TrimPrefix(path, "/v8/management")
+	switch path {
+	case "/credentials":
+		return "/auth-files"
+	case "/credentials/status", "/credentials/fields", "/credentials/refresh":
+		return strings.Replace(path, "/credentials", "/auth-files", 1)
+	case "/oauth/import":
+		return "/vertex/import"
+	case "/oauth/session":
+		return "/oauth-session"
+	case "/requests/api-call":
+		return "/api-call"
+	case "/routing/cooldown/reset":
+		return "/reset-quota"
+	case "/observability/logs":
+		return "/logs"
+	}
+	return path
+}
+
 // policyConfigFrozen is the F24A/F30 scope cut: while client-key policies exist in
 // the runtime config or in config.yaml (a change deferred to restart), management
 // must not mutate the shared config or rewrite config.yaml. Unreadable/unparsable
@@ -459,13 +485,27 @@ func (h *Handler) policyConfigFrozenLocked() bool {
 	if err != nil {
 		return !os.IsNotExist(err)
 	}
-	var disk struct {
-		Policies yaml.Node `yaml:"api-key-policies"`
-	}
-	if yaml.Unmarshal(data, &disk) != nil {
+	var disk yaml.Node
+	if yaml.Unmarshal(data, &disk) != nil || len(disk.Content) == 0 {
 		return true
 	}
-	return disk.Policies.Kind != 0
+	root := disk.Content[0]
+	var shape any
+	if root.Decode(&shape) != nil {
+		return true
+	}
+	// Decode both policy paths so YAML merge keys and canonical access policies
+	// cannot bypass the fork's restart-only mutation fence.
+	var policies struct {
+		Policies yaml.Node `yaml:"api-key-policies"`
+		Access   struct {
+			Policies yaml.Node `yaml:"api-key-policies"`
+		} `yaml:"access"`
+	}
+	if root.Decode(&policies) != nil {
+		return true
+	}
+	return policies.Policies.Kind != 0 || policies.Access.Policies.Kind != 0
 }
 
 // persist saves the current in-memory config to disk.
@@ -483,7 +523,7 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		return false
 	}
 	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); err != nil {
 		if respondStaleConfigConflict(c, err) {
 			return false
 		}

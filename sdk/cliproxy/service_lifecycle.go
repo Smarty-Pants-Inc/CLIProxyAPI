@@ -5,18 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -43,6 +45,9 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	ctx, runCancel := context.WithCancel(ctx)
+	s.cfgMu.Lock()
+	s.antigravityContext = ctx
+	s.cfgMu.Unlock()
 	s.homeMu.Lock()
 	s.runCancel = runCancel
 	s.homeMu.Unlock()
@@ -55,6 +60,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.homeMu.Unlock()
 	}()
 
+	s.startModelCatalogUpdaters(ctx)
+
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
@@ -62,11 +69,11 @@ func (s *Service) Run(ctx context.Context) error {
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
-		if err := s.Shutdown(shutdownCtx); err != nil {
-			log.Errorf("service shutdown returned error: %v", err)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+		if errShutdown := s.Shutdown(shutdownCtx); errShutdown != nil {
+			log.Errorf("service shutdown returned error: %v", errShutdown)
 		}
 	}()
 
@@ -213,6 +220,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
+	if !homeEnabled {
+		go s.runAntigravityModelRefresh(ctx)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -223,7 +233,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 }
 
-// Shutdown gracefully stops background workers and the HTTP server.
+// Shutdown stops background workers and immediately closes the HTTP server.
 // It ensures all resources are properly cleaned up and connections are closed.
 // The shutdown is idempotent and can be called multiple times safely.
 //
@@ -240,6 +250,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
 		if ctx == nil {
 			ctx = context.Background()
+		}
+
+		s.homeMu.Lock()
+		runCancel := s.runCancel
+		s.homeMu.Unlock()
+		if runCancel != nil {
+			runCancel()
 		}
 
 		s.homeLifecycleMu.Lock()
@@ -332,12 +349,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		// no legacy clients to persist
 
 		if s.server != nil {
-			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			if err := s.server.Stop(shutdownCtx); err != nil {
-				log.Errorf("error stopping API server: %v", err)
+			if errStop := s.server.Stop(ctx); errStop != nil {
+				log.Errorf("error stopping API server: %v", errStop)
 				if shutdownErr == nil {
-					shutdownErr = err
+					shutdownErr = errStop
 				}
 			}
 		}
@@ -369,7 +384,8 @@ func (s *Service) ensureAuthDir() error {
 	info, err := os.Stat(s.cfg.AuthDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o755); mkErr != nil {
+			// Auth files hold OAuth tokens: owner-only.
+			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o700); mkErr != nil {
 				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
 			}
 			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
@@ -380,5 +396,30 @@ func (s *Service) ensureAuthDir() error {
 	if !info.IsDir() {
 		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
 	}
+	// Tighten a group/world-accessible directory left by older releases
+	// (created 0755). Windows has no POSIX mode bits to tighten.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		// Fail closed: tokens must not be served from a directory others can read.
+		if errChmod := chmodAuthDir(s.cfg.AuthDir, 0o700); errChmod != nil {
+			return fmt.Errorf("cliproxy: auth directory %s has mode %#o and could not be restricted to owner-only 0700 (fix it with: chmod 700 %s): %w", s.cfg.AuthDir, info.Mode().Perm(), s.cfg.AuthDir, errChmod)
+		}
+		log.Warnf("auth directory %s had mode %#o; restricted it to 0700", s.cfg.AuthDir, info.Mode().Perm())
+	}
 	return nil
+}
+
+// chmodAuthDir is os.Chmod; tests replace it to simulate a failure.
+var chmodAuthDir = os.Chmod
+
+// startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
+func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	proxyURL := ""
+	if cfg != nil {
+		registry.StartModelCatalogUpdaters(ctx, cfg.Models, cfg.Home.Enabled)
+		proxyURL = cfg.ProxyURL
+	}
+	executor.StartXAIVersionUpdater(ctx, proxyURL)
 }

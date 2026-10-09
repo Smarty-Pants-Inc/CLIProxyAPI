@@ -39,7 +39,10 @@ func TestConvertOpenAIResponsesRequestToCodexReasoningStatusMixedHistory(t *test
 	}
 
 	for _, stream := range []bool{false, true} {
-		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, stream)
+		output, errConvert := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, stream)
+		if errConvert != nil {
+			t.Fatalf("stream=%v: convert request: %v", stream, errConvert)
+		}
 		if got := decodeReasoningStatusRequest(t, output); !reflect.DeepEqual(got, want) {
 			t.Fatalf("stream=%v: only reasoning item status should change:\n got: %s\nwant: %#v", stream, output, want)
 		}
@@ -60,7 +63,10 @@ func TestConvertOpenAIResponsesRequestToCodexReasoningStatusMixedHistory(t *test
 		if !bytes.Equal(inputJSON, original) {
 			t.Fatal("conversion mutated the caller's input")
 		}
-		second := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", output, stream)
+		second, errSecond := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", output, stream)
+		if errSecond != nil {
+			t.Fatalf("stream=%v: convert cleaned request: %v", stream, errSecond)
+		}
 		if !bytes.Equal(second, output) || &second[0] != &output[0] {
 			t.Fatal("already-cleaned history should be returned unchanged without copying the request")
 		}
@@ -76,7 +82,10 @@ func TestConvertOpenAIResponsesRequestToCodexReasoningStatusEscapedKey(t *testin
 	}
 	want := decodeReasoningStatusRequest(t, request)
 	delete(want["input"].([]any)[0].(map[string]any), "status")
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+	output, errConvert := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+	if errConvert != nil {
+		t.Fatalf("convert request: %v", errConvert)
+	}
 	if got := decodeReasoningStatusRequest(t, output); !reflect.DeepEqual(got, want) {
 		t.Fatalf("escaped reasoning status was not stripped without other changes: %s", output)
 	}
@@ -94,7 +103,10 @@ func TestConvertOpenAIResponsesRequestToCodexReasoningStatusUnchanged(t *testing
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := []byte(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"status":"completed","input":` + testCase.input + `}`)
-			output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+			output, errConvert := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+			if errConvert != nil {
+				t.Fatalf("convert request: %v", errConvert)
+			}
 			if !bytes.Equal(output, request) || &output[0] != &request[0] {
 				t.Fatal("history without reasoning item status should retain the original request bytes and backing array")
 			}
@@ -111,7 +123,10 @@ func TestConvertOpenAIResponsesRequestToCodexReasoningStatusAllocationScaling(t 
 	small := makeReasoningStatusHistory(64)
 	large := makeReasoningStatusHistory(256)
 	for _, request := range [][]byte{small, large} {
-		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+		output, errConvert := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+		if errConvert != nil {
+			t.Fatalf("convert request: %v", errConvert)
+		}
 		items := gjson.GetBytes(output, "input").Array()
 		if len(items) != len(gjson.GetBytes(request, "input").Array()) {
 			t.Fatal("conversion dropped history items")
@@ -127,8 +142,14 @@ func TestConvertOpenAIResponsesRequestToCodexReasoningStatusAllocationScaling(t 
 		}
 	}
 
-	smallBytes := reasoningStatusConversionBytesPerRun(small)
-	largeBytes := reasoningStatusConversionBytesPerRun(large)
+	smallBytes, errSmall := reasoningStatusConversionBytesPerRun(small)
+	if errSmall != nil {
+		t.Fatalf("sample small history: %v", errSmall)
+	}
+	largeBytes, errLarge := reasoningStatusConversionBytesPerRun(large)
+	if errLarge != nil {
+		t.Fatalf("sample large history: %v", errLarge)
+	}
 	t.Logf("small: %d request bytes, %d allocated bytes/op; large: %d request bytes, %d allocated bytes/op; allocation growth: %.2fx", len(small), smallBytes, len(large), largeBytes, float64(largeBytes)/float64(smallBytes))
 	// Leave ample room for allocator size classes and linear parser overhead;
 	// the previous implementation allocates hundreds of request copies here.
@@ -173,19 +194,24 @@ func makeReasoningStatusHistory(groups int) []byte {
 	return []byte(builder.String())
 }
 
-func reasoningStatusConversionBytesPerRun(request []byte) uint64 {
+func reasoningStatusConversionBytesPerRun(request []byte) (uint64, error) {
 	// Fixed repetitions keep this probe bounded even on the quadratic version.
 	// Fixture construction, output checks, and logging stay outside the sample.
+	// Only a nil-error check occurs inside; the caller reports errors afterward.
 	// These tests deliberately do not run in parallel because MemStats is global.
 	const runs = 3
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	var output []byte
+	var errConvert error
 	for i := 0; i < runs; i++ {
-		output = ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+		output, errConvert = ConvertOpenAIResponsesRequestToCodex("gpt-5.6", request, true)
+		if errConvert != nil {
+			return 0, errConvert
+		}
 	}
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(output)
-	return (after.TotalAlloc - before.TotalAlloc) / runs
+	return (after.TotalAlloc - before.TotalAlloc) / runs, nil
 }

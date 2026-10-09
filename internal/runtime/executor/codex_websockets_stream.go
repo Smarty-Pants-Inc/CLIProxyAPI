@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -88,7 +88,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
+	wsReqBody := frameCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -134,14 +134,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if cliproxyexecutor.UpstreamAttempted(dialCtx) {
 				cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			}
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return nil, statusErr{code: respHS.StatusCode, msg: string(applyCodexIdentityExposeResponsePayload(bodyErr, identityState))}
 		}
 		if cliproxyexecutor.UpstreamAttempted(dialCtx) {
 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			unlockStreamSession()
-			return nil, newCodexStatusErrWithCooling(respHS.StatusCode, bodyErr, e.modelLevelCooling())
+			return nil, newCodexStatusErrWithCooling(respHS.StatusCode, applyCodexIdentityExposeResponsePayload(bodyErr, identityState), e.modelLevelCooling())
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		unlockStreamSession()
@@ -206,7 +206,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			readCh = sess.activate(conn)
 			restoreMultiAgentV2 = !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
+			wsReqBodyRetry := frameCodexWebsocketRequestBody(upstreamBody)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
 				Method:    "WEBSOCKET",
@@ -399,7 +399,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				unverifiedObserverEvents = append(unverifiedObserverEvents, bytes.Clone(payload))
 			}
 
-			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+			if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				if sess != nil {
 					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
 					sess.clearActive(conn, readCh)
@@ -425,7 +425,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				return nil, wsErr
 			}
-			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				// The request decides retry versus final refusal. The handler writes a final
 				// refusal before closing; disconnect publication must not race that write.
 				failoverPending := replaySafe && (isCodexOverloadBootstrapFailure(terminalBody) || isCodexUsageLimitError(terminalBody))
@@ -722,7 +722,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return
 			}
 
-			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+			if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				if sess != nil {
@@ -740,7 +740,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: markCodexQuotaRefusal(wsErr, payload)})
 				return
 			}
-			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				if sess != nil {
@@ -875,16 +875,17 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	}
 	originalPayload := originalPayloadSource
 	isCompat := e.resolveCodexModelIsCompat(auth, req, baseModel)
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true, isCompat)
-
-	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+	originalTranslated, body, updatesChanged, err := translateCodexRequestPairWithUpdateIntent(from, to, baseModel, originalPayload, req.Payload, true, isCompat)
 	if err != nil {
 		return nil, err
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
+	if err != nil {
+		return nil, err
+	}
+
+	finalizePayload := helps.NewPayloadFinalizer(e.cfg, "codex-websockets", baseModel, to.String(), "", originalTranslated, req, opts)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = normalizeCodexInstructions(body, preserveNativeOutput)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
@@ -894,7 +895,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
 	body = helps.NormalizeCodexToolSchemas(body)
 	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
-	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
+	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, isCompat)
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if errReplay != nil {
 		return nil, errReplay
@@ -910,10 +911,16 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if errPromptCache != nil {
 		return nil, errPromptCache
 	}
-	clientBody := body
-	var identityState codexIdentityConfuseState
+	body = helps.SanitizeCodexInputItemIDs(body)
+	// Remap credential-scoped identifiers before the payload rules run, so the
+	// rules stay the final barrier; the client view restores the originals.
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+	beforeRulesKey := codexPromptCacheKey(upstreamBody)
+	upstreamBody = finalizePayload(upstreamBody)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, upstreamBody)
+	clientBody := applyCodexIdentityExposeResponsePayload(upstreamBody, identityState)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, preserveNativeOutput, opts.Headers)
+	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, upstreamBody, opts.Headers)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 

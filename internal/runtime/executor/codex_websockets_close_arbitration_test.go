@@ -13,12 +13,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
-	auth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	execution "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
+	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	execution "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -40,6 +40,17 @@ type arbitrationExecutor struct {
 	decisionGate <-chan struct{}
 	session      chan *codexWebsocketSession
 	auto         *CodexAutoExecutor
+}
+
+// Keep the real observer instrumentation when v8 scopes an API-key executor.
+// The promoted base method would otherwise discard this wrapper entirely.
+func (e *arbitrationExecutor) ForAPIKey() auth.ProviderExecutor {
+	clone := *e
+	clone.CodexWebsocketsExecutor = e.CodexWebsocketsExecutor.ForAPIKey().(*CodexWebsocketsExecutor)
+	if e.auto != nil {
+		clone.auto = e.auto.ForAPIKey().(*CodexAutoExecutor)
+	}
+	return &clone
 }
 
 func (e *arbitrationExecutor) ExecuteStream(ctx context.Context, a *auth.Auth, req execution.Request, opts execution.Options) (*execution.StreamResult, error) {

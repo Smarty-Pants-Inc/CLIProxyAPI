@@ -6,9 +6,10 @@ import (
 	"strings"
 	"time"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -101,7 +102,7 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 			return nil, errContext
 		}
 		if isClaudeOAuthScope403(errProfile) {
-			log.Debugf("Claude OAuth account profile lookup returned 403 for auth %s: %v (falling back to stable credential identity)", auth.ID, errProfile)
+			log.WithField("error", logging.SafeErrorDiagnostic(errProfile)).Debug("Claude OAuth account profile lookup returned 403 (falling back to stable credential identity)")
 			seed := helps.ClaudeCLIAuthIdentitySeed(auth)
 			if seed == "" {
 				seed = "claude-oauth-fallback|" + apiKey
@@ -113,7 +114,7 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 		return nil, fmt.Errorf("populate Claude OAuth account profile: %w", errProfile)
 	}
 	if profile == nil || strings.TrimSpace(profile.Account.UUID) == "" {
-		log.Debugf("Claude OAuth account profile lookup returned empty account UUID for auth %s (falling back to stable credential identity)", auth.ID)
+		log.Debug("Claude OAuth account profile lookup returned empty account UUID (falling back to stable credential identity)")
 		seed := helps.ClaudeCLIAuthIdentitySeed(auth)
 		if seed == "" {
 			seed = "claude-oauth-fallback|" + apiKey

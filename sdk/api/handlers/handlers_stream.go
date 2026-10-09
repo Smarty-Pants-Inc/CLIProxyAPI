@@ -7,14 +7,14 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/sse"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/sse"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"golang.org/x/net/context"
 )
 
@@ -153,6 +153,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		var completionErr error
 		var streamUsage helps.StreamUsageBuffer
 		defer func() {
+			completionOutcome, completionStatus, completionErr = streamDeliveryCompletion(ctx, completionOutcome, completionStatus, completionErr)
 			lifecycle.complete(completionOutcome, completionStatus, completionErr)
 			if reporter != nil && !nestedTracker.hasNestedExecution() {
 				if completionOutcome != pluginapi.RequestCompletionSucceeded && completionErr != nil {
@@ -188,11 +189,6 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 						select {
 						case errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}:
 						case <-done:
-							completionOutcome = pluginapi.RequestCompletionCanceled
-							completionStatus = 0
-							if ctx != nil {
-								completionErr = ctx.Err()
-							}
 						}
 					}
 				}
@@ -206,11 +202,6 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 				select {
 				case errChan <- errMsg:
 				case <-done:
-					completionOutcome = pluginapi.RequestCompletionCanceled
-					completionStatus = 0
-					if ctx != nil {
-						completionErr = ctx.Err()
-					}
 				}
 				return
 			}
@@ -262,11 +253,6 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					select {
 					case errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}:
 					case <-done:
-						completionOutcome = pluginapi.RequestCompletionCanceled
-						completionStatus = 0
-						if ctx != nil {
-							completionErr = ctx.Err()
-						}
 					}
 					return
 				}
@@ -305,6 +291,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errs
 	}
 	originalRequestedModel := modelName
+	// Speech-only models are reachable solely through the speech entry protocol.
+	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
@@ -328,6 +316,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
+	if execOptions.Path != "" {
+		reqMeta[coreexecutor.RequestPathMetadataKey] = execOptions.Path
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
@@ -649,6 +640,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		completionStatus := http.StatusOK
 		var completionErr error
 		defer func() {
+			completionOutcome, completionStatus, completionErr = streamDeliveryCompletion(ctx, completionOutcome, completionStatus, completionErr)
 			lifecycle.complete(completionOutcome, completionStatus, completionErr)
 		}()
 		defer close(dataChan)
@@ -695,11 +687,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 			completionStatus = bootstrapErr.StatusCode
 			completionErr = bootstrapErr.Error
-			if !sendErr(bootstrapErr) && ctx != nil && ctx.Err() != nil {
-				completionOutcome = pluginapi.RequestCompletionCanceled
-				completionStatus = 0
-				completionErr = ctx.Err()
-			}
+			_ = sendErr(bootstrapErr)
 			return
 		}
 
@@ -745,11 +733,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
 				completionErr = chunk.Err
-				if !sendErr(errMsg) && ctx != nil && ctx.Err() != nil {
-					completionOutcome = pluginapi.RequestCompletionCanceled
-					completionStatus = 0
-					completionErr = ctx.Err()
-				}
+				_ = sendErr(errMsg)
 				return
 			}
 			if len(chunk.Payload) == 0 {
@@ -760,11 +744,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
 				completionErr = errMsg.Error
-				if !sendErr(errMsg) && ctx != nil && ctx.Err() != nil {
-					completionOutcome = pluginapi.RequestCompletionCanceled
-					completionStatus = 0
-					completionErr = ctx.Err()
-				}
+				_ = sendErr(errMsg)
 				return
 			}
 			if !deliverable {
@@ -977,4 +957,23 @@ func validateSSEDataJSON(chunk []byte) error {
 		return errAdd
 	}
 	return state.Finish()
+}
+
+// streamDeliveryCompletion reconciles execution cleanup with the HTTP outcome.
+// Call only after closing output channels: the consumer may need EOF to finish.
+func streamDeliveryCompletion(ctx context.Context, outcome pluginapi.RequestCompletionOutcome, status int, err error) (pluginapi.RequestCompletionOutcome, int, error) {
+	if ctx == nil {
+		return outcome, status, err
+	}
+	deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
+	if !tracked || (err != nil && !errors.Is(err, context.Canceled)) || outcome == pluginapi.RequestCompletionRejected {
+		return outcome, status, err
+	}
+	if deliveryErr == nil {
+		return pluginapi.RequestCompletionSucceeded, http.StatusOK, nil
+	}
+	if errors.Is(deliveryErr, context.Canceled) || errors.Is(deliveryErr, context.DeadlineExceeded) {
+		return pluginapi.RequestCompletionCanceled, 0, deliveryErr
+	}
+	return pluginapi.RequestCompletionFailed, executionErrorMessage(deliveryErr).StatusCode, deliveryErr
 }
