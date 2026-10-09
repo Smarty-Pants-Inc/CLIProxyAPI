@@ -51,8 +51,15 @@ const (
 	// would cost about as much as the projection itself.
 	sessionProjectionCacheMinPayload = 16 << 10
 	sessionProjectionCacheEntries    = 256
-	// Projections above this size are not cached to keep the cache memory bounded.
+	// A projection is never built beyond this size. The builder checks the running
+	// size before copying each member and aborts without copying the member that
+	// would exceed it; such payloads are read directly (the legacy path).
 	sessionProjectionCacheMaxProjection = 64 << 10
+	// sessionPayloadMaxKeyRaw bounds the raw (quoted, escaped) length of a key that
+	// can still unescape to a projected key: the longest projected key is 22 bytes,
+	// each byte at most 6 escaped bytes, plus the quotes. Longer escaped keys are
+	// skipped without unescaping them.
+	sessionPayloadMaxKeyRaw = 22*6 + 2
 	// Payloads above this size are projected on every call and never cached.
 	sessionProjectionCacheMaxPayload = 16 << 20
 	// Total bytes (payload copies plus projections) held by the cache; the
@@ -73,8 +80,8 @@ const (
 //
 // Memoization rule: the view is a pure function of the payload bytes. Entries are
 // looked up by payload length plus a per-process seeded 64-bit hash, but the hash
-// is never trusted as identity: each entry keeps a private copy of the payload and
-// is reused only when that copy is byte-for-byte equal to payload. Repeat calls
+// is never trusted as identity for a projection: each projection entry keeps a
+// private copy of the payload and is reused only when that copy is byte-for-byte equal to payload. Repeat calls
 // for the same request (the handler, session.Enrich and the auth selector all
 // pass the same body) reuse one projection; any different payload (a translated
 // or interceptor-rewritten body, a hash collision, or nil) is projected afresh
@@ -82,6 +89,13 @@ const (
 // never cached, and the cache is bounded by entry count and total bytes. Headers
 // and metadata are never cached and are always evaluated by the caller on every
 // call.
+//
+// When no projection can be used (invalid JSON, not an object, or a projection
+// that would exceed sessionProjectionCacheMaxProjection) the payload itself is
+// returned and read directly, exactly as before the projection existed. That
+// outcome is cached as a fallback marker holding neither a projection nor a body
+// copy: a fallback hit only makes the caller read its own payload, which is
+// correct for any payload, so it needs no byte verification.
 func sessionPayloadView(payload []byte) []byte {
 	if len(payload) == 0 {
 		return payload
@@ -101,45 +115,167 @@ func projectSessionPayload(payload []byte) ([]byte, bool) {
 	if !gjson.ValidBytes(payload) {
 		return nil, false
 	}
-	root := gjson.Parse(unsafe.String(unsafe.SliceData(payload), len(payload)))
-	if !root.IsObject() {
+	doc := unsafe.String(unsafe.SliceData(payload), len(payload))
+	i := skipJSONSpace(doc, 0)
+	if i >= len(doc) || doc[i] != '{' {
 		return nil, false
 	}
-	return appendSessionProjection(make([]byte, 0, 256), root, true), true
+	b := sessionProjectionBuilder{dst: make([]byte, 0, 256), limit: sessionProjectionCacheMaxProjection}
+	if !b.appendObject(doc[i:], true) {
+		return nil, false
+	}
+	return b.dst, true
 }
 
-func appendSessionProjection(dst []byte, obj gjson.Result, top bool) []byte {
-	dst = append(dst, '{')
+// sessionProjectionBuilder appends the projection to dst and refuses any append
+// that would grow dst beyond limit, so an oversized member is never copied.
+type sessionProjectionBuilder struct {
+	dst   []byte
+	limit int
+}
+
+func (b *sessionProjectionBuilder) add(parts ...string) bool {
+	n := len(b.dst)
+	for _, p := range parts {
+		n += len(p)
+	}
+	if n > b.limit {
+		return false
+	}
+	for _, p := range parts {
+		b.dst = append(b.dst, p...)
+	}
+	return true
+}
+
+// appendObject projects obj, the raw text of a JSON object taken from a payload
+// that already passed gjson.ValidBytes. Members are scanned in place: keys and
+// values are sliced from obj, never unescaped or copied, except that a short
+// escaped key is unescaped to compare it with the projected key set. It reports
+// false when the projection would exceed b.limit.
+func (b *sessionProjectionBuilder) appendObject(obj string, top bool) bool {
+	if !b.add("{") {
+		return false
+	}
 	first := true
-	obj.ForEach(func(key, value gjson.Result) bool {
-		var raw string
+	i := 1
+	for {
+		i = skipJSONSpace(obj, i)
+		if i >= len(obj) || obj[i] == '}' {
+			break
+		}
+		if obj[i] == ',' {
+			i++
+			continue
+		}
+		keyEnd, keyEscaped := scanJSONString(obj, i)
+		keyRaw := obj[i:keyEnd]
+		i = skipJSONSpace(obj, keyEnd)
+		if i < len(obj) && obj[i] == ':' {
+			i++
+		}
+		i = skipJSONSpace(obj, i)
+		valueEnd := scanJSONValue(obj, i)
+		valueRaw := obj[i:valueEnd]
+		i = valueEnd
+
+		var key string
+		switch {
+		case !keyEscaped:
+			key = keyRaw[1 : len(keyRaw)-1]
+		case len(keyRaw) <= sessionPayloadMaxKeyRaw:
+			key = gjson.Parse(keyRaw).Str
+		default:
+			continue
+		}
+		raw := valueRaw
 		nested := false
-		_, wanted := sessionPayloadKeys[key.Str]
+		_, wanted := sessionPayloadKeys[key]
 		switch {
 		case wanted:
-			raw = value.Raw
-		case top && key.Str == sessionPayloadContentsKey:
+		case top && key == sessionPayloadContentsKey:
 			raw = "null"
-		case top && key.Str == sessionPayloadRequestKey:
-			raw = value.Raw
-			nested = value.IsObject()
+		case top && key == sessionPayloadRequestKey:
+			nested = valueRaw[0] == '{'
 		default:
-			return true
+			continue
 		}
-		if !first {
-			dst = append(dst, ',')
+		sep := ","
+		if first {
+			sep = ""
 		}
 		first = false
-		dst = append(dst, key.Raw...)
-		dst = append(dst, ':')
 		if nested {
-			dst = appendSessionProjection(dst, value, false)
-		} else {
-			dst = append(dst, raw...)
+			if !b.add(sep, keyRaw, ":") || !b.appendObject(valueRaw, false) {
+				return false
+			}
+		} else if !b.add(sep, keyRaw, ":", raw) {
+			return false
 		}
-		return true
-	})
-	return append(dst, '}')
+	}
+	return b.add("}")
+}
+
+func skipJSONSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// scanJSONString returns the index just past the string starting at s[i] == '"'
+// and whether it contains escapes.
+func scanJSONString(s string, i int) (int, bool) {
+	escaped := false
+	for i++; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			escaped = true
+			i++
+		case '"':
+			return i + 1, escaped
+		}
+	}
+	return len(s), escaped
+}
+
+// scanJSONValue returns the index just past the valid JSON value starting at s[i].
+func scanJSONValue(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch s[i] {
+	case '"':
+		end, _ := scanJSONString(s, i)
+		return end
+	case '{', '[':
+		depth := 0
+		for i < len(s) {
+			switch s[i] {
+			case '"':
+				i, _ = scanJSONString(s, i)
+				continue
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return i + 1
+				}
+			}
+			i++
+		}
+		return i
+	default:
+		for i < len(s) {
+			switch s[i] {
+			case ',', '}', ']', ' ', '\t', '\n', '\r':
+				return i
+			}
+			i++
+		}
+		return i
+	}
 }
 
 type sessionProjectionKey struct {
@@ -149,7 +285,8 @@ type sessionProjectionKey struct {
 
 // sessionProjectionEntry pairs a private copy of the payload bytes with their
 // projection. The key hash is only a lookup hint; body is compared byte for byte
-// before view is reused.
+// before view is reused. A fallback entry holds no body and no view: it only
+// tells the caller to read its own payload directly.
 type sessionProjectionEntry struct {
 	body     []byte
 	view     []byte
@@ -194,22 +331,31 @@ func (c *sessionProjectionCache) view(payload []byte) []byte {
 		return payload
 	}
 	key := sessionProjectionKey{n: len(payload), sum: c.sum(payload)}
-	if entry, ok := c.get(key); ok && bytes.Equal(entry.body, payload) {
+	if entry, ok := c.get(key); ok {
+		// A fallback hit, even on a hash collision, only makes the caller read
+		// payload itself, so it is safe without comparing bytes.
 		if entry.fallback {
 			return payload
 		}
-		return entry.view
+		if bytes.Equal(entry.body, payload) {
+			return entry.view
+		}
+	}
+	if sessionProjectionBuildObserver != nil {
+		sessionProjectionBuildObserver()
 	}
 	view, ok := projectSessionPayload(payload)
 	if !ok {
-		c.put(key, sessionProjectionEntry{body: bytes.Clone(payload), fallback: true})
+		c.put(key, sessionProjectionEntry{fallback: true})
 		return payload
 	}
-	if len(view) <= sessionProjectionCacheMaxProjection {
-		c.put(key, sessionProjectionEntry{body: bytes.Clone(payload), view: view})
-	}
+	c.put(key, sessionProjectionEntry{body: bytes.Clone(payload), view: view})
 	return view
 }
+
+// sessionProjectionBuildObserver is a test hook called whenever the cache builds
+// a projection. It is nil in production.
+var sessionProjectionBuildObserver func()
 
 func (c *sessionProjectionCache) sum(payload []byte) uint64 {
 	if c.hash != nil {
