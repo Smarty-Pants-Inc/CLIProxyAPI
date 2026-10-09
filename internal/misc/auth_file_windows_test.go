@@ -3,9 +3,11 @@
 package misc
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -98,6 +100,46 @@ func windowsAuthBroadInheritedDir(t *testing.T) string {
 	if !strings.Contains(sd.String(), ";;;WD)") {
 		t.Fatalf("fixture has no broad Everyone grant: %s", sd.String())
 	}
+	return dir
+}
+
+func authFileRenameErrorDir(t *testing.T) string {
+	t.Helper()
+	dir := windowsAuthBroadInheritedDir(t)
+	original := windowsAuthDescriptor(t, dir)
+	name, err := windows.UTF16PtrFromString(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// Protecting the auth DACL can remove inherited grants from the
+		// non-empty destination directory. Restore those fixture grants so
+		// TempDir can enumerate and remove it. Reopen with READ_CONTROL as
+		// well as WRITE_DAC: do not rely on a stale WRITE_DAC-only handle.
+		// The current-user owner-only DACL permits this without elevation.
+		handle, errOpen := windows.CreateFile(name, windows.READ_CONTROL|windows.WRITE_DAC,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		if errOpen != nil {
+			t.Errorf("open directory DACL recovery handle: %v", errOpen)
+			return
+		}
+		defer func() {
+			if errClose := windows.CloseHandle(handle); errClose != nil {
+				t.Errorf("close directory DACL recovery handle: %v", errClose)
+			}
+		}()
+		dacl, _, errDACL := original.DACL()
+		if errDACL != nil {
+			t.Errorf("original directory DACL: %v", errDACL)
+			return
+		}
+		if errRestore := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, dacl, nil); errRestore != nil {
+			t.Errorf("restore directory DACL: %v", errRestore)
+		}
+	})
 	return dir
 }
 
@@ -196,6 +238,46 @@ func TestWindowsAuthReadOnlyTargetPreserved(t *testing.T) {
 	windowsAuthAssertOnlyTarget(t, dir)
 }
 
+func TestWindowsAuthConfiguredSymlinkTrust(t *testing.T) {
+	dir := windowsAuthBroadInheritedDir(t)
+	path := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(path, []byte("old-token"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	beforeDir := windowsAuthDescriptor(t, dir).String()
+	beforeFile := windowsAuthDescriptor(t, path).String()
+	link := filepath.Join(filepath.Dir(dir), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("directory symlink requires Windows developer mode or privilege: %v", err)
+	}
+	err := WriteAuthFileAtomic(filepath.Join(link, "auth.json"), []byte("new-token"))
+	want := "new-token"
+	// ERROR_UNTRUSTED_MOUNT_POINT is not yet provided by x/sys/windows.
+	if errors.Is(err, syscall.Errno(448)) {
+		if !strings.Contains(err.Error(), "restrict auth directory") || !strings.Contains(err.Error(), "refusing untrusted mount point") {
+			t.Fatalf("expected clear refusal before staging: %v", err)
+		}
+		want = "old-token"
+		if after := windowsAuthDescriptor(t, dir).String(); after != beforeDir {
+			t.Fatalf("untrusted symlink changed directory DACL: before %s, after %s", beforeDir, after)
+		}
+		if after := windowsAuthDescriptor(t, path).String(); after != beforeFile {
+			t.Fatalf("untrusted symlink changed target DACL: before %s, after %s", beforeFile, after)
+		}
+		t.Log("untrusted configured symlink refused before staging or writing token bytes")
+	} else {
+		if err != nil {
+			t.Fatalf("write through trusted configured symlink: %v", err)
+		}
+		windowsAuthAssertPrivate(t, dir)
+		windowsAuthAssertPrivate(t, path)
+	}
+	if got, errRead := os.ReadFile(path); errRead != nil || string(got) != want {
+		t.Fatalf("target content = %q, %v; want %q", got, errRead, want)
+	}
+	windowsAuthAssertOnlyTarget(t, dir)
+}
+
 func TestWindowsAuthDirectoryACLDenialPreservesTarget(t *testing.T) {
 	dir := windowsAuthBroadInheritedDir(t)
 	path := filepath.Join(dir, "auth.json")
@@ -204,38 +286,25 @@ func TestWindowsAuthDirectoryACLDenialPreservesTarget(t *testing.T) {
 	}
 	windowsAuthFixtureDACL(t, path, "D:P(A;;FA;;;"+windowsAuthUser(t).String()+")(A;;FA;;;WD)")
 	before := windowsAuthDescriptor(t, path).String()
-	name, err := windows.UTF16PtrFromString(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Keep a pre-authorized handle solely to restore the denial fixture, even
-	// though subsequent opens requesting WRITE_DAC will fail.
-	handle, err := windows.CreateFile(name, windows.WRITE_DAC,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-	if err != nil {
-		t.Fatalf("open fixture recovery handle: %v", err)
-	}
-	original := windowsAuthDescriptor(t, dir)
+	// The denial is confined to a child of the fully controlled fixture root.
+	// It denies only WRITE_DAC, not DELETE or FILE_DELETE_CHILD, so even a
+	// non-admin can remove it without restoring its DACL. OWNER RIGHTS below
+	// deliberately prevents recovery via the owner's implicit WRITE_DAC.
 	t.Cleanup(func() {
-		dacl, _, err := original.DACL()
-		if err != nil {
-			t.Errorf("original DACL: %v", err)
-		} else if err = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
-			windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
-			nil, nil, dacl, nil); err != nil {
-			t.Errorf("restore directory DACL: %v", err)
-		}
-		if err := windows.CloseHandle(handle); err != nil {
-			t.Errorf("close fixture handle: %v", err)
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove ACL denial fixture: %v", err)
 		}
 	})
 	sid := windowsAuthUser(t).String()
 	// OWNER RIGHTS suppresses the owner's implicit WRITE_DAC grant so this
 	// fixture exercises an actual ACL refusal even when running as the owner.
 	windowsAuthFixtureDACL(t, dir, "D:P(D;;WD;;;"+sid+")(A;;RC;;;OW)(A;;FA;;;"+sid+")")
-	if err := WriteAuthFileAtomic(path, []byte("new-token")); err == nil || !strings.Contains(err.Error(), "restrict auth directory") {
+	denied := windowsAuthDescriptor(t, dir).String()
+	if err := WriteAuthFileAtomic(path, []byte("new-token")); !errors.Is(err, windows.ERROR_ACCESS_DENIED) || !strings.Contains(err.Error(), "restrict auth directory") {
 		t.Fatalf("expected directory WRITE_DAC refusal before staging, got %v", err)
+	}
+	if after := windowsAuthDescriptor(t, dir).String(); after != denied {
+		t.Fatalf("denied directory DACL changed: before %s, after %s", denied, after)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "old-token" {
 		t.Fatalf("existing target changed: %q, %v", got, err)

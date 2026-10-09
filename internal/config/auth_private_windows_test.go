@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,14 +83,36 @@ func TestWindowsRestrictAuthDirFollowsConfiguredSymlink(t *testing.T) {
 	if err = os.Symlink(target, link); err != nil {
 		t.Skipf("directory symlink requires Windows developer mode or privilege: %v", err)
 	}
-	for _, path := range []string{link, link + string(os.PathSeparator)} {
-		if err = RestrictAuthDir(path); err != nil {
+	before, err := windows.GetNamedSecurityInfo(target, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	untrusted := false
+	for i, path := range []string{link, link + string(os.PathSeparator)} {
+		err = RestrictAuthDir(path)
+		if i == 0 {
+			untrusted = errors.Is(err, errorUntrustedMountPoint)
+		}
+		if untrusted {
+			// Developer mode allows non-admin symlink creation, not trusted
+			// traversal. Refuse it without bypassing Windows redirection trust.
+			if !errors.Is(err, errorUntrustedMountPoint) || !strings.Contains(err.Error(), "refusing untrusted mount point") {
+				t.Fatalf("expected clear untrusted mount point refusal: %v", err)
+			}
+		} else if err != nil {
 			t.Fatalf("refused configured directory symlink: %v", err)
 		}
 	}
 	after, err := windows.GetNamedSecurityInfo(target, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if untrusted {
+		if after.String() != before.String() {
+			t.Fatalf("untrusted symlink refusal changed target security: before %s, after %s", before.String(), after.String())
+		}
+		t.Log("untrusted configured symlink refused without changing target security")
+		return
 	}
 	if !hasPrivateConfigDACL(after, expected) {
 		t.Fatal("configured directory symlink target lacks current-user owner and protected exact DACL")

@@ -71,16 +71,21 @@ func TestWriteAuthFileAtomicMissingDirLeavesNothing(t *testing.T) {
 }
 
 func TestWriteAuthFileAtomicRemovesTempOnRenameError(t *testing.T) {
-	dir := t.TempDir()
+	// Keep the TempDir parent unchanged. On Windows the fixture restores
+	// inherited child access through a fresh owner-authorized recovery handle.
+	dir := authFileRenameErrorDir(t)
 	// Renaming a file over a non-empty directory fails, which exercises cleanup.
 	path := filepath.Join(dir, "auth.json")
 	if errMkdir := os.MkdirAll(filepath.Join(path, "child"), 0o700); errMkdir != nil {
 		t.Fatalf("mkdir: %v", errMkdir)
 	}
-	if errWrite := WriteAuthFileAtomic(path, []byte(`{}`)); errWrite == nil {
-		t.Fatal("expected rename error")
+	if errWrite := WriteAuthFileAtomic(path, []byte(`{}`)); errWrite == nil || !strings.Contains(errWrite.Error(), "rename temp auth file") {
+		t.Fatalf("expected rename error, got %v", errWrite)
 	}
-	entries, _ := os.ReadDir(dir)
+	entries, errReadDir := os.ReadDir(dir)
+	if errReadDir != nil {
+		t.Fatalf("read auth directory: %v", errReadDir)
+	}
 	if len(entries) != 1 || entries[0].Name() != "auth.json" {
 		names := make([]string, 0, len(entries))
 		for _, entry := range entries {
