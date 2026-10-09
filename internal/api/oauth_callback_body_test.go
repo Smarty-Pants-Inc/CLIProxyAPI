@@ -67,8 +67,8 @@ func TestOAuthCallbackPostBodyIsBounded(t *testing.T) {
 			if rr.Code != http.StatusRequestEntityTooLarge {
 				t.Fatalf("status = %d, want 413 body=%s", rr.Code, rr.Body.String())
 			}
-			if src.read > 1<<20 {
-				t.Fatalf("handler read %d bytes of a 4 MiB body; want it stopped near the 64 KiB bound", src.read)
+			if src.read > 64<<10+1 {
+				t.Fatalf("handler read %d bytes of a 4 MiB body; want at most the 64 KiB bound plus one", src.read)
 			}
 		})
 
@@ -83,13 +83,43 @@ func TestOAuthCallbackPostBodyIsBounded(t *testing.T) {
 			}
 		})
 
+		// A valid pending state: decoding only the first value would complete the callback (200).
 		t.Run(path+"/trailing-value", func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"state":"x","code":"y"} {"state":"z"}`))
+			state := "body-trailing-state-" + strings.NewReplacer("/", "-").Replace(strings.Trim(path, "/"))
+			if errRegister := managementHandlers.RegisterPluginOAuthSession(state, "gemini-cli", nil); errRegister != nil {
+				t.Fatalf("register plugin oauth session: %v", errRegister)
+			}
+			defer managementHandlers.CompleteOAuthSession(state)
+			body := `{"state":"` + state + `","code":"test-code"} {"state":"other"}`
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			rr := httptest.NewRecorder()
 			server.engine.ServeHTTP(rr, req)
 			if rr.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 body=%s", rr.Code, rr.Body.String())
+			}
+		})
+
+		// The bound is exactly 64 KiB: a body of that size is accepted, one byte more is refused.
+		t.Run(path+"/boundary", func(t *testing.T) {
+			state := "body-boundary-state-" + strings.NewReplacer("/", "-").Replace(strings.Trim(path, "/"))
+			if errRegister := managementHandlers.RegisterPluginOAuthSession(state, "gemini-cli", nil); errRegister != nil {
+				t.Fatalf("register plugin oauth session: %v", errRegister)
+			}
+			defer managementHandlers.CompleteOAuthSession(state)
+			value := `{"state":"` + state + `","code":"test-code"}`
+			for _, tc := range []struct {
+				size int
+				want int
+			}{{64 << 10, http.StatusOK}, {64<<10 + 1, http.StatusRequestEntityTooLarge}} {
+				body := value + strings.Repeat(" ", tc.size-len(value))
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				rr := httptest.NewRecorder()
+				server.engine.ServeHTTP(rr, req)
+				if rr.Code != tc.want {
+					t.Fatalf("size %d: status = %d, want %d body=%s", tc.size, rr.Code, tc.want, rr.Body.String())
+				}
 			}
 		})
 
