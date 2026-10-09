@@ -302,7 +302,7 @@ func TestGinLogrusLoggerMasksOAuthCallbackQuery(t *testing.T) {
 	if strings.Contains(message, code) || strings.Contains(message, state) {
 		t.Fatalf("access log leaked OAuth callback code/state: %q", message)
 	}
-	if want := `"` + path + "?provider=codex&code=ac_f...6789&state=fake...cdef" + `"`; !strings.Contains(message, want) {
+	if want := `"` + path + "?provider=codex&code=%5BREDACTED%5D&state=%5BREDACTED%5D" + `"`; !strings.Contains(message, want) {
 		t.Fatalf("access log = %q, want masked query %s", message, want)
 	}
 }

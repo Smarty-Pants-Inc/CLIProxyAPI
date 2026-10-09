@@ -2,6 +2,7 @@ package management
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -16,9 +17,29 @@ import (
 // ConfigV8ContextKey marks operations registered by the v8 API that save configuration.
 const ConfigV8ContextKey = "management.config-v8"
 
+// configV8MaxBodyBytes allows 4 MiB for large credential/config collections,
+// well above the ~71 KiB example config and below the 16 MiB policy-request limit.
+const configV8MaxBodyBytes = 4 << 20
+
 // ConfigV8 serves the persisted configuration using v8 names. GET is a view;
 // only a successful configuration mutation migrates the stored document.
 func (h *Handler) ConfigV8(c *gin.Context) {
+	var body []byte
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodDelete {
+		// Client-controlled upload reads must never hold the shared management lock.
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, configV8MaxBodyBytes)
+		var errRead error
+		body, errRead = io.ReadAll(c.Request.Body)
+		if errRead != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(errRead, &tooLarge) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "body_too_large"})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
+			}
+			return
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	data, err := os.ReadFile(h.configFilePath)
@@ -89,11 +110,6 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			return
 		}
 	} else {
-		body, errRead := io.ReadAll(c.Request.Body)
-		if errRead != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
-			return
-		}
 		if !yamlRequest && !json.Valid(body) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_json"})
 			return

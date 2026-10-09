@@ -3,7 +3,6 @@ package management
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,22 +16,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
-// The request-body seam gates a cooperating operator update after ConfigV8's
-// initial read and before its publication, without sleeps or live providers.
-type configV8ExternalEditBody struct {
-	reader io.Reader
-	edit   func()
-}
-
-func (b *configV8ExternalEditBody) Read(p []byte) (int, error) {
-	if b.edit != nil {
-		edit := b.edit
-		b.edit = nil
-		edit()
-	}
-	return b.reader.Read(p)
-}
-
+// The migration-warning seam gates an operator update after ConfigV8's
+// initial config read and before publication. Body reads now precede the
+// config read, so they cannot simulate a stale publication.
 func TestForkConfigV8StaleTreeWrite(t *testing.T) {
 	for _, tc := range []struct{ method, route, target, body string }{
 		{http.MethodPatch, "/v8/management/config", "/v8/management/config", `{"observability":{"logs":{"debug":true}}}`},
@@ -41,7 +27,7 @@ func TestForkConfigV8StaleTreeWrite(t *testing.T) {
 	} {
 		t.Run(tc.target, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
-			baseline := []byte("server: {port: 8317}\nobservability: {logs: {debug: false}}\n")
+			baseline := []byte("server: {port: 8317}\nobservability: {logs: {debug: false}}\nformer-feature: true\n")
 			newer := []byte("server: {port: 8999}\nobservability: {logs: {debug: false}}\n")
 			if err := config.WriteConfigAtomic(path, baseline); err != nil {
 				t.Fatal(err)
@@ -50,13 +36,22 @@ func TestForkConfigV8StaleTreeWrite(t *testing.T) {
 			original := h.cfg
 			router := gin.New()
 			router.Handle(tc.method, tc.route, h.ConfigV8)
-			body := &configV8ExternalEditBody{reader: strings.NewReader(tc.body), edit: func() {
+			edited := false
+			config.SetV8MigrationWarnFunc(func(section, _ string) {
+				if section != "former-feature" || edited {
+					return
+				}
+				edited = true
 				if err := config.WriteConfigAtomic(path, newer); err != nil {
 					t.Fatal(err)
 				}
-			}}
+			})
+			t.Cleanup(func() { config.SetV8MigrationWarnFunc(nil) })
 			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.target, body))
+			router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body)))
+			if !edited {
+				t.Fatal("external edit seam did not run")
+			}
 			if rec.Code != http.StatusConflict || rec.Body.String() != `{"error":"`+errStaleConfigMessage+`"}` {
 				t.Fatalf("stale v8 tree write = %d %s", rec.Code, rec.Body.String())
 			}

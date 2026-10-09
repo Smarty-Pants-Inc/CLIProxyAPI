@@ -271,6 +271,9 @@ func MaskSensitiveQuery(raw string) string {
 			decodedValue = valuePart
 		}
 		masked := HideAPIKey(strings.TrimSpace(decodedValue))
+		if shouldRedactQueryParam(decodedKey) {
+			masked = "[REDACTED]"
+		}
 		parts[i] = keyPart + "=" + url.QueryEscape(masked)
 		changed = true
 	}
@@ -293,11 +296,13 @@ func shouldMaskQueryParam(key string) bool {
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {
 		return true
 	}
-	// OAuth callback/PKCE values: the authorization code and state are
-	// bearer-equivalent until redeemed, and the verifier redeems the code.
-	switch key {
-	case "code", "state", "password":
-		return true
-	}
-	return strings.Contains(key, "verifier")
+	return key == "password" || shouldRedactQueryParam(key)
+}
+
+func shouldRedactQueryParam(key string) bool {
+	key = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(key)), "[]")
+	// OAuth callback/PKCE values must not expose even a prefix or suffix:
+	// the authorization code and state are bearer-equivalent until redeemed,
+	// and the verifier redeems the code.
+	return key == "code" || key == "state" || strings.Contains(key, "verifier")
 }

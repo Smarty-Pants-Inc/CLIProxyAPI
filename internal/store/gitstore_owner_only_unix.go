@@ -13,13 +13,14 @@ import (
 )
 
 // ownerOnlyWalkBeforeOpen, when set by tests, runs right before an entry is
-// opened, so a test can swap the entry for a symlink in the middle of the walk.
+// opened, after the no-follow stat, so a test can swap the entry during the walk.
 var ownerOnlyWalkBeforeOpen func(dirPath, name string)
 
 // enforceOwnerOnlyTree makes root and every directory below it 0700 and every
 // regular file 0600. It never changes a mode by path: each entry is opened
-// relative to its already-opened parent directory with O_NOFOLLOW, its true
-// type is taken from fstat on the opened descriptor, and the mode is changed
+// relative to its already-opened parent directory with O_NOFOLLOW, after a
+// no-follow stat confirms a regular file or directory. The opened descriptor's
+// type, device and inode must match that stat, and the mode is changed
 // with fchmod on that descriptor. Symlinks (including one swapped in during
 // the walk) are never followed or changed, and anything other than a
 // directory or regular file is skipped. A symlinked or non-directory root is
@@ -64,6 +65,20 @@ func enforceOwnerOnlyDirFD(fd int, dirPath string) error {
 
 func enforceOwnerOnlyEntry(parentFD int, parentPath, name string, hintDir bool) error {
 	path := filepath.Join(parentPath, name)
+	// Type()==0 can mean an unknown type, not just a regular file. Never open
+	// an entry until a no-follow stat confirms it is safe to open.
+	var before unix.Stat_t
+	if errStat := unix.Fstatat(parentFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); errStat != nil {
+		if errors.Is(errStat, unix.ENOENT) {
+			return nil
+		}
+		return fmt.Errorf("stat %s: %w", path, errStat)
+	}
+	switch before.Mode & unix.S_IFMT {
+	case unix.S_IFDIR, unix.S_IFREG:
+	default:
+		return nil
+	}
 	if ownerOnlyWalkBeforeOpen != nil {
 		ownerOnlyWalkBeforeOpen(parentPath, name)
 	}
@@ -87,6 +102,11 @@ func enforceOwnerOnlyEntry(parentFD int, parentPath, name string, hintDir bool) 
 	if errStat := unix.Fstat(fd, &stat); errStat != nil {
 		_ = unix.Close(fd)
 		return fmt.Errorf("stat %s: %w", path, errStat)
+	}
+	if stat.Mode&unix.S_IFMT != before.Mode&unix.S_IFMT || stat.Dev != before.Dev || stat.Ino != before.Ino {
+		// The entry was swapped after Fstatat; do not change the replacement.
+		_ = unix.Close(fd)
+		return nil
 	}
 	switch stat.Mode & unix.S_IFMT {
 	case unix.S_IFDIR:
