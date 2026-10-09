@@ -10,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -388,6 +389,9 @@ func (s *Service) ensureAuthDir() error {
 			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o700); mkErr != nil {
 				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
 			}
+			if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
+				return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
+			}
 			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
 			return nil
 		}
@@ -405,11 +409,17 @@ func (s *Service) ensureAuthDir() error {
 		}
 		log.Warnf("auth directory %s had mode %#o; restricted it to 0700", s.cfg.AuthDir, info.Mode().Perm())
 	}
+	if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
+		return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
+	}
 	return nil
 }
 
 // chmodAuthDir is os.Chmod; tests replace it to simulate a failure.
 var chmodAuthDir = os.Chmod
+
+// restrictAuthDir applies platform-specific protections; tests replace it to simulate a failure.
+var restrictAuthDir = misc.RestrictAuthDir
 
 // startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
 func (s *Service) startModelCatalogUpdaters(ctx context.Context) {

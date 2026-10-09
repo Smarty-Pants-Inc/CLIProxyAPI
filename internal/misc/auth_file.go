@@ -15,23 +15,25 @@ const authFileMode os.FileMode = 0o600
 // WriteAuthFileAtomic is the single atomic writer for auth and token files. It
 // replaces the file at path with data so that a concurrent reader sees either
 // the previous content or the new content, never an empty or partially written
-// file. It creates a temp file in the same directory, sets it to exactly 0600
-// (independent of umask) before any data is written, writes and fsyncs it,
-// closes it, renames it over path and then fsyncs the directory on a
-// best-effort basis. The temp file is removed on any error.
+// file. Before any data is written, it creates a private temp file in the same
+// directory: exactly 0600 on POSIX, or a protected current-user-only DACL on
+// Windows. On Windows it also restricts the parent directory before staging.
+// It writes and fsyncs the temp file, closes it, renames it over path and then
+// fsyncs the directory on a best-effort basis. The temp file is removed on any error.
 //
 // The rename replaces path itself: when path is a symlink, the link is replaced
 // by a regular file and its target is left untouched. A legacy file with a
-// wider mode is replaced by an owner-only one. The parent directory must
-// already exist; callers create it 0700.
+// wider mode or DACL is replaced by an owner-only one. The parent directory
+// must already exist; callers create it 0700 on POSIX.
 func WriteAuthFileAtomic(path string, data []byte) (err error) {
 	if path == "" {
 		return fmt.Errorf("auth file path is empty")
 	}
 	dir := filepath.Dir(path)
-	// ponytail: a short fixed prefix, not the auth file's own name, so a valid name near the
-	// filesystem's component-length limit still fits; watchers only react to .json names.
-	tmp, err := os.CreateTemp(dir, ".auth-*.tmp")
+	if err = RestrictAuthDir(dir); err != nil {
+		return fmt.Errorf("restrict auth directory: %w", err)
+	}
+	tmp, err := createPrivateAuthTemp(dir)
 	if err != nil {
 		return fmt.Errorf("create temp auth file: %w", err)
 	}
@@ -47,11 +49,6 @@ func WriteAuthFileAtomic(path string, data []byte) (err error) {
 		_ = os.Remove(tmpPath)
 	}()
 
-	// Exact mode on the open handle before the token bytes land, so the data is
-	// never readable with a wider mode.
-	if err = tmp.Chmod(authFileMode); err != nil {
-		return fmt.Errorf("chmod temp auth file: %w", err)
-	}
 	if _, err = tmp.Write(data); err != nil {
 		return fmt.Errorf("write temp auth file: %w", err)
 	}

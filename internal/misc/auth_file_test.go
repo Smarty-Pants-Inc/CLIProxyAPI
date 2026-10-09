@@ -140,3 +140,48 @@ func TestWriteAuthFileAtomicRejectsEmptyPath(t *testing.T) {
 		t.Fatal("expected error for empty path")
 	}
 }
+
+func TestPrivateAuthTempPOSIXModeBeforeWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows descriptors are covered by TestWindowsAuthPrivateStageBeforeTokenBytes")
+	}
+	stage, err := createPrivateAuthTemp(t.TempDir())
+	if err != nil {
+		t.Fatalf("create stage: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stage.Close(); err != nil {
+			t.Errorf("close stage: %v", err)
+		}
+		if err := os.Remove(stage.Name()); err != nil {
+			t.Errorf("remove stage: %v", err)
+		}
+	})
+	info, err := stage.Stat()
+	if err != nil {
+		t.Fatalf("stat stage: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 || info.Size() != 0 {
+		t.Fatalf("stage mode = %o, size = %d; want 0600 and empty", info.Mode().Perm(), info.Size())
+	}
+}
+
+func TestRestrictAuthDirPOSIXNoOp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory restrictions are covered by TestWindowsAuthRestrictDirectory")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestrictAuthDir(dir); err != nil {
+		t.Fatalf("no-op restriction: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("directory mode should not change: %v, %v", info, err)
+	}
+	if err := RestrictAuthDir(filepath.Join(dir, "missing")); err != nil {
+		t.Fatalf("no-op restriction on missing path: %v", err)
+	}
+}
