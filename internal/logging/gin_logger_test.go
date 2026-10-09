@@ -263,3 +263,46 @@ func TestGinLogrusLoggerHealthProbeStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestGinLogrusLoggerMasksOAuthCallbackQuery(t *testing.T) {
+	previousMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+		gin.SetMode(previousMode)
+	})
+
+	const code = "ac_fake-oauth-code-DO-NOT-USE-0123456789"
+	const state = "fake-oauth-state-DO-NOT-USE-abcdef"
+	const path = "/v8/management/oauth/callback"
+	engine := gin.New()
+	engine.Use(GinLogrusLogger())
+	engine.GET(path, func(c *gin.Context) {
+		if c.Query("code") != code || c.Query("state") != state {
+			t.Errorf("handler did not receive the raw callback values")
+		}
+		c.Status(http.StatusOK)
+	})
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path+"?provider=codex&code="+code+"&state="+state, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	entries := hook.AllEntries()
+	if len(entries) != 1 {
+		t.Fatalf("access log count = %d, want 1", len(entries))
+	}
+	message := entries[0].Message
+	if strings.Contains(message, code) || strings.Contains(message, state) {
+		t.Fatalf("access log leaked OAuth callback code/state: %q", message)
+	}
+	if want := `"` + path + "?provider=codex&code=ac_f...6789&state=fake...cdef" + `"`; !strings.Contains(message, want) {
+		t.Fatalf("access log = %q, want masked query %s", message, want)
+	}
+}

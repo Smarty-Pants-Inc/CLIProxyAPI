@@ -289,8 +289,15 @@ func shouldMaskQueryParam(key string) bool {
 	if key == "key" || key == "value" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
 		return true
 	}
+	// Covers access_token, refresh_token, id_token, client_secret, etc.
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {
 		return true
 	}
-	return false
+	// OAuth callback/PKCE values: the authorization code and state are
+	// bearer-equivalent until redeemed, and the verifier redeems the code.
+	switch key {
+	case "code", "state", "password":
+		return true
+	}
+	return strings.Contains(key, "verifier")
 }

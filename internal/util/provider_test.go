@@ -70,3 +70,22 @@ func TestMaskSensitiveHeaderValueShortKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestMaskSensitiveQueryOAuthSecrets(t *testing.T) {
+	const secret = "oauth-secret-DO-NOT-USE-0123456789"
+	for _, name := range []string{"code", "state", "code_verifier", "id_token", "access_token", "refresh_token", "client_secret", "password", "Code"} {
+		t.Run(name, func(t *testing.T) {
+			query := name + "=" + secret + "&provider=codex&error=access_denied"
+			got := MaskSensitiveQuery(query)
+			want := name + "=oaut...6789&provider=codex&error=access_denied"
+			if got != want {
+				t.Errorf("MaskSensitiveQuery(%q) = %q, want %q", query, got, want)
+			}
+		})
+	}
+	for _, name := range []string{"provider", "error", "error_description", "scope", "redirect_uri", "code_challenge_method", "statement"} {
+		if shouldMaskQueryParam(name) {
+			t.Errorf("shouldMaskQueryParam(%q) = true, want false", name)
+		}
+	}
+}
