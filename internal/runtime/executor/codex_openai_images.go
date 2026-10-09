@@ -111,7 +111,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
-	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts))
+	ctx = helps.WithTrackedPayloadFinalizer(ctx, helps.NewTrackedPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts, "prompt_cache_key"))
 	var identityState codexIdentityConfuseState
 	httpReq, body, identityState, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, auth, req, req.Payload, body)
 	if errCache != nil {
@@ -212,7 +212,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
-	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts))
+	ctx = helps.WithTrackedPayloadFinalizer(ctx, helps.NewTrackedPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts, "prompt_cache_key"))
 	var identityState codexIdentityConfuseState
 	httpReq, body, identityState, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, auth, req, req.Payload, body)
 	if errCache != nil {
@@ -350,11 +350,12 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	beforeRulesKey := codexPromptCacheKey(body)
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
-	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
+	var touched map[string]bool
+	body, contentType, touched, errPrepare = helps.ApplyMediaPayloadConfigTracked(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts, "prompt_cache_key")
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, touched["prompt_cache_key"])
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
@@ -423,11 +424,12 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	beforeRulesKey := codexPromptCacheKey(body)
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
-	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
+	var touched map[string]bool
+	body, contentType, touched, errPrepare = helps.ApplyMediaPayloadConfigTracked(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts, "prompt_cache_key")
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, touched["prompt_cache_key"])
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
