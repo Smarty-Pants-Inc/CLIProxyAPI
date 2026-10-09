@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
@@ -81,6 +82,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if !homeEnabled {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
+		}
+		if errCheck := checkAuthFilesOwnerOnly(s.cfg.AuthDir); errCheck != nil {
+			return fmt.Errorf("cliproxy: check auth files before loading: %w", errCheck)
 		}
 	}
 
@@ -420,6 +424,9 @@ var chmodAuthDir = os.Chmod
 
 // restrictAuthDir applies platform-specific protections; tests replace it to simulate a failure.
 var restrictAuthDir = misc.RestrictAuthDir
+
+// checkAuthFilesOwnerOnly is read-only; tests replace it to verify the load barrier.
+var checkAuthFilesOwnerOnly = internalconfig.CheckAuthFilesOwnerOnly
 
 // startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
 func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
