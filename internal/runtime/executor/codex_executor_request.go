@@ -129,11 +129,18 @@ type codexIdentityConfuseState struct {
 // with the final body.
 // It must run after the finalizer and before the identity headers are applied.
 // The rule-set value is operator-owned and is not remapped again.
-func bindCodexIdentityToFinalBody(state *codexIdentityConfuseState, before string, finalBody []byte) {
+func bindCodexIdentityToFinalBody(state *codexIdentityConfuseState, before string, finalBody []byte, keyTargeted bool) {
 	if state == nil {
 		return
 	}
 	final := codexPromptCacheKey(finalBody)
+	// An explicit removal also clears header-only sessions when there was no
+	// key in the body before the rules ran. No matching rule remains a no-op.
+	if keyTargeted && final == "" {
+		state.ruleKeyFrom = before
+		state.keyRemoved = true
+		return
+	}
 	if final == before {
 		return
 	}
@@ -172,29 +179,42 @@ func bindCodexHeadersToRuleKey(headers http.Header, state *codexIdentityConfuseS
 	if state.ruleKey == "" {
 		return
 	}
-	from := state.ruleKeyFrom
+	rebind := func(value string) string {
+		trimmed := strings.TrimSpace(value)
+		for _, from := range []string{state.ruleKeyFrom, state.originalPromptCacheKey} {
+			if from = strings.TrimSpace(from); from == "" {
+				continue
+			}
+			if trimmed == from {
+				return state.ruleKey
+			}
+			if trimmed == from+":0" {
+				return state.ruleKey + ":0"
+			}
+		}
+		return value
+	}
 	for key, values := range headers {
-		if len(values) == 0 {
-			continue
-		}
-		value := strings.TrimSpace(values[0])
-		for _, name := range codexSessionKeyHeaders {
-			if strings.EqualFold(key, name) {
-				headers[key] = []string{state.ruleKey}
+		switch strings.ToLower(key) {
+		case "session-id", "session_id", "conversation_id":
+			headers[key] = []string{state.ruleKey}
+		case "x-client-request-id", "thread-id", "x-codex-window-id":
+			for i, value := range values {
+				values[i] = rebind(value)
 			}
-		}
-		for _, name := range codexPromptCacheKeyHeaders {
-			if strings.EqualFold(key, name) && from != "" && value == from {
-				headers[key] = []string{state.ruleKey}
-			}
-		}
-		if strings.EqualFold(key, "X-Codex-Window-Id") && from != "" && value == from+":0" {
-			headers[key] = []string{state.ruleKey + ":0"}
-		}
-		if strings.EqualFold(key, "X-Codex-Turn-Metadata") && from != "" && gjson.Get(value, "prompt_cache_key").String() == from {
-			updated, errSet := sjson.Set(value, "prompt_cache_key", state.ruleKey)
-			if errSet == nil {
-				headers[key] = []string{updated}
+		case "x-codex-turn-metadata":
+			for i, value := range values {
+				// Each field may independently mirror the key. Do not require
+				// prompt_cache_key to be present before rebinding window_id.
+				for _, field := range []string{"prompt_cache_key", "window_id"} {
+					from := gjson.Get(value, field).String()
+					if to := rebind(from); to != from {
+						if updated, errSet := sjson.Set(value, field, to); errSet == nil {
+							value = updated
+						}
+					}
+				}
+				values[i] = value
 			}
 		}
 	}
@@ -226,23 +246,32 @@ func clearCodexHeadersForRemovedKey(headers http.Header, removed ...string) {
 		if len(values) == 0 {
 			continue
 		}
-		value := values[0]
 		for _, name := range append([]string{"X-Codex-Window-Id"}, codexPromptCacheKeyHeaders...) {
-			if strings.EqualFold(key, name) && isRemoved(value) {
+			if !strings.EqualFold(key, name) {
+				continue
+			}
+			kept := values[:0]
+			for _, value := range values {
+				if !isRemoved(value) {
+					kept = append(kept, value)
+				}
+			}
+			if len(kept) == 0 {
 				delete(headers, key)
+			} else {
+				headers[key] = kept
 			}
 		}
 		if strings.EqualFold(key, "X-Codex-Turn-Metadata") {
-			updated := value
-			for _, field := range []string{"prompt_cache_key", "window_id"} {
-				if isRemoved(gjson.Get(updated, field).String()) {
-					if next, errDelete := sjson.Delete(updated, field); errDelete == nil {
-						updated = next
+			for i, value := range values {
+				for _, field := range []string{"prompt_cache_key", "window_id"} {
+					if isRemoved(gjson.Get(value, field).String()) {
+						if next, errDelete := sjson.Delete(value, field); errDelete == nil {
+							value = next
+						}
 					}
 				}
-			}
-			if updated != value {
-				headers[key] = []string{updated}
+				values[i] = value
 			}
 		}
 	}
@@ -305,10 +334,10 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		cache.ID = identityState.promptCacheKey
 	}
 	beforeRulesKey := codexPromptCacheKey(rawJSON)
-	rawJSON = helps.FinalizePayload(ctx, rawJSON)
+	rawJSON, touched := helps.FinalizePayloadTracked(ctx, rawJSON)
 	// Bind the session headers to the key that is actually on the wire, which a
 	// payload rule may have set or changed.
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, rawJSON)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, rawJSON, touched["prompt_cache_key"])
 	if identityState.ruleKey != "" {
 		cache.ID = identityState.ruleKey
 	}
@@ -392,8 +421,15 @@ func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexI
 	}
 	if state.promptCacheKey != "" && gjson.Get(rawTurnMetadata, "prompt_cache_key").Exists() {
 		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "prompt_cache_key", state.promptCacheKey)
-	} else if state.promptCacheKey != "" && state.originalPromptCacheKey != "" {
-		updatedTurnMetadata = strings.ReplaceAll(updatedTurnMetadata, state.originalPromptCacheKey, state.promptCacheKey)
+	} else if state.promptCacheKey != "" && state.originalPromptCacheKey != "" && gjson.Valid(rawTurnMetadata) {
+		// Without a top-level prompt_cache_key, remap only top-level string fields that hold exactly the
+		// client's key; nested or free-text occurrences are never rewritten (CLIProxyAPI#116 P3).
+		gjson.Parse(rawTurnMetadata).ForEach(func(field, value gjson.Result) bool {
+			if value.Type == gjson.String && value.String() == state.originalPromptCacheKey && codexPlainJSONField(field.String()) {
+				updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, field.String(), state.promptCacheKey)
+			}
+			return true
+		})
 	}
 	if turnID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "turn_id").String()); turnID != "" {
 		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "turn_id", state.confuseTurnID(turnID))
@@ -801,4 +837,17 @@ func codexImageGenerationToolModel(body []byte) string {
 		}
 	}
 	return codexDefaultImageToolModel
+}
+
+// codexPlainJSONField reports whether name can be used as an sjson path without escaping.
+func codexPlainJSONField(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !(r == '_' || r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
