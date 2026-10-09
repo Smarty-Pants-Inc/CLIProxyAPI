@@ -80,10 +80,16 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	if !homeEnabled {
-		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
+		if errEnsureAuthDir := s.prepareAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
 		}
-		if errCheck := checkAuthFilesOwnerOnly(s.cfg.AuthDir); errCheck != nil {
+		if errCheck := checkAuthFilesOwnerOnly(s.cfg.AuthDir, true); errCheck != nil {
+			return fmt.Errorf("cliproxy: pre-check auth files before restricting directory: %w", errCheck)
+		}
+		if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
+			return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
+		}
+		if errCheck := checkAuthFilesOwnerOnly(s.cfg.AuthDir, false); errCheck != nil {
 			return fmt.Errorf("cliproxy: check auth files before loading: %w", errCheck)
 		}
 	}
@@ -386,15 +392,22 @@ func (s *Service) Shutdown(ctx context.Context) error {
 }
 
 func (s *Service) ensureAuthDir() error {
+	if errPrepare := s.prepareAuthDir(); errPrepare != nil {
+		return errPrepare
+	}
+	if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
+		return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
+	}
+	return nil
+}
+
+func (s *Service) prepareAuthDir() error {
 	info, err := os.Stat(s.cfg.AuthDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Auth files hold OAuth tokens: owner-only.
 			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o700); mkErr != nil {
 				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
-			}
-			if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
-				return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
 			}
 			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
 			return nil
@@ -412,9 +425,6 @@ func (s *Service) ensureAuthDir() error {
 			return fmt.Errorf("cliproxy: auth directory %s has mode %#o and could not be restricted to owner-only 0700 (fix it with: chmod 700 %s): %w", s.cfg.AuthDir, info.Mode().Perm(), s.cfg.AuthDir, errChmod)
 		}
 		log.Warnf("auth directory %s had mode %#o; restricted it to 0700", s.cfg.AuthDir, info.Mode().Perm())
-	}
-	if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
-		return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
 	}
 	return nil
 }

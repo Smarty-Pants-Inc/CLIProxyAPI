@@ -74,12 +74,15 @@ func TestWindowsServiceAuthFilesStartup(t *testing.T) {
 	}{
 		{"explicit Users read", "D:P(A;;FA;;;" + sid + ")(A;;FR;;;BU)", true},
 		{"owner only", "D:P(A;;FA;;;" + sid + ")", false},
-		{"read control only", "D:P(A;;RC;;;" + sid + ")", false},
+		// CreateFileW implicitly asks for SYNCHRONIZE and FILE_READ_ATTRIBUTES;
+		// an owner ACE granting only RC therefore refuses startup fail-closed.
+		{"read control only", "D:P(A;;RC;;;" + sid + ")", true},
 		{"null DACL", "D:PNO_ACCESS_CONTROL", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			setAuthFilesWindowsDACL(t, dir, "O:"+sid+"D:P(A;OICI;FA;;;"+sid+")", true)
+			beforeDir := authFilesWindowsSecurity(t, dir).String()
 			file := filepath.Join(dir, "auth.json")
 			if err := os.WriteFile(file, []byte("synthetic fixture, not a credential"), 0600); err != nil {
 				t.Fatal(err)
@@ -103,6 +106,11 @@ func TestWindowsServiceAuthFilesStartup(t *testing.T) {
 			if after := authFilesWindowsSecurity(t, file).String(); after != before {
 				t.Fatalf("startup check changed file ACL: before %s, after %s", before, after)
 			}
+			if tc.refused {
+				if after := authFilesWindowsSecurity(t, dir).String(); after != beforeDir {
+					t.Fatalf("refused startup changed directory ACL: before %s, after %s", beforeDir, after)
+				}
+			}
 		})
 	}
 }
@@ -111,9 +119,10 @@ func TestWindowsServiceAuthFilesInheritedOwnerOnly(t *testing.T) {
 	owner, _ := authFilesWindowsUser(t)
 	sid := owner.String()
 	dir := t.TempDir()
-	// The file starts with inherited broad access. RestrictAuthDir must run
-	// before the read-only file check and propagate owner-only OI/CI access.
-	setAuthFilesWindowsDACL(t, dir, "O:"+sid+"D:P(A;OICI;FA;;;"+sid+")(A;OICI;FR;;;BU)", true)
+	// The file starts with inherited broad access from an unrestricted auth
+	// directory. The pre-check ignores those inherited ACEs; RestrictAuthDir
+	// replaces them with owner-only OI/CI access before the full check.
+	setAuthFilesWindowsDACL(t, dir, "O:"+sid+"D:AI(A;OICI;FA;;;"+sid+")(A;OICI;FR;;;BU)", false)
 	file := filepath.Join(dir, "inherited.json")
 	if err := os.WriteFile(file, []byte("synthetic"), 0600); err != nil {
 		t.Fatal(err)
@@ -140,7 +149,7 @@ func TestWindowsServiceAuthFilesInheritedOwnerOnly(t *testing.T) {
 		t.Fatalf("expected inherited current-user ACE: %s", sd.String())
 	}
 	before := sd.String()
-	if err = internalconfig.CheckAuthFilesOwnerOnly(dir); err != nil {
+	if err = internalconfig.CheckAuthFilesOwnerOnly(dir, false); err != nil {
 		t.Fatal(err)
 	}
 	if after := authFilesWindowsSecurity(t, file).String(); after != before {
@@ -202,7 +211,7 @@ func TestWindowsAuthFilesCheckSkipsSubdirectories(t *testing.T) {
 	}
 	setAuthFilesWindowsDACL(t, file, "O:"+sid+"D:P(A;;FA;;;"+sid+")(A;;FR;;;BU)", true)
 	before := authFilesWindowsSecurity(t, file).String()
-	if err := internalconfig.CheckAuthFilesOwnerOnly(dir); err != nil {
+	if err := internalconfig.CheckAuthFilesOwnerOnly(dir, false); err != nil {
 		t.Fatalf("check recursed into nested files: %v", err)
 	}
 	if after := authFilesWindowsSecurity(t, file).String(); after != before {

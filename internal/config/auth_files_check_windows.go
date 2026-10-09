@@ -14,8 +14,10 @@ import (
 
 // CheckAuthFilesOwnerOnly inspects top-level auth files without reading their
 // contents or changing their ACLs. Subdirectories are out of scope, but every
-// reparse-point entry is refused without following it.
-func CheckAuthFilesOwnerOnly(dir string) error {
+// reparse-point entry is refused without following it. When ignoreInherited is
+// true, inherited ACEs are ignored because the protected auth-directory DACL
+// replaces them before the full check.
+func CheckAuthFilesOwnerOnly(dir string, ignoreInherited bool) error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return fmt.Errorf("check auth files: resolve current user: %w", err)
@@ -49,7 +51,7 @@ func CheckAuthFilesOwnerOnly(dir string) error {
 		if attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || !entry.Type().IsRegular() {
 			continue
 		}
-		if errCheck := checkAuthFileDACL(name, user.User.Sid); errCheck != nil {
+		if errCheck := checkAuthFileDACL(name, user.User.Sid, ignoreInherited); errCheck != nil {
 			return authFileCheckError(path, account, errCheck)
 		}
 	}
@@ -62,7 +64,7 @@ func authFileCheckError(path, account string, cause error) error {
 	return fmt.Errorf("refusing auth file %q: %w (fix it with: icacls \"%s\" /reset && icacls \"%s\" /inheritance:r /grant:r \"%s:F\")", path, cause, path, path, account)
 }
 
-func checkAuthFileDACL(name *uint16, user *windows.SID) (err error) {
+func checkAuthFileDACL(name *uint16, user *windows.SID, ignoreInherited bool) (err error) {
 	// READ_CONTROL only: no content reads or write access. OPEN_REPARSE_POINT
 	// binds inspection to the entry itself even if it changed after enumeration.
 	// Without delete sharing the opened entry cannot be replaced during inspection.
@@ -95,10 +97,10 @@ func checkAuthFileDACL(name *uint16, user *windows.SID) (err error) {
 	if err != nil {
 		return fmt.Errorf("read auth file DACL: %w", err)
 	}
-	return authFileDACLIsOwnerOnly(sd, user)
+	return authFileDACLIsOwnerOnly(sd, user, ignoreInherited)
 }
 
-func authFileDACLIsOwnerOnly(sd *windows.SECURITY_DESCRIPTOR, user *windows.SID) error {
+func authFileDACLIsOwnerOnly(sd *windows.SECURITY_DESCRIPTOR, user *windows.SID, ignoreInherited bool) error {
 	if sd == nil || !sd.IsValid() {
 		return fmt.Errorf("missing or invalid security descriptor")
 	}
@@ -115,10 +117,16 @@ func authFileDACLIsOwnerOnly(sd *windows.SECURITY_DESCRIPTOR, user *windows.SID)
 		if err = windows.GetAce(dacl, i, &ace); err != nil {
 			return fmt.Errorf("read auth file ACE %d: %w", i, err)
 		}
+		if ace == nil {
+			return fmt.Errorf("invalid auth file ACE %d", i)
+		}
+		if ignoreInherited && ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			continue
+		}
 		// Ordinary allow and deny ACEs have the same trustee layout. Do not
 		// calculate effective access: a deny never excuses another user's grant.
 		// Fail closed for unfamiliar ACE layouts rather than misreading a SID.
-		if ace == nil || (ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE && ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE) {
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE && ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE {
 			return fmt.Errorf("unsupported auth file ACE %d", i)
 		}
 		const minSIDSize = 8

@@ -82,28 +82,38 @@ func TestServiceAuthFilesCheckBeforeLoad(t *testing.T) {
 					restrictAuthDir, checkAuthFilesOwnerOnly = originalRestrict, originalCheck
 				})
 				restrictAuthDir = func(path string) error {
-					if path != dir {
-						t.Fatalf("restrict path = %q, want %q", path, dir)
+					if path != dir || !reflect.DeepEqual(events, []string{"pre-check"}) {
+						t.Fatalf("restriction must follow the pre-check: path=%q events=%v", path, events)
 					}
 					events = append(events, "restrict")
 					return nil
 				}
-				checkAuthFilesOwnerOnly = func(path string) error {
-					if path != dir || !reflect.DeepEqual(events, []string{"restrict"}) {
-						t.Fatalf("check must follow restriction and precede every load: path=%q events=%v", path, events)
+				checkAuthFilesOwnerOnly = func(path string, ignoreInherited bool) error {
+					if path != dir {
+						t.Fatalf("check path = %q, want %q", path, dir)
 					}
-					events = append(events, "check")
-					return tc.checkErr
+					if ignoreInherited {
+						if len(events) != 0 {
+							t.Fatalf("pre-check must be first: events=%v", events)
+						}
+						events = append(events, "pre-check")
+						return tc.checkErr
+					}
+					if !reflect.DeepEqual(events, []string{"pre-check", "restrict"}) {
+						t.Fatalf("full check must follow restriction: events=%v", events)
+					}
+					events = append(events, "full check")
+					return nil
 				}
 				s, stop := newAuthFilesStartupProbe(dir, &events)
 				err := s.Run(context.Background())
-				want := []string{"restrict", "check"}
+				want := []string{"pre-check"}
 				if tc.checkErr != nil {
-					if !errors.Is(err, denied) || !strings.Contains(err.Error(), "before loading") {
-						t.Fatalf("startup must return check refusal: %v", err)
+					if !errors.Is(err, denied) || !strings.Contains(err.Error(), "before restricting") {
+						t.Fatalf("startup must return pre-check refusal: %v", err)
 					}
 				} else {
-					want = append(want, "core load", "token load", "API key load")
+					want = append(want, "restrict", "full check", "core load", "token load", "API key load")
 					if !errors.Is(err, stop) {
 						t.Fatalf("startup did not reach auth loaders: %v", err)
 					}

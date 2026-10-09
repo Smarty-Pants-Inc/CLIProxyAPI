@@ -3,6 +3,10 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -36,7 +40,7 @@ func TestWindowsAuthFileDACLTrustees(t *testing.T) {
 				t.Fatal(errParse)
 			}
 			before := sd.String()
-			if errCheck := authFileDACLIsOwnerOnly(sd, user.User.Sid); (errCheck != nil) != tc.wantErr {
+			if errCheck := authFileDACLIsOwnerOnly(sd, user.User.Sid, false); (errCheck != nil) != tc.wantErr {
 				t.Fatalf("DACL check = %v, want error=%t: %s", errCheck, tc.wantErr, before)
 			}
 			if after := sd.String(); after != before {
@@ -44,7 +48,50 @@ func TestWindowsAuthFileDACLTrustees(t *testing.T) {
 			}
 		})
 	}
-	if err = authFileDACLIsOwnerOnly(nil, user.User.Sid); err == nil {
+	if err = authFileDACLIsOwnerOnly(nil, user.User.Sid, false); err == nil {
 		t.Fatal("accepted missing security descriptor")
+	}
+}
+
+func TestWindowsAuthFileReadControlOnlyRefusedAtOpen(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, domain, _, err := user.User.Sid.LookupAccount("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domain != "" {
+		account = domain + `\` + account
+	}
+	sid := user.User.Sid.String()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "auth.json")
+	if err = os.WriteFile(file, []byte("synthetic fixture, not a credential"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;RC;;;" + sid + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = windows.SetNamedSecurityInfo(file, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	err = CheckAuthFilesOwnerOnly(dir, false)
+	fix := fmt.Sprintf(`icacls "%s" /inheritance:r /grant:r "%s:F"`, file, account)
+	if err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), fix) {
+		t.Fatalf("RC-only owner DACL must refuse with file and exact fix command: %v", err)
 	}
 }
