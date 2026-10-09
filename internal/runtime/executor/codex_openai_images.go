@@ -350,12 +350,12 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	beforeRulesKey := codexPromptCacheKey(body)
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
-	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
+	var touched map[string]bool
+	body, contentType, touched, errPrepare = helps.ApplyMediaPayloadConfigTracked(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts, "prompt_cache_key")
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
-	// Media payload rules do not report touched paths, so an empty-to-empty removal is not detected here (#7620 note).
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, false)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, touched["prompt_cache_key"])
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
@@ -424,12 +424,12 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	beforeRulesKey := codexPromptCacheKey(body)
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
-	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
+	var touched map[string]bool
+	body, contentType, touched, errPrepare = helps.ApplyMediaPayloadConfigTracked(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts, "prompt_cache_key")
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
-	// Media payload rules do not report touched paths, so an empty-to-empty removal is not detected here (#7620 note).
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, false)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, touched["prompt_cache_key"])
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
