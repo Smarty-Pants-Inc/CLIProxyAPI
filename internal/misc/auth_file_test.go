@@ -106,3 +106,37 @@ func TestWriteAuthFileAtomicAcceptsMaxLengthName(t *testing.T) {
 		t.Fatalf("content = %q, %v", got, errRead)
 	}
 }
+
+// Folded from the security lane's WriteFileAtomic test: rewriting over a legacy
+// world-readable file yields an owner-only file and leaves no temp files.
+func TestWriteAuthFileAtomicRewriteTightensLegacyMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token.json")
+	if errWrite := WriteAuthFileAtomic(path, []byte("first")); errWrite != nil {
+		t.Fatalf("first write: %v", errWrite)
+	}
+	if errChmod := os.Chmod(path, 0o644); errChmod != nil {
+		t.Fatalf("chmod: %v", errChmod)
+	}
+	if errWrite := WriteAuthFileAtomic(path, []byte("second")); errWrite != nil {
+		t.Fatalf("second write: %v", errWrite)
+	}
+	if got, errRead := os.ReadFile(path); errRead != nil || string(got) != "second" {
+		t.Fatalf("content = %q, %v; want second", got, errRead)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("leftover temp files: %d entries", len(entries))
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if info, errStat := os.Stat(path); errStat != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, %v; want 0600", info, errStat)
+	}
+}
+
+func TestWriteAuthFileAtomicRejectsEmptyPath(t *testing.T) {
+	if errWrite := WriteAuthFileAtomic("", []byte(`{}`)); errWrite == nil {
+		t.Fatal("expected error for empty path")
+	}
+}
