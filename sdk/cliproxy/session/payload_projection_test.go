@@ -283,8 +283,114 @@ func TestSessionPayloadViewCacheReuseAndInvalidation(t *testing.T) {
 	}
 }
 
+// collidingProjectionCache returns a cache whose hash maps every payload to the
+// same value, so any two same-length payloads share a lookup key.
+func collidingProjectionCache() *sessionProjectionCache {
+	c := newSessionProjectionCache()
+	c.hash = func([]byte) uint64 { return 42 }
+	return c
+}
+
+func TestSessionProjectionCacheVerifiesBytesOnCollision(t *testing.T) {
+	c := collidingProjectionCache()
+	a := []byte(`{` + padMessages(64<<10) + `,"metadata":{"user_id":"{\"session_id\":\"coll-a\"}"}}`)
+	b := bytes.Replace(a, []byte("coll-a"), []byte("coll-b"), 1)
+	if len(a) != len(b) || bytes.Equal(a, b) {
+		t.Fatal("fixture must be two different same-length payloads")
+	}
+	wantA, _ := projectSessionPayload(a)
+	wantB, _ := projectSessionPayload(b)
+
+	if got := c.view(a); !bytes.Equal(got, wantA) {
+		t.Fatalf("view(a) = %q, want %q", got, wantA)
+	}
+	if got := c.view(b); !bytes.Equal(got, wantB) {
+		t.Fatalf("colliding payload b got another body's projection: %q, want %q", got, wantB)
+	}
+	// The mismatch replaced the entry rather than adding a second one.
+	if c.count != 1 || len(c.entries) != 1 || c.bytes != len(b)+len(wantB) {
+		t.Fatalf("after replacement count=%d entries=%d bytes=%d", c.count, len(c.entries), c.bytes)
+	}
+	if got := c.view(a); !bytes.Equal(got, wantA) {
+		t.Fatalf("view(a) after collision = %q, want %q", got, wantA)
+	}
+	// In-place mutation of a cached caller slice is caught by the private copy.
+	copy(a[bytes.Index(a, []byte("coll-a")):], "coll-c")
+	wantC, _ := projectSessionPayload(a)
+	if got := c.view(a); !bytes.Equal(got, wantC) {
+		t.Fatalf("mutated payload got a stale projection: %q, want %q", got, wantC)
+	}
+
+	// End to end: session IDs resolved through the colliding package cache.
+	saved := sessionProjections
+	sessionProjections = collidingProjectionCache()
+	defer func() { sessionProjections = saved }()
+	for _, tc := range []struct {
+		payload []byte
+		want    string
+	}{{b, "claude:coll-b"}, {a, "claude:coll-c"}, {b, "claude:coll-b"}} {
+		if info, ok := ExtractSessionInfo(http.Header{}, tc.payload, nil); !ok || info.SessionID != tc.want {
+			t.Fatalf("ExtractSessionInfo = %+v, %v; want %s", info, ok, tc.want)
+		}
+	}
+}
+
+func TestSessionProjectionCacheByteBudgetEvicts(t *testing.T) {
+	c := newSessionProjectionCache()
+	entry := sessionProjectionEntry{body: make([]byte, 1000), view: []byte("{}")}
+	c.maxBytes = 3 * entry.size()
+	for i := 0; i < 5; i++ {
+		c.put(sessionProjectionKey{n: 1000, sum: uint64(i)}, entry)
+	}
+	if c.bytes > c.maxBytes || c.count != 3 || len(c.entries) != 3 || c.bytes != 3*entry.size() {
+		t.Fatalf("bytes=%d (max %d) count=%d entries=%d", c.bytes, c.maxBytes, c.count, len(c.entries))
+	}
+	for i := 0; i < 5; i++ {
+		_, ok := c.get(sessionProjectionKey{n: 1000, sum: uint64(i)})
+		if want := i >= 2; ok != want {
+			t.Fatalf("entry %d present=%v, want %v", i, ok, want)
+		}
+	}
+	// A single entry larger than the whole budget is not cached and evicts nothing.
+	c.put(sessionProjectionKey{n: 1, sum: 99}, sessionProjectionEntry{body: make([]byte, c.maxBytes+1)})
+	if _, ok := c.get(sessionProjectionKey{n: 1, sum: 99}); ok || c.count != 3 {
+		t.Fatalf("over-budget entry cached or evicted others: count=%d", c.count)
+	}
+	// The default budget is the documented 64 MiB.
+	if got := newSessionProjectionCache().maxBytes; got != 64<<20 {
+		t.Fatalf("default byte budget = %d", got)
+	}
+}
+
+func TestSessionProjectionCacheSkipsOversizePayloads(t *testing.T) {
+	c := newSessionProjectionCache()
+	prefix := `{"metadata":{"user_id":"{\"session_id\":\"big\"}"},"messages":"`
+	payload := []byte(prefix + strings.Repeat("x", sessionProjectionCacheMaxPayload-len(prefix)) + `"}`)
+	if len(payload) <= sessionProjectionCacheMaxPayload {
+		t.Fatal("fixture must exceed the cacheable payload size")
+	}
+	want, _ := projectSessionPayload(payload)
+	for i := 0; i < 2; i++ {
+		if got := c.view(payload); !bytes.Equal(got, want) {
+			t.Fatalf("oversize view = %q, want %q", got, want)
+		}
+	}
+	if c.count != 0 || len(c.entries) != 0 || c.bytes != 0 {
+		t.Fatalf("oversize payload was cached: count=%d bytes=%d", c.count, c.bytes)
+	}
+	// Exactly at the limit is still cacheable.
+	atLimit := payload[:0:0]
+	atLimit = append(atLimit, prefix...)
+	atLimit = append(atLimit, strings.Repeat("x", sessionProjectionCacheMaxPayload-len(prefix)-2)...)
+	atLimit = append(atLimit, `"}`...)
+	c.view(atLimit)
+	if len(atLimit) != sessionProjectionCacheMaxPayload || c.count != 1 {
+		t.Fatalf("payload at limit (len %d) not cached: count=%d", len(atLimit), c.count)
+	}
+}
+
 func TestSessionProjectionCacheBounded(t *testing.T) {
-	c := &sessionProjectionCache{entries: make(map[sessionProjectionKey]sessionProjectionEntry)}
+	c := newSessionProjectionCache()
 	for i := 0; i < 3*sessionProjectionCacheEntries; i++ {
 		c.put(sessionProjectionKey{n: i, sum: uint64(i)}, sessionProjectionEntry{view: []byte("{}")})
 	}
