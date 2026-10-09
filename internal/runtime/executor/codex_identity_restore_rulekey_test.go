@@ -224,6 +224,116 @@ func TestCodexRuleKeyRestoreCRDelimitedSSE(t *testing.T) {
 	}
 }
 
+// Exercise event-level parsing through the final media payload and public client
+// bytes. A data-field newline is JSON whitespace, not a lexical-state reset;
+// the blank event separator must reset that state before the next payload.
+func TestCodexRuleKeyRestorePublicSSEEventPayloads(t *testing.T) {
+	probe := func(t *testing.T, key, wire, want, contentType string, stream bool, split int) {
+		t.Helper()
+		fragments := [][]byte{[]byte(wire)}
+		if split > 0 {
+			fragments = [][]byte{[]byte(wire[:split]), []byte(wire[split:])}
+		}
+		reader := &imageIdentitySplitReader{fragments: fragments}
+		transport := imageIdentityRoundTripper(func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				return nil, errRead
+			}
+			if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != key {
+				t.Errorf("final on-wire media rule key = %q, want %q", got, key)
+			}
+			response := imageIdentityResponse(req, reader, true)
+			response.Header.Set("Content-Type", contentType)
+			return response, nil
+		})
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
+		exec := NewCodexExecutor(ruleKeyRestoreImageConfig(key))
+		req := cliproxyexecutor.Request{Model: "gpt-image-2", Payload: identityImagePayload()}
+		var output bytes.Buffer
+		if stream {
+			result, err := exec.ExecuteStream(ctx, identityImageAuth("https://images.example.invalid"), req, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+			if err != nil {
+				t.Fatalf("ExecuteStream: %v", err)
+			}
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Errorf("stream: %v", chunk.Err)
+				}
+				output.Write(chunk.Payload)
+			}
+		} else {
+			result, err := exec.Execute(ctx, identityImageAuth("https://images.example.invalid"), req, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			output.Write(result.Payload)
+		}
+		if !reader.closed || reader.reads != len(fragments) {
+			t.Errorf("upstream body: closed=%t reads=%d, want closed and %d reads", reader.closed, reader.reads, len(fragments))
+		}
+		if output.String() != want {
+			t.Errorf("client payload:\n got %q\nwant %q", output.String(), want)
+		}
+	}
+
+	for _, framing := range []struct{ name, separator string }{{"LF", "\n"}, {"CR", "\r"}, {"CRLF", "\r\n"}} {
+		t.Run(framing.name, func(t *testing.T) {
+			sep := framing.separator
+			event := func(fields ...string) string {
+				return "data: " + strings.Join(fields, sep+"data: ") + sep + sep
+			}
+			cases := []struct{ name, key, wire, want string }{}
+			for _, key := range []string{"ab", "12"} {
+				member := fmt.Sprintf(`"%s":"object key stays","number":12,"exact":"%s","text":"key %s rejected; key=%s; table cab prefix-%s-suffix"`, key, key, key, key, key)
+				restored := fmt.Sprintf(`"%s":"object key stays","number":12,"exact":"%s","text":"key %s rejected; key=%s; table cab prefix-%s-suffix"`, key, identityTestCacheKey, identityTestCacheKey, identityTestCacheKey, key)
+				plain := "table cab key " + key + " rejected; key=" + key + "; prefix-" + key + "-suffix"
+				plainWant := "table cab key " + identityTestCacheKey + " rejected; key=" + identityTestCacheKey + "; prefix-" + key + "-suffix"
+				cases = append(cases,
+					struct{ name, key, wire, want string }{"F1/" + key + "/JSON-then-plain", key, event("{", member, "}") + event(plain), event("{", restored, "}") + event(plainWant)},
+					struct{ name, key, wire, want string }{"F1/" + key + "/plain-then-JSON", key, event(plain) + event("{", member, "}"), event(plainWant) + event("{", restored, "}")},
+					struct{ name, key, wire, want string }{"control/single-line/" + key, key, event("{" + member + "}"), event("{" + restored + "}")},
+				)
+			}
+			for _, word := range []string{"table", "falsehood", "nothing", "true", "false", "null", "12ab", "12-ab"} {
+				plain := word + " table cab key ab rejected; key=ab; prefix-ab-suffix"
+				plainWant := word + " table cab key " + identityTestCacheKey + " rejected; key=" + identityTestCacheKey + "; prefix-ab-suffix"
+				// Consecutive data fields form one plaintext event; the next
+				// event switches to JSON, protecting its key and numeric value.
+				cases = append(cases, struct{ name, key, wire, want string }{
+					"F2/" + word, "ab",
+					event(plain, "key ab rejected") + event(`{"ab":"ab","number":12}`),
+					event(plainWant, "key "+identityTestCacheKey+" rejected") + event(`{"ab":"`+identityTestCacheKey+`","number":12}`),
+				})
+				t.Run("control/plaintext/"+word, func(t *testing.T) {
+					probe(t, "ab", plain, plainWant, "text/plain", false, 0)
+				})
+			}
+			for _, key := range []string{"12", "true", "false", "null"} {
+				cases = append(cases, struct{ name, key, wire, want string }{
+					"control/scalars/" + key, key,
+					event("12") + event("true") + event("false") + event("null") + event(`"`+key+`"`),
+					event("12") + event("true") + event("false") + event("null") + event(`"`+identityTestCacheKey+`"`),
+				})
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Run("Execute", func(t *testing.T) {
+						probe(t, tc.key, tc.wire, tc.want, "text/event-stream", false, 0)
+					})
+					// Every byte split includes CR|LF, field prefixes, tokens,
+					// JSON punctuation and both sides of the event separator.
+					for split := 0; split < len(tc.wire); split++ {
+						t.Run(fmt.Sprintf("ExecuteStream/byte=%d", split), func(t *testing.T) {
+							probe(t, tc.key, tc.wire, tc.want, "text/event-stream", true, split)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestCodexRuleKeyRestoreDirectImageStreamBoundedSelfOverlap(t *testing.T) {
 	for _, key := range []string{"ab", "aa"} {
 		t.Run(key, func(t *testing.T) {

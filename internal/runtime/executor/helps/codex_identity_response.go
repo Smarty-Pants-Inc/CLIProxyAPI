@@ -28,27 +28,7 @@ func ReplaceCodexIdentityResponse(payload []byte, from, to string) []byte {
 	if !sse {
 		return NewCodexIdentityResponseRewriter(from, to, false, false).Rewrite(payload, true)
 	}
-	var out []byte
-	for len(payload) > 0 {
-		end := bytes.IndexAny(payload, "\r\n")
-		if end < 0 {
-			end = len(payload)
-		}
-		line := payload[:end]
-		if bytes.HasPrefix(line, []byte("data:")) {
-			out = append(out, line[:5]...)
-			data := line[5:]
-			out = append(out, NewCodexIdentityResponseRewriter(from, to, false, json.Valid(data)).Rewrite(data, true)...)
-		} else {
-			out = append(out, line...)
-		}
-		payload = payload[end:]
-		if len(payload) > 0 {
-			out = append(out, payload[0])
-			payload = payload[1:]
-		}
-	}
-	return out
+	return NewCodexIdentityResponseRewriter(from, to, true, false).Rewrite(payload, true)
 }
 
 type codexIdentityAtom struct {
@@ -59,15 +39,21 @@ type codexIdentityAtom struct {
 // CodexIdentityResponseRewriter carries only an undecided identity prefix and
 // an incomplete escape/rune. JSON/SSE lexical state survives arbitrary reads;
 // neither a complete string nor a complete SSE line is buffered.
-// In streaming SSE data, JSON is recognized by its first non-space character.
+// SSE data fields share JSON context until the blank event delimiter. Literal
+// prefixes use bounded lookahead so plaintext starting with t/f/n is not JSON.
 // The caller must flush with final=true at EOF (also on a terminal read error).
 type CodexIdentityResponseRewriter struct {
 	from, to  string
 	jsonTo    []byte
 	sse       bool
-	line      int // 0: SSE field prefix, 1: metadata, 2: data format, 3: data
+	line      int // 0: SSE field prefix, 1: metadata, 2: data format, 3: data, 4: literal probe
 	prefix    []byte
+	skipLF    bool // CRLF is one line ending, even across reads
+	formatSet bool
+	literal   string
+	format    []byte // at most len("false") bytes of undecided literal prefix
 	jsonMode  bool
+	scalar    int    // 0: structured/plaintext, 1: scalar tail, 2: number token
 	stack     []byte // 'k': object expecting a key, 'v': object value, '[': array
 	inString  bool
 	value     bool
@@ -153,13 +139,53 @@ func (w *CodexIdentityResponseRewriter) Rewrite(chunk []byte, final bool) []byte
 	for i := 0; i < len(input); {
 		b := input[i]
 		if w.sse {
+			if w.skipLF {
+				w.skipLF = false
+				if b == '\n' {
+					out = append(out, b)
+					i++
+					continue
+				}
+			}
+			if w.line == 4 {
+				if len(w.format) < len(w.literal) && b == w.literal[len(w.format)] {
+					w.format = append(w.format, b)
+					i++
+					continue
+				}
+				w.jsonMode = len(w.format) == len(w.literal) && (b == ' ' || b == '\t' || b == '\r' || b == '\n')
+				w.line, w.formatSet = 3, true
+				if w.jsonMode {
+					// A complete literal is not a string identity. Only later
+					// non-whitespace text can disqualify the scalar format.
+					out = append(out, w.format...)
+					w.scalar = 1
+				} else {
+					// Replay only the bounded probe through the plaintext path.
+					input = append(bytes.Clone(w.format), input[i:]...)
+					i = 0
+				}
+				w.format = w.format[:0]
+				continue
+			}
 			if b == '\r' || b == '\n' {
-				w.finishToken(&out)
+				if w.line == 2 || w.line == 3 {
+					// The logical LF joining data fields is a token boundary, not
+					// a JSON-context or event boundary.
+					w.finishToken(&out)
+					if w.scalar == 2 {
+						w.scalar = 1
+					}
+				}
+				if w.line == 0 && len(w.prefix) == 0 {
+					w.jsonMode, w.formatSet, w.inString, w.keyEscape = false, false, false, false
+					w.scalar = 0
+					w.stack = w.stack[:0]
+				}
 				out = append(out, w.prefix...)
 				w.prefix = w.prefix[:0]
 				out = append(out, b)
-				w.line, w.jsonMode, w.inString, w.keyEscape = 0, false, false, false
-				w.stack = w.stack[:0]
+				w.line, w.skipLF = 0, b == '\r'
 				i++
 				continue
 			}
@@ -188,8 +214,43 @@ func (w *CodexIdentityResponseRewriter) Rewrite(chunk []byte, final bool) []byte
 					i++
 					continue
 				}
-				w.jsonMode = b == '{' || b == '[' || b == '"' || b == '-' || b >= '0' && b <= '9' || b == 't' || b == 'f' || b == 'n'
 				w.line = 3
+				if !w.formatSet {
+					switch b {
+					case 't':
+						w.literal = "true"
+					case 'f':
+						w.literal = "false"
+					case 'n':
+						w.literal = "null"
+					default:
+						w.literal = ""
+					}
+					if w.literal != "" {
+						w.format = append(w.format[:0], b)
+						w.line = 4
+						i++
+						continue
+					}
+					w.jsonMode = b == '{' || b == '[' || b == '"' || b == '-' || b >= '0' && b <= '9'
+					if b == '-' || b >= '0' && b <= '9' {
+						w.scalar = 2
+					}
+					w.formatSet = true
+				}
+			}
+			if w.jsonMode && w.scalar != 0 {
+				if b == ' ' || b == '\t' {
+					w.scalar = 1
+					w.leftID = false
+				} else if w.scalar == 1 || !(b >= '0' && b <= '9' || b == '-' || b == '+' || b == '.' || b == 'e' || b == 'E') {
+					// Root scalars cannot have a second non-whitespace token.
+					// Emit whitespace eagerly; subsequent text uses whole-token
+					// fallback rather than buffering an entire scalar/event.
+					w.jsonMode, w.scalar = false, 0
+				} else {
+					w.leftID = codexIdentityRune(rune(b))
+				}
 			}
 		}
 		if w.jsonMode {
@@ -290,6 +351,19 @@ func (w *CodexIdentityResponseRewriter) Rewrite(chunk []byte, final bool) []byte
 		i += size
 	}
 	if final {
+		if w.line == 4 {
+			w.jsonMode = len(w.format) == len(w.literal)
+			w.line, w.formatSet = 3, true
+			if w.jsonMode {
+				out = append(out, w.format...)
+				w.scalar = 1
+				w.format = w.format[:0]
+			} else {
+				probe := bytes.Clone(w.format)
+				w.format = w.format[:0]
+				out = append(out, w.Rewrite(probe, true)...)
+			}
+		}
 		w.finishToken(&out)
 		out = append(out, w.prefix...)
 		w.prefix = w.prefix[:0]
