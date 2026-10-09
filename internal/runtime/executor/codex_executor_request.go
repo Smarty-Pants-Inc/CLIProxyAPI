@@ -129,11 +129,18 @@ type codexIdentityConfuseState struct {
 // with the final body.
 // It must run after the finalizer and before the identity headers are applied.
 // The rule-set value is operator-owned and is not remapped again.
-func bindCodexIdentityToFinalBody(state *codexIdentityConfuseState, before string, finalBody []byte) {
+func bindCodexIdentityToFinalBody(state *codexIdentityConfuseState, before string, finalBody []byte, keyTargeted bool) {
 	if state == nil {
 		return
 	}
 	final := codexPromptCacheKey(finalBody)
+	// An explicit removal also clears header-only sessions when there was no
+	// key in the body before the rules ran. No matching rule remains a no-op.
+	if keyTargeted && final == "" {
+		state.ruleKeyFrom = before
+		state.keyRemoved = true
+		return
+	}
 	if final == before {
 		return
 	}
@@ -226,23 +233,32 @@ func clearCodexHeadersForRemovedKey(headers http.Header, removed ...string) {
 		if len(values) == 0 {
 			continue
 		}
-		value := values[0]
 		for _, name := range append([]string{"X-Codex-Window-Id"}, codexPromptCacheKeyHeaders...) {
-			if strings.EqualFold(key, name) && isRemoved(value) {
+			if !strings.EqualFold(key, name) {
+				continue
+			}
+			kept := values[:0]
+			for _, value := range values {
+				if !isRemoved(value) {
+					kept = append(kept, value)
+				}
+			}
+			if len(kept) == 0 {
 				delete(headers, key)
+			} else {
+				headers[key] = kept
 			}
 		}
 		if strings.EqualFold(key, "X-Codex-Turn-Metadata") {
-			updated := value
-			for _, field := range []string{"prompt_cache_key", "window_id"} {
-				if isRemoved(gjson.Get(updated, field).String()) {
-					if next, errDelete := sjson.Delete(updated, field); errDelete == nil {
-						updated = next
+			for i, value := range values {
+				for _, field := range []string{"prompt_cache_key", "window_id"} {
+					if isRemoved(gjson.Get(value, field).String()) {
+						if next, errDelete := sjson.Delete(value, field); errDelete == nil {
+							value = next
+						}
 					}
 				}
-			}
-			if updated != value {
-				headers[key] = []string{updated}
+				values[i] = value
 			}
 		}
 	}
@@ -305,10 +321,10 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		cache.ID = identityState.promptCacheKey
 	}
 	beforeRulesKey := codexPromptCacheKey(rawJSON)
-	rawJSON = helps.FinalizePayload(ctx, rawJSON)
+	rawJSON, touched := helps.FinalizePayloadTracked(ctx, rawJSON)
 	// Bind the session headers to the key that is actually on the wire, which a
 	// payload rule may have set or changed.
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, rawJSON)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, rawJSON, touched["prompt_cache_key"])
 	if identityState.ruleKey != "" {
 		cache.ID = identityState.ruleKey
 	}
