@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
@@ -383,7 +384,8 @@ func (s *Service) ensureAuthDir() error {
 	info, err := os.Stat(s.cfg.AuthDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o755); mkErr != nil {
+			// Auth files hold OAuth tokens: owner-only.
+			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o700); mkErr != nil {
 				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
 			}
 			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
@@ -393,6 +395,15 @@ func (s *Service) ensureAuthDir() error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
+	}
+	// Tighten a group/world-accessible directory left by older releases
+	// (created 0755). Windows has no POSIX mode bits to tighten.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		if errChmod := os.Chmod(s.cfg.AuthDir, 0o700); errChmod != nil {
+			log.Warnf("auth directory %s has mode %#o; failed to restrict it to 0700: %v", s.cfg.AuthDir, info.Mode().Perm(), errChmod)
+		} else {
+			log.Warnf("auth directory %s had mode %#o; restricted it to 0700", s.cfg.AuthDir, info.Mode().Perm())
+		}
 	}
 	return nil
 }

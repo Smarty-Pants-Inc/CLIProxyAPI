@@ -566,6 +566,8 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 	return payload, nil
 }
 
+// atomicWriteFile persists plugin token storage 0600 through misc.WriteAuthFileAtomic
+// (temp file, fsync, rename), creating a missing auth directory 0700 first.
 func atomicWriteFile(path string, data []byte) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
