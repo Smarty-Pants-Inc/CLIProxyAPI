@@ -48,6 +48,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
+	if errResolve := cfg.ValidateSessionAffinityStateDir(); errResolve != nil {
+		return nil, errResolve
+	}
 	if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
 		return nil, errValidate
 	}
