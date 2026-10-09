@@ -186,3 +186,58 @@ func TestCodexImageCarryCutSelfOverlapOneMiBTightBound(t *testing.T) {
 		}
 	}
 }
+
+// #7705 residual (lane audit): the non-stream success and status-error paths and the
+// stream non-2xx path used sequential confuse-then-expose passes, so a turn ID equal to
+// a prefix of the confused cache key rewrote it before it could be exposed (1 leak each).
+func TestCodexDirectImageWholeBodyPathsNeverLeakWithPrefixTurnID(t *testing.T) {
+	confused := codexIdentityConfuseUUID(identityTestAuthID, "prompt-cache", identityTestCacheKey)
+	turnID := confused[:12]
+	for _, tc := range []struct {
+		name   string
+		stream bool
+		status int
+	}{
+		{"nonstream-200", false, http.StatusOK},
+		{"nonstream-500", false, http.StatusInternalServerError},
+		{"stream-500", true, http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := identityImageAuth("https://images.example.invalid")
+			auth.Attributes["header:X-Codex-Turn-Metadata"] = fmt.Sprintf(`{"turn_id":%q}`, turnID)
+			transport := imageIdentityRoundTripper(func(req *http.Request) (*http.Response, error) {
+				_, _ = io.ReadAll(req.Body)
+				body := `{"created":1,"data":[{"b64_json":"AA=="}],"note":"key=` + confused + `"}`
+				resp := imageIdentityResponse(req, io.NopCloser(strings.NewReader(body)), false)
+				resp.StatusCode = tc.status
+				return resp, nil
+			})
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
+			exec := NewCodexExecutor(imageIdentityRuleConfig(true, "none"))
+			req := cliproxyexecutor.Request{Model: "gpt-image-2", Payload: identityImagePayload()}
+			var client string
+			if tc.stream {
+				result, err := exec.ExecuteStream(ctx, auth, req, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+				if err == nil {
+					for range result.Chunks {
+					}
+					t.Fatal("want a status error for the non-2xx stream")
+				}
+				client = err.Error()
+			} else {
+				resp, err := exec.Execute(ctx, auth, req, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+				if err != nil {
+					client = err.Error()
+				} else {
+					client = string(resp.Payload)
+				}
+			}
+			if strings.Contains(client, confused) || strings.Contains(client, confused[12:]) {
+				t.Fatalf("client sees the credential-scoped cache key: %s", client)
+			}
+			if !strings.Contains(client, "key="+identityTestCacheKey) {
+				t.Fatalf("client key not restored: %s", client)
+			}
+		})
+	}
+}
