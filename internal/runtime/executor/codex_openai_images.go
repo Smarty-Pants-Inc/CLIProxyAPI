@@ -347,12 +347,14 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	if errCache != nil {
 		return resp, errCache
 	}
+	beforeRulesKey := codexPromptCacheKey(body)
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
 	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body)
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
@@ -418,12 +420,14 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	if errCache != nil {
 		return nil, errCache
 	}
+	beforeRulesKey := codexPromptCacheKey(body)
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
 	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body)
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
@@ -471,24 +475,63 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			reporter.EnsurePublished(ctx)
 		}()
 
+		var needles [][]byte
+		maxLen := 0
+		addReplacement := func(from, to string) {
+			from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+			if from == "" || to == "" || from == to {
+				return
+			}
+			needles = append(needles, []byte(from), []byte(to))
+			maxLen = max(maxLen, len(from), len(to))
+		}
+		addReplacement(identityState.originalPromptCacheKey, identityState.promptCacheKey)
+		if identityState.enabled {
+			addReplacement(identityState.ruleKey, identityState.originalPromptCacheKey)
+		}
+		for _, turnID := range identityState.turnIDs {
+			addReplacement(turnID.original, turnID.confused)
+		}
+
+		var usageLines helps.StreamUsageLines
+		defer usageLines.Close(streamUsage.ObserveOpenAIStream)
+		emitChunk := func(chunk []byte) bool {
+			chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
+			// Usage lines are reassembled across reads, bounded per line.
+			usageLines.Observe(chunk, streamUsage.ObserveOpenAIStream)
+			clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
 		buffer := make([]byte, 32*1024)
+		var carry []byte
 		for {
 			n, errRead := httpResp.Body.Read(buffer)
 			if n > 0 {
-				chunk := bytes.Clone(buffer[:n])
-				chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
-				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
-				for _, line := range bytes.Split(chunk, []byte("\n")) {
-					streamUsage.ObserveOpenAIStream(bytes.TrimSpace(line))
+				var chunk []byte
+				if maxLen == 0 {
+					// No replacements: preserve the old read/forward boundaries.
+					chunk = bytes.Clone(buffer[:n])
+				} else {
+					pending := append(carry, buffer[:n]...)
+					cut := codexImageCarryCut(pending, needles, maxLen)
+					carry = bytes.Clone(pending[cut:])
+					chunk = pending[:cut]
 				}
-				clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
-				case <-ctx.Done():
+				if len(chunk) > 0 && !emitChunk(chunk) {
 					return
 				}
 			}
 			if errRead != nil {
+				if len(carry) > 0 && !emitChunk(carry) {
+					return
+				}
 				if errRead != io.EOF {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					reporter.PublishFailure(ctx, errRead)
@@ -1148,4 +1191,40 @@ func codexMimeTypeFromOutputFormat(outputFormat string) string {
 	default:
 		return "image/png"
 	}
+}
+
+// codexImageCarryCut returns how much of pending can be emitted now: everything except a tail that may hold the
+// start of an identifier continuing in the next read. The cut only moves back to the start of a match that
+// actually crosses it, using leftmost non-overlapping matches as bytes.ReplaceAll does, and never below a floor,
+// so the carry stays bounded even for self-overlapping identifiers ("aa" in "aaaa…") (CLIProxyAPI#115 r2 P2).
+func codexImageCarryCut(pending []byte, needles [][]byte, maxLen int) int {
+	if maxLen == 0 {
+		return len(pending)
+	}
+	cut := max(0, len(pending)-(maxLen-1))
+	floor := max(0, len(pending)-(maxLen-1)-len(needles)*maxLen)
+	var matches [][2]int
+	for _, needle := range needles {
+		if len(needle) == 0 {
+			continue
+		}
+		for i := max(0, floor-len(needle)); i < len(pending); {
+			j := bytes.Index(pending[i:], needle)
+			if j < 0 {
+				break
+			}
+			start := i + j
+			matches = append(matches, [2]int{start, start + len(needle)})
+			i = start + len(needle)
+		}
+	}
+	for moved := true; moved; {
+		moved = false
+		for _, m := range matches {
+			if m[0] < cut && m[1] > cut && m[0] >= floor {
+				cut, moved = m[0], true
+			}
+		}
+	}
+	return cut
 }
