@@ -380,6 +380,12 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 			return true
 		}
 	}
+	return hasExplicitPayloadSession(sessionPayloadView(payload))
+}
+
+// hasExplicitPayloadSession reports whether payload (the full body or its
+// sessionPayloadView) carries an explicit session identity.
+func hasExplicitPayloadSession(payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}

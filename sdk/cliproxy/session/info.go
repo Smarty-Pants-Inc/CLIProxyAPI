@@ -47,7 +47,30 @@ type SessionTreeInfo = SessionInfo
 //  10. prompt_cache_key (pck:), conversation.id (conv:), metadata.user_id (user:)
 //  11. conversation_id / chat_id
 //  12. execution_session_id metadata
+//
+// Payload paths are resolved against sessionPayloadView(payload), a small cached
+// projection of the session-relevant top-level members, so the full body (often
+// megabytes of messages) is usually JSON-parsed once per distinct payload instead of
+// once per lookup. Payloads over the cache's size limits, evicted entries and hash
+// collisions are parsed again (correct, just slower). Every call still makes linear byte passes over the body (the cache
+// hash and, on a hit, a bytes.Equal check), which is far cheaper than the parse.
+// Headers and metadata are evaluated on every call.
 func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
+	view := sessionPayloadView(payload)
+	info, ok := extractSessionInfo(headers, view, metadata)
+	if sessionPayloadViewObserver != nil {
+		sessionPayloadViewObserver(headers, payload, metadata, info, ok)
+	}
+	return info, ok
+}
+
+// sessionPayloadViewObserver is a test hook that lets tests compare the projected
+// result against extractSessionInfo on the raw payload. It is nil in production.
+var sessionPayloadViewObserver func(headers http.Header, payload []byte, metadata map[string]any, info SessionInfo, ok bool)
+
+// extractSessionInfo implements ExtractSessionInfo. payload may be the full
+// request body or its sessionPayloadView; both yield the same result.
+func extractSessionInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
 	var info SessionInfo
 	if metadata != nil {
 		if scope, ok := metadata[cliproxyexecutor.CallerScopeMetadataKey].(string); ok {
