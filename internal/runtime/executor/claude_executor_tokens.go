@@ -232,9 +232,9 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	if alignCLICountTokensShape {
 		body = util.StripClaudeCodeAttributionSystem(body)
 	}
+	// prompt_cache_options is a client-only hint and was stripped above, before
+	// payload rules run; a configured rule that sets it is the final barrier and wins.
 	body = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(body)
-	// This is a client-only hint, including when a payload rule adds it.
-	body = stripPromptCacheOptions(body)
 	// Read-only validation must observe the final configured model and messages.
 	if errMidSystem := validateClaudeMidSystemMessageModel(body, confirmedClaudeCode, directAnthropic); errMidSystem != nil {
 		return cliproxyexecutor.Response{}, errMidSystem

@@ -604,7 +604,10 @@ func TestClaudeExecutor_CountTokens_StripsPromptCacheOptions(t *testing.T) {
 	}
 }
 
-func TestClaudeExecutor_CountTokensUpstream_StripsPromptCacheOptions_EvenWithPayloadRule(t *testing.T) {
+// The client-only hint is stripped before payload rules run, so an operator
+// rule that sets prompt_cache_options on count_tokens is the final barrier and
+// survives; without a rule the field stays stripped (see the test above).
+func TestClaudeExecutor_CountTokensUpstream_PayloadRulePromptCacheOptionsSurvives(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -652,8 +655,8 @@ func TestClaudeExecutor_CountTokensUpstream_StripsPromptCacheOptions_EvenWithPay
 	if len(upstreamResp.Payload) == 0 {
 		t.Fatal("expected non-empty countTokensUpstream payload")
 	}
-	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
-		t.Fatalf("prompt_cache_options should not be forwarded in count_tokens upstream even if injected by payload rule: %s", string(seenBody))
+	if got := gjson.GetBytes(seenBody, "prompt_cache_options.mode").String(); got != "explicit" {
+		t.Fatalf("payload rule prompt_cache_options.mode = %q on count_tokens upstream, want explicit (payload rules are the final barrier): %s", got, string(seenBody))
 	}
 }
 
