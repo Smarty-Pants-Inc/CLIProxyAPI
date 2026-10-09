@@ -478,31 +478,56 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 		}()
 
 		var needles [][]byte
+		var confusers, exposers []*helps.CodexIdentityResponseRewriter
 		maxLen := 0
-		addReplacement := func(from, to string) {
+		contentType := strings.ToLower(httpResp.Header.Get("Content-Type"))
+		isSSE := strings.Contains(contentType, "text/event-stream")
+		isJSON := strings.Contains(contentType, "json")
+		addReplacement := func(from, to string, expose bool) {
 			from, to = strings.TrimSpace(from), strings.TrimSpace(to)
 			if from == "" || to == "" || from == to {
 				return
 			}
 			needles = append(needles, []byte(from), []byte(to))
 			maxLen = max(maxLen, len(from), len(to))
+			rewriter := helps.NewCodexIdentityResponseRewriter(from, to, isSSE, isJSON)
+			if expose {
+				exposers = append(exposers, rewriter)
+			} else {
+				confusers = append(confusers, rewriter)
+			}
 		}
-		addReplacement(identityState.originalPromptCacheKey, identityState.promptCacheKey)
+		addReplacement(identityState.originalPromptCacheKey, identityState.promptCacheKey, false)
+		for _, turnID := range identityState.turnIDs {
+			addReplacement(turnID.original, turnID.confused, false)
+		}
+		addReplacement(identityState.promptCacheKey, identityState.originalPromptCacheKey, true)
 		if identityState.enabled {
-			addReplacement(identityState.ruleKey, identityState.originalPromptCacheKey)
+			addReplacement(identityState.ruleKey, identityState.originalPromptCacheKey, true)
 		}
 		for _, turnID := range identityState.turnIDs {
-			addReplacement(turnID.original, turnID.confused)
+			addReplacement(turnID.confused, turnID.original, true)
 		}
 
 		var usageLines helps.StreamUsageLines
 		defer usageLines.Close(streamUsage.ObserveOpenAIStream)
-		emitChunk := func(chunk []byte) bool {
-			chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
+		emitChunk := func(chunk []byte, final bool) bool {
+			// Lexical state retains the left boundary across carry cuts and holds
+			// a complete match until its decoded right boundary is known. A cut
+			// is not an end-of-string/end-of-token boundary.
+			for _, rewriter := range confusers {
+				chunk = rewriter.Rewrite(chunk, final)
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
 			// Usage lines are reassembled across reads, bounded per line.
 			usageLines.Observe(chunk, streamUsage.ObserveOpenAIStream)
-			clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
+			clientChunk := chunk
+			for _, rewriter := range exposers {
+				clientChunk = rewriter.Rewrite(clientChunk, final)
+			}
+			if len(clientChunk) == 0 {
+				return true
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
 				return true
@@ -526,12 +551,12 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 					carry = bytes.Clone(pending[cut:])
 					chunk = pending[:cut]
 				}
-				if len(chunk) > 0 && !emitChunk(chunk) {
+				if len(chunk) > 0 && !emitChunk(chunk, false) {
 					return
 				}
 			}
 			if errRead != nil {
-				if len(carry) > 0 && !emitChunk(carry) {
+				if !emitChunk(carry, true) {
 					return
 				}
 				if errRead != io.EOF {
@@ -1199,6 +1224,8 @@ func codexMimeTypeFromOutputFormat(outputFormat string) string {
 // start of an identifier continuing in the next read. The cut only moves back to the start of a match that
 // actually crosses it, using leftmost non-overlapping matches as bytes.ReplaceAll does, and never below a floor,
 // so the carry stays bounded even for self-overlapping identifiers ("aa" in "aaaa…") (CLIProxyAPI#115 r2 P2).
+// This is only a raw-byte cut, not a token boundary. The streaming identity rewriters separately retain
+// decoded left context and a bounded candidate until its right boundary is known, including escaped JSON.
 func codexImageCarryCut(pending []byte, needles [][]byte, maxLen int) int {
 	if maxLen == 0 {
 		return len(pending)
