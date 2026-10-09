@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -565,36 +566,9 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 	return payload, nil
 }
 
+// atomicWriteFile persists plugin token storage 0600 via temp file, fsync and rename.
 func atomicWriteFile(path string, data []byte) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fmt.Errorf("path is empty")
-	}
-	dir := filepath.Dir(path)
-	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
-		return fmt.Errorf("create auth directory: %w", errMkdir)
-	}
-	tmp, errCreate := os.CreateTemp(dir, ".plugin-auth-*.tmp")
-	if errCreate != nil {
-		return fmt.Errorf("create temp auth file: %w", errCreate)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpPath)
-	}()
-	if _, errWrite := tmp.Write(data); errWrite != nil {
-		if errClose := tmp.Close(); errClose != nil {
-			errWrite = fmt.Errorf("%w; close temp auth file: %v", errWrite, errClose)
-		}
-		return fmt.Errorf("write temp auth file: %w", errWrite)
-	}
-	if errClose := tmp.Close(); errClose != nil {
-		return fmt.Errorf("close temp auth file: %w", errClose)
-	}
-	if errRename := os.Rename(tmpPath, path); errRename != nil {
-		return fmt.Errorf("rename temp auth file: %w", errRename)
-	}
-	return nil
+	return misc.WriteFileAtomic(path, data, 0o600)
 }
 
 func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, authDir string) *coreauth.Auth {

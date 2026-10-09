@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 // CodexTokenStorage stores OAuth2 token information for OpenAI Codex API authentication.
@@ -69,17 +68,12 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
+	raw, errMarshal := json.Marshal(data)
+	if errMarshal != nil {
+		return fmt.Errorf("failed to encode token: %w", errMarshal)
 	}
-	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("codex token storage: close token file error: %v", errClose)
-		}
-	}()
-
-	if err = json.NewEncoder(f).Encode(data); err != nil {
+	// Owner-only, and never a truncated file on crash or concurrent read.
+	if err := misc.WriteFileAtomic(authFilePath, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
