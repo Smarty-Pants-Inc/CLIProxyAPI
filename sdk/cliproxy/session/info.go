@@ -50,8 +50,10 @@ type SessionTreeInfo = SessionInfo
 //
 // Payload paths are resolved against sessionPayloadView(payload), a small cached
 // projection of the session-relevant top-level members, so the full body (often
-// megabytes of messages) is scanned at most once per distinct payload instead of
-// once per lookup. Headers and metadata are evaluated on every call.
+// megabytes of messages) is JSON-parsed at most once per distinct payload instead of
+// once per lookup. Every call still makes linear byte passes over the body (the cache
+// hash and, on a hit, a bytes.Equal check), which is far cheaper than the parse.
+// Headers and metadata are evaluated on every call.
 func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
 	view := sessionPayloadView(payload)
 	info, ok := extractSessionInfo(headers, view, metadata)
