@@ -227,7 +227,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
-			payload = frameCodexWebsocketRequestBody(prepared.clientBody)
+			payload = frameCodexWebsocketRequestBody(prepared.upstreamBody)
 			// Preparation can merge signed input or apply payload rules. Validate
 			// the final submission on the actual socket account before any write.
 			if errAffinity := validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
@@ -490,7 +490,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				// Retain response settings, not request history or authorization headers.
 				// In-flight steering pins its parent's settings independently of this window.
 				snapshot := *current
-				snapshot.originalPayload, snapshot.wsHeaders = nil, nil
+				snapshot.originalPayload, snapshot.upstreamBody, snapshot.wsHeaders = nil, nil, nil
 				snapshot.clientBody = []byte("{}")
 				if reasoning := gjson.GetBytes(current.clientBody, "reasoning"); reasoning.Exists() {
 					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "reasoning", []byte(reasoning.Raw))
@@ -592,7 +592,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				metadataMu.Lock()
 				// A failure for the running response must not consume a queued create.
 				// A rejection before response.created instead owns the oldest pending
-				// create, including its reasoning replay scope.
+				// create, including its identity mapping and reasoning replay scope.
 				currentFailure := failedID != "" && failedID == responseID
 				ambiguous := failedID == "" && ((len(pending) > 0 && responseActive) || len(unacknowledgedSteers) > 0)
 				if len(pending) > 0 && !currentFailure && !ambiguous {
@@ -617,6 +617,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					return
 				}
 			}
+			payload = applyCodexIdentityConfuseResponsePayload(payload, eventPrepared.identityState)
 			restoreMultiAgent := !eventPrepared.multiAgentV2Conflict && (eventPrepared.optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgent)
 			if modelErr := modelGuard.Observe(payload); modelErr != nil {
@@ -670,6 +671,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					reporter.EnsurePublished(ctx)
 				}
 			}
+			payload = applyCodexIdentityExposeResponsePayload(payload, eventPrepared.identityState)
 			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload)}) {
 				return
 			}

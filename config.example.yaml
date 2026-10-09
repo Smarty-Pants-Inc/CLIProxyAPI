@@ -338,6 +338,10 @@ upstream:
     # Experimental full-duplex Codex Responses WebSocket steering (default: false).
     # Keeps one upstream account/model per socket; accepted input is never replayed.
     response-steering: false
+    # When true, and routing.strategy is fill-first or routing.session-affinity is true,
+    # remap Codex prompt_cache_key, installation and turn identity per selected credential
+    # and restore the client's identifiers in responses.
+    identity-confuse: false
     # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
     disable-codex-cloaking: false
     # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
