@@ -1183,6 +1183,17 @@ func closeRecoveryRepositories(closeRepository func(*git.Repository) error, base
 }
 
 func (s *GitTokenStore) recoverRepositoryLocked(repoDir string, authMethod []client.Option, callerRepo *git.Repository, baselineTree *object.Tree, dirtyPaths map[string]struct{}, closeRepository func(*git.Repository) error, renameWorktreeEntry func(string, string) error) (errRecovery error) {
+	authRel, authInRepo := s.authDirRelativeTo(repoDir)
+	if authInRepo {
+		if errCheck := checkRecoveryAuthRoot(repoDir, authRel); errCheck != nil {
+			if callerRepo != nil {
+				if errClose := closeRepository(callerRepo); errClose != nil {
+					return errors.Join(errCheck, fmt.Errorf("close recovery caller repository: %w", errClose))
+				}
+			}
+			return errCheck
+		}
+	}
 	parentDir := filepath.Dir(repoDir)
 	recoveryRoot, errTemp := os.MkdirTemp(parentDir, ".gitstore-recovery-")
 	if errTemp != nil {
@@ -1270,7 +1281,6 @@ func (s *GitTokenStore) recoverRepositoryLocked(repoDir string, authMethod []cli
 	if errPreserve != nil {
 		return errPreserve
 	}
-	authRel, authInRepo := s.authDirRelativeTo(repoDir)
 	authTree := ""
 	if authInRepo {
 		authTree = authRel
@@ -1417,6 +1427,33 @@ func recoveryPreservedPaths(baselineTree, remoteTree *object.Tree, dirtyPaths ma
 	return dirtyPaths, nil
 }
 
+// checkRecoveryAuthRoot refuses symlinks at the store root or any component
+// down to the auth root. A missing component is safe for later creation.
+func checkRecoveryAuthRoot(repoDir, authRel string) error {
+	if authRel == "" {
+		return nil
+	}
+	current := filepath.Clean(repoDir)
+	components := append([]string{"."}, strings.Split(filepath.Clean(authRel), string(filepath.Separator))...)
+	for _, component := range components {
+		current = filepath.Join(current, component)
+		info, errStat := os.Lstat(current)
+		if errors.Is(errStat, fs.ErrNotExist) {
+			return nil
+		}
+		if errStat != nil {
+			return fmt.Errorf("inspect recovery auth root component %s: %w", current, errStat)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refuse recovery through symlinked auth root component %s", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("recovery auth root component %s is not a directory", current)
+		}
+	}
+	return nil
+}
+
 // recoveryPathInAuthTree reports whether the slash-separated repository path
 // lies in the auth tree authRel (relative to the repository; "" means the
 // auth tree is not inside the repository, "." that it is the repository).
@@ -1424,6 +1461,7 @@ func recoveryPathInAuthTree(path, authRel string) bool {
 	if authRel == "" {
 		return false
 	}
+	path = filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 	authRel = filepath.ToSlash(filepath.Clean(authRel))
 	if authRel == "." {
 		return true
@@ -1454,14 +1492,34 @@ func writeRecoveredFileWithMode(target string, contents []byte, perm fs.FileMode
 // clone. Files in the auth tree (authRel, see recoveryPathInAuthTree) go
 // through the owner-only atomic auth writer; other files keep their mode.
 func applyRecoveryLocalChanges(sourceDir, targetDir string, paths map[string]struct{}, authRel string) error {
+	// Check both trees before any deletion or write, including a symlinked
+	// auth root supplied by the remote checkout.
+	for _, root := range []string{sourceDir, targetDir} {
+		if errCheck := checkRecoveryAuthRoot(root, authRel); errCheck != nil {
+			return errCheck
+		}
+	}
+	resolvedSourceDir, errResolve := filepath.EvalSymlinks(sourceDir)
+	if errResolve != nil {
+		return fmt.Errorf("resolve recovery source root: %w", errResolve)
+	}
 	sortedPaths := make([]string, 0, len(paths))
 	for path := range paths {
 		sortedPaths = append(sortedPaths, path)
 	}
 	sort.Strings(sortedPaths)
 	for _, path := range sortedPaths {
+		path = filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+		if path == "." || path == ".." || strings.HasPrefix(path, "../") || filepath.IsAbs(path) {
+			return fmt.Errorf("recovery path %s is not inside the store root", path)
+		}
 		source := filepath.Join(sourceDir, filepath.FromSlash(path))
 		target := filepath.Join(targetDir, filepath.FromSlash(path))
+		// A target parent symlink could redirect a write or deletion outside
+		// the clone or into its auth tree. Refuse it before either operation.
+		if errCheck := checkRecoveryAuthRoot(targetDir, filepath.Dir(filepath.FromSlash(path))); errCheck != nil {
+			return errCheck
+		}
 		info, errStat := os.Lstat(source)
 		if errors.Is(errStat, fs.ErrNotExist) {
 			if errRemove := os.RemoveAll(target); errRemove != nil {
@@ -1471,6 +1529,18 @@ func applyRecoveryLocalChanges(sourceDir, targetDir string, paths map[string]str
 		}
 		if errStat != nil {
 			return fmt.Errorf("inspect local change %s: %w", path, errStat)
+		}
+		inAuthTree := recoveryPathInAuthTree(path, authRel)
+		if info.Mode().IsRegular() {
+			resolvedSource, errResolve := filepath.EvalSymlinks(source)
+			if errResolve != nil {
+				return fmt.Errorf("resolve local change %s: %w", path, errResolve)
+			}
+			resolvedRel, errRel := filepath.Rel(resolvedSourceDir, resolvedSource)
+			if errRel != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
+				return fmt.Errorf("resolved recovery path %s is not inside the store root", path)
+			}
+			inAuthTree = inAuthTree || recoveryPathInAuthTree(resolvedRel, authRel)
 		}
 		if errRemove := os.RemoveAll(target); errRemove != nil {
 			return fmt.Errorf("replace recovered path %s: %w", path, errRemove)
@@ -1485,7 +1555,7 @@ func applyRecoveryLocalChanges(sourceDir, targetDir string, paths map[string]str
 				return fmt.Errorf("read local change %s: %w", path, errRead)
 			}
 			var errWrite error
-			if recoveryPathInAuthTree(path, authRel) {
+			if inAuthTree {
 				errWrite = misc.WriteAuthFileAtomic(target, contents)
 			} else {
 				errWrite = writeRecoveredFileWithMode(target, contents, info.Mode().Perm())
