@@ -52,10 +52,10 @@ func ExtractCustomHeadersFromMetadata(metadata map[string]any) map[string]string
 }
 
 func ApplyCustomHeadersFromMetadata(auth *Auth) {
-	if auth == nil || len(auth.Metadata) == 0 {
+	if auth == nil {
 		return
 	}
-	headers := ExtractCustomHeadersFromMetadata(auth.Metadata)
+	headers := ExtractCustomHeadersFromMetadata(auth.CloneMetadata())
 	if len(headers) == 0 {
 		return
 	}

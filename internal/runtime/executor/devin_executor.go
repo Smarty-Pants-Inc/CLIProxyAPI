@@ -2549,19 +2549,17 @@ func devinAuthCredentials(auth *cliproxyauth.Auth) (apiKey string, baseURL strin
 			deviceSeed = v
 		}
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["api_key"].(string); ok && strings.TrimSpace(v) != "" && apiKey == "" {
-			apiKey = strings.TrimSpace(v)
-		}
-		if v, ok := auth.Metadata["session_token"].(string); ok && strings.TrimSpace(v) != "" && apiKey == "" {
-			apiKey = strings.TrimSpace(v)
-		}
-		if v, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(v) != "" && baseURL == helps.DevinDefaultBaseURL {
-			baseURL = strings.TrimSpace(v)
-		}
-		if v, ok := auth.Metadata["device_seed"].(string); ok && strings.TrimSpace(v) != "" && deviceSeed == "" {
-			deviceSeed = strings.TrimSpace(v)
-		}
+	if v := strings.TrimSpace(auth.MetadataString("api_key")); v != "" && apiKey == "" {
+		apiKey = v
+	}
+	if v := strings.TrimSpace(auth.MetadataString("session_token")); v != "" && apiKey == "" {
+		apiKey = v
+	}
+	if v := strings.TrimSpace(auth.MetadataString("base_url")); v != "" && baseURL == helps.DevinDefaultBaseURL {
+		baseURL = v
+	}
+	if v := strings.TrimSpace(auth.MetadataString("device_seed")); v != "" && deviceSeed == "" {
+		deviceSeed = v
 	}
 	return
 }

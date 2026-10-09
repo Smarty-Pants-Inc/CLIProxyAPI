@@ -39,7 +39,7 @@ func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreau
 		ctx: ctx, auth: auth.Clone(), provider: provider,
 		registryEpoch: GlobalModelRegistry().ClientRegistrationEpoch(auth.ID),
 	}
-	token, _ := request.auth.Metadata["access_token"].(string)
+	token := request.auth.MetadataString("access_token")
 	probe := &antigravityAccountProbe{
 		auth: request.auth, routeKey: s.antigravityCapabilityKey(request.auth), token: strings.TrimSpace(token),
 	}
@@ -203,7 +203,7 @@ func (s *Service) antigravityAccountProbeCurrent(probe *antigravityAccountProbe)
 			return false
 		}
 	}
-	token, _ := current.Metadata["access_token"].(string)
+	token := current.MetadataString("access_token")
 	return !current.Disabled && current.Status != coreauth.StatusDisabled &&
 		antigravityAuthModelSettingsEqual(current, probe.auth) &&
 		s.antigravityCapabilityKey(current) == probe.routeKey && strings.TrimSpace(token) == probe.token

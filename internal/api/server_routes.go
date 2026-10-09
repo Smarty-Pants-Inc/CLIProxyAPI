@@ -443,7 +443,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	}
 	performRequest := func(current *auth.Auth) (*http.Response, error) {
 		headers := baseHeaders.Clone()
-		if accountID, ok := current.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+		if accountID := current.MetadataString("account_id"); strings.TrimSpace(accountID) != "" {
 			headers.Set("Chatgpt-Account-Id", accountID)
 		}
 		upstreamURL := "https://chatgpt.com/backend-api/codex/alpha/search"

@@ -132,7 +132,7 @@ func homeAPIKeyModelOptions(auth *Auth, model, routeModel string) (internalconfi
 	if auth == nil {
 		return empty, false
 	}
-	raw, exists := auth.Metadata["credential_options"]
+	raw, exists := auth.MetadataValue("credential_options")
 	if !exists {
 		return empty, false
 	}

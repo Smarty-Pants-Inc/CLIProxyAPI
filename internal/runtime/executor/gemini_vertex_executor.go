@@ -1189,28 +1189,29 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 
 // vertexCreds extracts project, location and raw service account JSON from auth metadata.
 func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccountJSON []byte, err error) {
-	if a == nil || a.Metadata == nil {
+	metadata := a.CloneMetadata()
+	if metadata == nil {
 		return "", "", nil, fmt.Errorf("vertex executor: missing auth metadata")
 	}
-	if v, ok := a.Metadata["project_id"].(string); ok {
+	if v, ok := metadata["project_id"].(string); ok {
 		projectID = strings.TrimSpace(v)
 	}
 	if projectID == "" {
 		// Some service accounts may use "project"; still prefer standard field
-		if v, ok := a.Metadata["project"].(string); ok {
+		if v, ok := metadata["project"].(string); ok {
 			projectID = strings.TrimSpace(v)
 		}
 	}
 	if projectID == "" {
 		return "", "", nil, fmt.Errorf("vertex executor: missing project_id in credentials")
 	}
-	if v, ok := a.Metadata["location"].(string); ok && strings.TrimSpace(v) != "" {
+	if v, ok := metadata["location"].(string); ok && strings.TrimSpace(v) != "" {
 		location = strings.TrimSpace(v)
 	} else {
 		location = "us-central1"
 	}
 	var sa map[string]any
-	if raw, ok := a.Metadata["service_account"].(map[string]any); ok {
+	if raw, ok := metadata["service_account"].(map[string]any); ok {
 		sa = raw
 	}
 	if sa == nil {
@@ -1236,10 +1237,8 @@ func vertexAPICreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		apiKey = a.Attributes["api_key"]
 		baseURL = a.Attributes["base_url"]
 	}
-	if apiKey == "" && a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok {
-			apiKey = v
-		}
+	if apiKey == "" {
+		apiKey = a.MetadataString("access_token")
 	}
 	return
 }
@@ -1329,15 +1328,7 @@ func isNativeVertexInteractionsAuth(auth *cliproxyauth.Auth) bool {
 			return true
 		}
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["interactions"].(bool); ok && v {
-			return true
-		}
-		if v, ok := auth.Metadata["native_interactions"].(bool); ok && v {
-			return true
-		}
-	}
-	return false
+	return auth.MetadataBool("interactions") || auth.MetadataBool("native_interactions")
 }
 
 func vertexInteractionsURL(baseURL, projectID string, isStream bool) string {
@@ -1393,10 +1384,8 @@ func (e *GeminiVertexExecutor) executeInteractions(ctx context.Context, auth *cl
 		if auth != nil && auth.Attributes != nil && auth.Attributes["base_url"] != "" {
 			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		}
-	} else if auth != nil && auth.Metadata != nil {
-		if pid, ok := auth.Metadata["project_id"].(string); ok {
-			projectID = pid
-		}
+	} else {
+		projectID = auth.MetadataString("project_id")
 	}
 
 	url := vertexInteractionsURL(baseURL, projectID, false)
@@ -1522,10 +1511,8 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 		if auth != nil && auth.Attributes != nil && auth.Attributes["base_url"] != "" {
 			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		}
-	} else if auth != nil && auth.Metadata != nil {
-		if pid, ok := auth.Metadata["project_id"].(string); ok {
-			projectID = pid
-		}
+	} else {
+		projectID = auth.MetadataString("project_id")
 	}
 
 	url := vertexInteractionsURL(baseURL, projectID, true)

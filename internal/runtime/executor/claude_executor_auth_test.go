@@ -188,7 +188,7 @@ func TestClaudeExecutorPrepareRequestAuthIgnoresFreshTimestampWithoutIdentity(t 
 	if !executor.ShouldPrepareRequestAuth(auth) {
 		t.Fatal("ShouldPrepareRequestAuth() = false after failed profile lookup; failure must remain retryable")
 	}
-	if got := claudeauth.ReadMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey); got != previousCheckedAt {
+	if got := claudeauth.ReadMetadataString(auth, claudeAccountProfileCheckedAtKey); got != previousCheckedAt {
 		t.Fatalf("profile checked timestamp = %q, want prior value preserved without suppressing retry", got)
 	}
 }
@@ -220,7 +220,7 @@ func TestClaudeExecutorPrepareRequestAuthSetupTokenBypassesProfile(t *testing.T)
 	if prepared == nil {
 		t.Fatal("prepared auth is nil")
 	}
-	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	accountUUID := claudeauth.ReadMetadataString(prepared, "account_uuid")
 	if accountUUID == "" {
 		t.Fatal("account_uuid is empty after setup-token preparation")
 	}
@@ -264,7 +264,7 @@ func TestClaudeExecutorPrepareRequestAuth403ScopeFallback(t *testing.T) {
 	if fetchCalls != 1 {
 		t.Fatalf("fetchCalls = %d, want 1", fetchCalls)
 	}
-	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	accountUUID := claudeauth.ReadMetadataString(prepared, "account_uuid")
 	if accountUUID == "" {
 		t.Fatal("account_uuid is empty after 403 fallback")
 	}
@@ -300,7 +300,7 @@ func TestClaudeExecutorPrepareRequestAuthSkipAccountProfileConfig(t *testing.T) 
 	if prepared == nil {
 		t.Fatal("prepared auth is nil")
 	}
-	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	accountUUID := claudeauth.ReadMetadataString(prepared, "account_uuid")
 	if accountUUID == "" {
 		t.Fatal("account_uuid is empty after skip_account_profile preparation")
 	}
@@ -336,7 +336,7 @@ func TestClaudeExecutorPrepareRequestAuthEmptyAccountUUIDInProfileFallback(t *te
 	if fetchCalls != 1 {
 		t.Fatalf("fetchCalls = %d, want 1", fetchCalls)
 	}
-	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	accountUUID := claudeauth.ReadMetadataString(prepared, "account_uuid")
 	if accountUUID == "" {
 		t.Fatal("account_uuid is empty after fallback")
 	}

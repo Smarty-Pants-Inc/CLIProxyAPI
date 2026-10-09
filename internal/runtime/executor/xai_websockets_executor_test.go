@@ -267,6 +267,8 @@ func TestXAIWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 }
 
 func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *testing.T) {
+	// Repeated runs must not inherit this test's persistent session or ID state.
+	defer func() { NewXAIWebsocketsExecutor(&config.Config{}).CloseExecutionSession("execution-session-1") }()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

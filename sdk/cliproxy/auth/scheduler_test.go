@@ -105,7 +105,7 @@ func (d *authKindHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string,
 	if count < 1 || count > len(d.auths) {
 		return nil, home.ErrAuthNotFound
 	}
-	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[count-1]})
+	return json.Marshal(map[string]any{"auth": d.auths[count-1].Clone()})
 }
 
 func (d *authKindHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model string, sessionID string, headers http.Header, count int, policy string) ([]byte, error) {

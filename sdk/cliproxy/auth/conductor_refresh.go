@@ -177,7 +177,7 @@ func authPreferredInterval(a *Auth) time.Duration {
 	if a == nil {
 		return 0
 	}
-	if d := durationFromMetadata(a.Metadata, "refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval"); d > 0 {
+	if d := durationFromMetadata(a.CloneMetadata(), "refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval"); d > 0 {
 		return d
 	}
 	if d := durationFromAttributes(a.Attributes, "refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval"); d > 0 {
@@ -295,10 +295,8 @@ func authLastRefreshTimestamp(a *Auth) (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
 	}
-	if a.Metadata != nil {
-		if ts, ok := lookupMetadataTime(a.Metadata, "last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"); ok {
-			return ts, true
-		}
+	if ts, ok := lookupMetadataTime(a.CloneMetadata(), "last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"); ok {
+		return ts, true
 	}
 	if a.Attributes != nil {
 		for _, key := range []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"} {
@@ -470,7 +468,9 @@ func refreshBindingChanged(base, current *Auth) bool {
 		"account_id", "accountId", "email", "project_id", "projectId", "organization_id", "organizationId",
 		"dca_token", "base_url", "api_base_url",
 	} {
-		if !reflect.DeepEqual(base.Metadata[key], current.Metadata[key]) || base.Attributes[key] != current.Attributes[key] {
+		baseValue, _ := base.MetadataValue(key)
+		currentValue, _ := current.MetadataValue(key)
+		if !reflect.DeepEqual(baseValue, currentValue) || base.Attributes[key] != current.Attributes[key] {
 			return true
 		}
 	}

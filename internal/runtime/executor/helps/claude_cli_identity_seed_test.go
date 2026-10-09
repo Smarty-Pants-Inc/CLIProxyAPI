@@ -20,7 +20,7 @@ func TestEnsureClaudeCLIFingerprintIdentitySynthesizesStableSources(t *testing.T
 	if account == "" {
 		t.Fatal("account_uuid is empty")
 	}
-	deviceIDs, _, errPool := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata)
+	deviceIDs, _, errPool := claudeauth.EnsureDeviceIDPoolFor(auth)
 	if errPool != nil {
 		t.Fatalf("EnsureDeviceIDPoolFor() error = %v", errPool)
 	}
@@ -165,7 +165,7 @@ func TestEnsureClaudeCLIFingerprintIdentityPreservesExistingOAuthSources(t *test
 	if got := ClaudeCredentialAccountUUID(auth); got != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Fatalf("account_uuid = %q, want preserved", got)
 	}
-	deviceIDs, _, errPool := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata)
+	deviceIDs, _, errPool := claudeauth.EnsureDeviceIDPoolFor(auth)
 	if errPool != nil {
 		t.Fatalf("EnsureDeviceIDPoolFor() error = %v", errPool)
 	}

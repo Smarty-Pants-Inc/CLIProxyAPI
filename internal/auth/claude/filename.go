@@ -49,9 +49,9 @@ func FindMatchingLegacyCredential(ctx context.Context, store coreauth.Store, tar
 		return nil, fmt.Errorf("list Claude credentials for legacy migration: %w", errList)
 	}
 
-	targetEmail := metadataString(target.Metadata, "email")
-	targetOrganization := metadataString(target.Metadata, "organization_uuid")
-	targetAccount := metadataString(target.Metadata, "account_uuid")
+	targetEmail := strings.TrimSpace(target.MetadataString("email"))
+	targetOrganization := strings.TrimSpace(target.MetadataString("organization_uuid"))
+	targetAccount := strings.TrimSpace(target.MetadataString("account_uuid"))
 	legacyFileName := CredentialFileName(targetEmail, "", "")
 	accountFileName := ""
 	if targetOrganization != "" && targetAccount != "" {
@@ -73,8 +73,8 @@ func FindMatchingLegacyCredential(ctx context.Context, store coreauth.Store, tar
 			continue
 		}
 
-		candidateOrganization := metadataString(candidate.Metadata, "organization_uuid")
-		candidateAccount := metadataString(candidate.Metadata, "account_uuid")
+		candidateOrganization := strings.TrimSpace(candidate.MetadataString("organization_uuid"))
+		candidateAccount := strings.TrimSpace(candidate.MetadataString("account_uuid"))
 		switch {
 		case targetOrganization != "":
 			if candidateOrganization != "" && strings.EqualFold(candidateOrganization, targetOrganization) {
@@ -97,9 +97,9 @@ func isHashedCredentialTarget(target *coreauth.Auth) bool {
 	if target == nil || !strings.EqualFold(strings.TrimSpace(target.Provider), "claude") {
 		return false
 	}
-	email := metadataString(target.Metadata, "email")
-	organizationUUID := metadataString(target.Metadata, "organization_uuid")
-	accountUUID := metadataString(target.Metadata, "account_uuid")
+	email := strings.TrimSpace(target.MetadataString("email"))
+	organizationUUID := strings.TrimSpace(target.MetadataString("organization_uuid"))
+	accountUUID := strings.TrimSpace(target.MetadataString("account_uuid"))
 	if email == "" || (organizationUUID == "" && accountUUID == "") {
 		return false
 	}

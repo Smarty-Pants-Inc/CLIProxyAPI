@@ -414,10 +414,10 @@ func antigravityTransportScope(auth *cliproxyauth.Auth) string {
 	// across token rotation. Keying on the access token would move a credential to a new
 	// pool on every refresh, and would also strand refresh requests themselves, which
 	// run before any access token exists.
-	if refresh := strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")); refresh != "" {
+	if refresh := strings.TrimSpace(metaStringValue(auth.CloneMetadata(), "refresh_token")); refresh != "" {
 		return antigravityCredentialScope("refresh:", refresh)
 	}
-	if access := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token")); access != "" {
+	if access := strings.TrimSpace(metaStringValue(auth.CloneMetadata(), "access_token")); access != "" {
 		return antigravityCredentialScope("token:", access)
 	}
 	return antigravityAnonymousTransportScope
