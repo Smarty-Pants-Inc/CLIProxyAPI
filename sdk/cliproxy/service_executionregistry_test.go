@@ -2805,6 +2805,7 @@ func TestServiceAppliesSameValueNewestSelectorCommit(t *testing.T) {
 }
 
 func TestBuilderPreservesInitialSelectorForSameRouting(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := &config.Config{
 		AuthDir: t.TempDir(),
 		Routing: internalconfig.RoutingConfig{
