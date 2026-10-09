@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -712,5 +713,20 @@ func TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger(t *testing
 	}
 	if parsed.Version() != 7 {
 		t.Fatalf("streaming request ID version = %d, want 7", parsed.Version())
+	}
+
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatalf("ReadDir logsDir failed: %v", errRead)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 streaming log file, got %d", len(entries))
+	}
+	logData, errRead := os.ReadFile(filepath.Join(logsDir, entries[0].Name()))
+	if errRead != nil {
+		t.Fatalf("ReadFile streaming log failed: %v", errRead)
+	}
+	if !bytes.Contains(logData, []byte("data: chunk\n\n")) {
+		t.Fatalf("streaming log is missing the response chunk: %q", logData)
 	}
 }
