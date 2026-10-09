@@ -80,6 +80,10 @@ jobs:
           cache: true
       - name: Test all packages without filters or cached results
         run: go test ./... -count=1 -timeout 15m
+      # smarty-dev#7617: the streaming-chunk/Finalize data race only shows under the race detector.
+      - name: Race-test the request-logging middleware
+        timeout-minutes: 5
+        run: go test -race -count=3 ./internal/api/middleware/
 
   artifact:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
