@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 // VertexCredentialStorage stores the service account JSON for Vertex AI access.
@@ -66,19 +65,13 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: merge metadata failed: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		return fmt.Errorf("vertex credential: create file failed: %w", err)
-	}
-	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("vertex credential: failed to close file: %v", errClose)
-		}
-	}()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err = enc.Encode(data); err != nil {
 		return fmt.Errorf("vertex credential: encode failed: %w", err)
+	}
+	// Owner-only, and never a truncated file on crash or concurrent read.
+	if err = misc.WriteFileAtomic(authFilePath, append(raw, '\n'), 0o600); err != nil {
+		return fmt.Errorf("vertex credential: write failed: %w", err)
 	}
 	return nil
 }
