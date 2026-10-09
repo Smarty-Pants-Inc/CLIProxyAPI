@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -469,12 +470,8 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
 		if !contentsMatch {
-			tmp := path + ".tmp"
-			if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-				return "", fmt.Errorf("auth filestore: write temp failed: %w", errWrite)
-			}
-			if errRename := os.Rename(tmp, path); errRename != nil {
-				return "", fmt.Errorf("auth filestore: rename failed: %w", errRename)
+			if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
+				return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
 			}
 		}
 	default:
