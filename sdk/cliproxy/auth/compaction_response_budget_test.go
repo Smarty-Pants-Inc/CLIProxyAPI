@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // The first regression deliberately uses only APIs present on the reviewed base.

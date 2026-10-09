@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // CPA#22 Astra round 4 P1: a restricted key's allow-list is not signer

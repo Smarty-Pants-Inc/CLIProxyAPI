@@ -82,6 +82,13 @@ func WriteConfigAtomic(path string, data []byte) error {
 	})
 }
 
+// WriteConfigAtomicIfCurrent publishes a canonical YAML tree derived from source
+// only while those exact source bytes are still current. Unlike raw authoritative
+// replacement, management read/modify/write operations must not erase a newer edit.
+func WriteConfigAtomicIfCurrent(path string, data, source []byte) error {
+	return writeConfigRevision(path, data, sourceRevision(source))
+}
+
 // Resolve symlinks before choosing the lock so aliases share one boundary.
 // This matches the canonical-path protocol of cmd/config-publish (PR #51).
 func canonicalPublicationPath(path string) (string, error) {

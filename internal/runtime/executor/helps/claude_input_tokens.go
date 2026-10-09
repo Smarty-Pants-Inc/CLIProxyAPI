@@ -13,7 +13,8 @@ import (
 	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 var (
@@ -63,6 +64,9 @@ func TranslateStreamWithClaudeInputTokens(
 		rawJSON,
 		param,
 	)
+	if param != nil && ApplyPatchTranslationError(*param) != nil {
+		return chunks
+	}
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		for i, chunk := range chunks {
 			chunks[i] = EnsureResponsesUsageDetails(chunk)
@@ -383,5 +387,5 @@ func (state *ClaudeInputTokenState) logEstimateError(ctx context.Context, err er
 	LogWithRequestID(ctx).WithFields(log.Fields{
 		"upstream_format": state.upstreamFormat.String(),
 		"response_format": state.responseFormat.String(),
-	}).WithError(err).Warn("failed to estimate Claude input tokens")
+	}).WithField("error", logging.SafeErrorDiagnostic(err)).Warn("failed to estimate Claude input tokens")
 }
