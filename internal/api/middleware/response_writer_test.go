@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -377,4 +378,65 @@ func TestFinalizeIncludes500InForceLog(t *testing.T) {
 	if len(logger.loggedCalls) != 1 || logger.loggedCalls[0] != http.StatusInternalServerError {
 		t.Fatalf("expected 1 logged call for 500 status, got: %v", logger.loggedCalls)
 	}
+}
+
+// smarty-dev#7617 (Astra on #114): a Write that overlaps Finalize must neither race nor send on the closed
+// chunk channel; chunks sent before the close still reach the stream writer.
+func TestStreamingWriteOverlappingFinalizeIsSafe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for round := 0; round < 50; round++ {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		streamWriter := &countingStreamingLogWriter{}
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			body:           &bytes.Buffer{},
+			logger:         &testRequestLogger{enabled: true},
+			requestInfo:    &RequestInfo{URL: "/v1/responses", Method: "POST", RequestID: "req-overlap"},
+			isStreaming:    true,
+			streamWriter:   streamWriter,
+			chunkChannel:   make(chan []byte, 4),
+			headers:        map[string][]string{},
+		}
+		done := make(chan struct{})
+		wrapper.streamDone = done
+		go wrapper.processStreamingChunks(done)
+
+		started := make(chan struct{})
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			close(started)
+			for i := 0; i < 200; i++ {
+				if _, err := wrapper.Write([]byte("data: chunk\n\n")); err != nil {
+					t.Errorf("Write error: %v", err)
+					return
+				}
+			}
+		}()
+		<-started
+		if err := wrapper.Finalize(c); err != nil {
+			t.Fatalf("Finalize error: %v", err)
+		}
+		<-writerDone
+		if !streamWriter.closed.Load() {
+			t.Fatal("expected stream writer to be closed")
+		}
+		if wrapper.body.Len() != 0 {
+			t.Fatalf("streaming writes after Finalize were buffered: %d bytes", wrapper.body.Len())
+		}
+	}
+}
+
+type countingStreamingLogWriter struct {
+	testStreamingLogWriter
+	chunks atomic.Int64
+	closed atomic.Bool
+}
+
+func (w *countingStreamingLogWriter) WriteChunkAsync([]byte) { w.chunks.Add(1) }
+
+func (w *countingStreamingLogWriter) Close() error {
+	w.closed.Store(true)
+	return nil
 }
