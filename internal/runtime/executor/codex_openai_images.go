@@ -354,7 +354,8 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body)
+	// Media payload rules do not report touched paths, so an empty-to-empty removal is not detected here (#7620 note).
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, false)
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
@@ -427,7 +428,8 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body)
+	// Media payload rules do not report touched paths, so an empty-to-empty removal is not detected here (#7620 note).
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, body, false)
 	httpReq.Body = io.NopCloser(bytes.NewReader(body))
 	httpReq.ContentLength = int64(len(body))
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
