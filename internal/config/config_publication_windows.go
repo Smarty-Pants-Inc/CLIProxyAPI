@@ -17,12 +17,20 @@ import (
 // Numeric Unix modes cannot protect Windows files. Create lock and staging
 // handles with a protected owner-only DACL before writing any secret bytes.
 func privateConfigSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	return privateConfigSecurityDescriptorForType(false)
+}
+
+func privateAuthDirSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	return privateConfigSecurityDescriptorForType(true)
+}
+
+func privateConfigSecurityDescriptorForType(directory bool) (*windows.SECURITY_DESCRIPTOR, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return nil, err
 	}
 	sid := user.User.Sid.String()
-	return windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")")
+	return windows.SecurityDescriptorFromString("O:" + sid + privateConfigDACLTemplate(sid, directory))
 }
 
 func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
@@ -95,7 +103,8 @@ func restrictPrivateConfigHandle(handle windows.Handle, sd *windows.SECURITY_DES
 // hasPrivateConfigDACL validates the actual access policy, not the whole SDDL
 // representation. GetSecurityInfo can return auto-inheritance bookkeeping that
 // differs from the input template. The owner must still match the current user;
-// group and auto-inheritance bookkeeping are not additional DACL grants.
+// files require an explicit non-inheritable ACE and auth directories require an
+// explicit OI/CI ACE. Group and auto-inheritance bookkeeping are not grants.
 func hasPrivateConfigDACL(actual, expected *windows.SECURITY_DESCRIPTOR) bool {
 	if actual == nil || expected == nil || !actual.IsValid() || !expected.IsValid() {
 		return false

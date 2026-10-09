@@ -14,7 +14,7 @@ import (
 
 func TestWindowsRestrictAuthDir(t *testing.T) {
 	dir := t.TempDir()
-	expected, err := privateConfigSecurityDescriptor()
+	expected, err := privateAuthDirSecurityDescriptor()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestWindowsRestrictAuthDirFollowsConfiguredSymlink(t *testing.T) {
 	if err := os.Mkdir(target, 0700); err != nil {
 		t.Fatal(err)
 	}
-	expected, err := privateConfigSecurityDescriptor()
+	expected, err := privateAuthDirSecurityDescriptor()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +116,49 @@ func TestWindowsRestrictAuthDirFollowsConfiguredSymlink(t *testing.T) {
 	}
 	if !hasPrivateConfigDACL(after, expected) {
 		t.Fatal("configured directory symlink target lacks current-user owner and protected exact DACL")
+	}
+}
+
+func TestWindowsPrivateAuthDirDACLMetadata(t *testing.T) {
+	expected, err := privateAuthDirSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := expected.Owner()
+	if err != nil || owner == nil {
+		t.Fatalf("expected owner: %v", err)
+	}
+	sid := owner.String()
+	for _, tc := range []struct {
+		name, sddl string
+		want       bool
+	}{
+		{"exact", "D:P(A;OICI;FA;;;" + sid + ")", true},
+		{"auto inherited metadata", "D:PAI(A;OICI;FA;;;" + sid + ")", true},
+		{"file policy", "D:P(A;;FA;;;" + sid + ")", false},
+		{"object inheritance only", "D:P(A;OI;FA;;;" + sid + ")", false},
+		{"container inheritance only", "D:P(A;CI;FA;;;" + sid + ")", false},
+		{"inherited ACE", "D:P(A;OICIID;FA;;;" + sid + ")", false},
+		{"inherit only", "D:P(A;OICIIO;FA;;;" + sid + ")", false},
+		{"no propagate", "D:P(A;OICINP;FA;;;" + sid + ")", false},
+		{"extra trustee", "D:P(A;OICI;FA;;;" + sid + ")(A;;FR;;;BU)", false},
+		{"extra owner ACE", "D:P(A;OICI;FA;;;" + sid + ")(A;;FR;;;" + sid + ")", false},
+		{"wrong trustee", "D:P(A;OICI;FA;;;S-1-5-21-1-2-3-1009)", false},
+		{"partial access", "D:P(A;OICI;FR;;;" + sid + ")", false},
+		{"deny", "D:P(D;OICI;FA;;;" + sid + ")", false},
+		{"unprotected", "D:(A;OICI;FA;;;" + sid + ")", false},
+		{"null", "D:PNO_ACCESS_CONTROL", false},
+		{"empty", "D:P", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actual, errParse := windows.SecurityDescriptorFromString("O:" + sid + tc.sddl)
+			if errParse != nil {
+				t.Fatal(errParse)
+			}
+			if got := hasPrivateConfigDACL(actual, expected); got != tc.want {
+				t.Fatalf("private directory DACL = %t, want %t: %s", got, tc.want, actual.String())
+			}
+		})
 	}
 }
 

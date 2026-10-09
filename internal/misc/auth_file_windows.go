@@ -9,15 +9,10 @@ import (
 )
 
 // RestrictAuthDir applies the shared config policy: a protected current-user-only
-// DACL on the resolved auth directory, refusing unsafe ownership.
+// DACL with owner-full OI/CI inheritance on the resolved auth directory, refusing
+// unsafe ownership and preserving owner access to existing inherited-only files.
 func RestrictAuthDir(path string) error {
 	return config.RestrictAuthDir(path)
-}
-
-// RestrictAuthDirForStartup secures and verifies the entire existing auth tree
-// without following symlinks or reparse points, before any tokens are loaded.
-func RestrictAuthDirForStartup(path string) error {
-	return config.RestrictAuthDirForStartup(path)
 }
 
 func createPrivateAuthTemp(dir string) (*os.File, error) {

@@ -78,9 +78,6 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}()
 
-	// This must finish before coreManager.Load (and its file store List), any
-	// client provider Load, or watcher startup can read existing auth tokens.
-	// Windows migrates and verifies the entire tree here; any failure aborts.
 	if !homeEnabled {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
@@ -421,9 +418,8 @@ func (s *Service) ensureAuthDir() error {
 // chmodAuthDir is os.Chmod; tests replace it to simulate a failure.
 var chmodAuthDir = os.Chmod
 
-// restrictAuthDir applies the startup tree policy; tests replace it to simulate a failure.
-// Atomic writers still use the single-directory helper, not a recursive walk.
-var restrictAuthDir = misc.RestrictAuthDirForStartup
+// restrictAuthDir applies platform-specific protections; tests replace it to simulate a failure.
+var restrictAuthDir = misc.RestrictAuthDir
 
 // startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
 func (s *Service) startModelCatalogUpdaters(ctx context.Context) {

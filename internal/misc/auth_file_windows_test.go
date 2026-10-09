@@ -62,15 +62,24 @@ func windowsAuthAssertPrivate(t *testing.T, path string) {
 		t.Fatalf("DACL is not present and protected: control %#x, %v", control, err)
 	}
 	dacl, _, err := sd.DACL()
-	if err != nil || dacl == nil {
-		t.Fatalf("missing DACL: %v", err)
+	if err != nil || dacl == nil || dacl.AceCount != 1 {
+		t.Fatalf("DACL must contain exactly one owner ACE (never empty): %v", err)
 	}
-	expected, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + windowsAuthUser(t).String() + ")")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := ""
+	if info.IsDir() {
+		flags = "OICI"
+	}
+	expected, err := windows.SecurityDescriptorFromString("D:P(A;" + flags + ";FA;;;" + windowsAuthUser(t).String() + ")")
 	if err != nil {
 		t.Fatalf("expected descriptor: %v", err)
 	}
 	// Compare all ACEs exactly, ignoring only descriptor control bookkeeping
-	// (e.g. AI). Inherited ACEs, other principals and inheritable grants fail.
+	// (e.g. AI). Inherited ACEs and other principals fail. Only directories
+	// require OI/CI; files must have no inheritance flags.
 	actualText, expectedText := sd.String(), expected.String()
 	actualStart, expectedStart := strings.Index(actualText, "("), strings.Index(expectedText, "(")
 	if actualStart < 0 || expectedStart < 0 || actualText[actualStart:] != expectedText[expectedStart:] {
@@ -178,6 +187,69 @@ func TestWindowsAuthAtomicPrivateNewAndRewritten(t *testing.T) {
 			}
 			windowsAuthAssertOnlyTarget(t, dir)
 		})
+	}
+}
+
+func TestWindowsAuthAtomicWritePreservesInheritedOnlySibling(t *testing.T) {
+	dir := windowsAuthBroadInheritedDir(t)
+	sibling := filepath.Join(dir, "other-auth.json")
+	if err := os.WriteFile(sibling, []byte("other-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Preserve only inherited ACEs, including on elevated test runners that
+	// default new files to an Administrators owner.
+	if err := windows.SetNamedSecurityInfo(sibling, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, windowsAuthUser(t), nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := windowsAuthDescriptor(t, sibling)
+	dacl, _, err := before.DACL()
+	if err != nil || dacl == nil || dacl.AceCount == 0 {
+		t.Fatalf("sibling fixture has an empty or missing DACL: %v", err)
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err = windows.GetAce(dacl, i, &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
+			t.Fatalf("sibling fixture has an explicit ACE: %s", before.String())
+		}
+	}
+	sid := windowsAuthUser(t).String()
+	expected, err := windows.SecurityDescriptorFromString("D:(A;ID;FA;;;" + sid + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "auth.json")
+	for i := 0; i < 2; i++ {
+		if err = WriteAuthFileAtomic(target, []byte("new-token")); err != nil {
+			t.Fatal(err)
+		}
+		windowsAuthAssertPrivate(t, dir)
+		windowsAuthAssertPrivate(t, target)
+		actual := windowsAuthDescriptor(t, sibling)
+		owner, _, errOwner := actual.Owner()
+		dacl, _, err = actual.DACL()
+		if errOwner != nil || owner == nil || !owner.Equals(windowsAuthUser(t)) ||
+			err != nil || dacl == nil || dacl.AceCount != 1 {
+			t.Fatalf("sibling must keep one owner ACE, never an empty DACL: %s", actual.String())
+		}
+		actualText, expectedText := actual.String(), expected.String()
+		actualStart, expectedStart := strings.Index(actualText, "("), strings.Index(expectedText, "(")
+		if actualStart < 0 || expectedStart < 0 || actualText[actualStart:] != expectedText[expectedStart:] {
+			t.Fatalf("sibling must inherit only owner Full: %s, want %s", actualText, expectedText)
+		}
+		file, errOpen := os.Open(sibling)
+		if errOpen != nil {
+			t.Fatalf("owner cannot open existing sibling: %v", errOpen)
+		}
+		if errClose := file.Close(); errClose != nil {
+			t.Fatal(errClose)
+		}
+		if data, errRead := os.ReadFile(sibling); errRead != nil || string(data) != "other-token" {
+			t.Fatalf("sibling content changed: %q, %v", data, errRead)
+		}
 	}
 }
 

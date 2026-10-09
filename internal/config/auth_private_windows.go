@@ -16,14 +16,15 @@ import (
 // provided by x/sys/windows.
 const errorUntrustedMountPoint syscall.Errno = 448
 
-// RestrictAuthDir establishes a protected, current-user-only DACL on an existing
-// auth directory. Trusted configured directory symlinks are followed, but all
-// security checks and changes apply to the pinned target handle. Windows may
+// RestrictAuthDir establishes a protected, current-user-only DACL with owner-full
+// OI/CI inheritance on an existing auth directory, preserving owner access to
+// children that have only inherited ACEs. Trusted configured symlinks are
+// followed, but all checks and changes apply to the pinned target handle. Windows may
 // reject a non-admin-created symlink as an untrusted mount point; that refusal
 // is preserved without bypassing redirection trust or changing the target.
 // Foreign owners and non-directories are refused; ownership is never repaired.
 func RestrictAuthDir(path string) (err error) {
-	sd, err := privateConfigSecurityDescriptor()
+	sd, err := privateAuthDirSecurityDescriptor()
 	if err != nil {
 		return fmt.Errorf("secure auth directory: %w", err)
 	}
