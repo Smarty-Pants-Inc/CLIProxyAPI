@@ -72,6 +72,27 @@ func TestOAuthCallbackPostBodyIsBounded(t *testing.T) {
 			}
 		})
 
+		t.Run(path+"/trailing-whitespace", func(t *testing.T) {
+			body := `{"state":"x","code":"y"}` + strings.Repeat(" ", 128<<10)
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want 413 body=%s", rr.Code, rr.Body.String())
+			}
+		})
+
+		t.Run(path+"/trailing-value", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"state":"x","code":"y"} {"state":"z"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 body=%s", rr.Code, rr.Body.String())
+			}
+		})
+
 		t.Run(path+"/normal", func(t *testing.T) {
 			state := "body-bound-state-" + strings.NewReplacer("/", "-").Replace(strings.Trim(path, "/"))
 			if errRegister := managementHandlers.RegisterPluginOAuthSession(state, "gemini-cli", nil); errRegister != nil {
