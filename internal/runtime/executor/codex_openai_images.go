@@ -475,25 +475,76 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			reporter.EnsurePublished(ctx)
 		}()
 
-		// Restore complete SSE data lines, never transport fragments that may
-		// split an identifier. ReadBytes preserves framing and trailing EOF data.
-		reader := bufio.NewReader(httpResp.Body)
+		var needles [][]byte
+		maxLen := 0
+		addReplacement := func(from, to string) {
+			from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+			if from == "" || to == "" || from == to {
+				return
+			}
+			needles = append(needles, []byte(from), []byte(to))
+			maxLen = max(maxLen, len(from), len(to))
+		}
+		addReplacement(identityState.originalPromptCacheKey, identityState.promptCacheKey)
+		if identityState.enabled {
+			addReplacement(identityState.ruleKey, identityState.originalPromptCacheKey)
+		}
+		for _, turnID := range identityState.turnIDs {
+			addReplacement(turnID.original, turnID.confused)
+		}
+
+		emitChunk := func(chunk []byte) bool {
+			chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
+			// Keep the base's per-chunk usage observation, without accumulating
+			// potentially multi-megabyte SSE lines.
+			helps.ObserveStreamUsageChunkLines(chunk, streamUsage.ObserveOpenAIStream)
+			clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		buffer := make([]byte, 32*1024)
+		var carry []byte
 		for {
-			chunk, errRead := reader.ReadBytes('\n')
-			if len(chunk) > 0 {
-				chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
-				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
-				for _, line := range bytes.Split(chunk, []byte("\n")) {
-					streamUsage.ObserveOpenAIStream(bytes.TrimSpace(line))
+			n, errRead := httpResp.Body.Read(buffer)
+			if n > 0 {
+				var chunk []byte
+				if maxLen == 0 {
+					// No replacements: preserve the old read/forward boundaries.
+					chunk = bytes.Clone(buffer[:n])
+				} else {
+					pending := append(carry, buffer[:n]...)
+					cut := max(0, len(pending)-(maxLen-1))
+					for cut > 0 {
+						previousCut := cut
+						for _, needle := range needles {
+							// Only starts strictly within a needle's length of
+							// cut can cross it. Move back until no match crosses.
+							start := max(0, cut-len(needle)+1)
+							if i := bytes.Index(pending[start:], needle); i >= 0 && start+i < cut {
+								cut = start + i
+							}
+						}
+						if cut == previousCut {
+							break
+						}
+					}
+					carry = bytes.Clone(pending[cut:])
+					chunk = pending[:cut]
 				}
-				clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
-				case <-ctx.Done():
+				if len(chunk) > 0 && !emitChunk(chunk) {
 					return
 				}
 			}
 			if errRead != nil {
+				if len(carry) > 0 && !emitChunk(carry) {
+					return
+				}
 				if errRead != io.EOF {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					reporter.PublishFailure(ctx, errRead)
