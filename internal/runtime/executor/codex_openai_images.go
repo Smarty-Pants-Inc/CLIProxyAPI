@@ -519,21 +519,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 					chunk = bytes.Clone(buffer[:n])
 				} else {
 					pending := append(carry, buffer[:n]...)
-					cut := max(0, len(pending)-(maxLen-1))
-					for cut > 0 {
-						previousCut := cut
-						for _, needle := range needles {
-							// Only starts strictly within a needle's length of
-							// cut can cross it. Move back until no match crosses.
-							start := max(0, cut-len(needle)+1)
-							if i := bytes.Index(pending[start:], needle); i >= 0 && start+i < cut {
-								cut = start + i
-							}
-						}
-						if cut == previousCut {
-							break
-						}
-					}
+					cut := codexImageCarryCut(pending, needles, maxLen)
 					carry = bytes.Clone(pending[cut:])
 					chunk = pending[:cut]
 				}
@@ -1204,4 +1190,40 @@ func codexMimeTypeFromOutputFormat(outputFormat string) string {
 	default:
 		return "image/png"
 	}
+}
+
+// codexImageCarryCut returns how much of pending can be emitted now: everything except a tail that may hold the
+// start of an identifier continuing in the next read. The cut only moves back to the start of a match that
+// actually crosses it, using leftmost non-overlapping matches as bytes.ReplaceAll does, and never below a floor,
+// so the carry stays bounded even for self-overlapping identifiers ("aa" in "aaaa…") (CLIProxyAPI#115 r2 P2).
+func codexImageCarryCut(pending []byte, needles [][]byte, maxLen int) int {
+	if maxLen == 0 {
+		return len(pending)
+	}
+	cut := max(0, len(pending)-(maxLen-1))
+	floor := max(0, len(pending)-(maxLen-1)-len(needles)*maxLen)
+	var matches [][2]int
+	for _, needle := range needles {
+		if len(needle) == 0 {
+			continue
+		}
+		for i := max(0, floor-len(needle)); i < len(pending); {
+			j := bytes.Index(pending[i:], needle)
+			if j < 0 {
+				break
+			}
+			start := i + j
+			matches = append(matches, [2]int{start, start + len(needle)})
+			i = start + len(needle)
+		}
+	}
+	for moved := true; moved; {
+		moved = false
+		for _, m := range matches {
+			if m[0] < cut && m[1] > cut && m[0] >= floor {
+				cut, moved = m[0], true
+			}
+		}
+	}
+	return cut
 }
