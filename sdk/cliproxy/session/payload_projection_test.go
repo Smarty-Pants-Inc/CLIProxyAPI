@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"unsafe"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
 
 var (
@@ -157,6 +159,13 @@ func projectionPayloadFixtures() [][]byte {
 	add(`{"thread_id":"t","forked_from_id":"f","parent_id":"p","request":{"forkSource":{"sessionId":"x"}}}`)
 	add(`{"request":{"session_id":"nested"},"request":{"parent_id":"nested-parent"}}`)
 	add(`{"session_id":"sid\u0000ctrl","parent_id":"` + strings.Repeat("x", 300) + `"}`)
+	// Scanner edge cases: escaped quotes and brackets inside strings, literals,
+	// escaped and over-long escaped keys, and arrays of objects before members.
+	add(`{"messages":[{"a":"}]\"{["},[1,{"b":[]}]],"session_id":"a\"b\\","metadata":{"x":"}]{[","user_id":"u\\"}}`)
+	add(`{"thread_id":true,"session_id":-1.5e3,"task_id":false,"chat_id":null,"conversation":["c"]}`)
+	add(`{"\u0073ession_id":"esc-key","` + strings.Repeat(`\u0073`, 40) + `":"long-esc","conversation_id":"cid"}`)
+	add("{\n\t\"request\" :\r\n {\"session_id\" : \"ws\" , \"contents\":[]} ,\n\"model\":\"m\"\n}\n")
+	add(`{"request":{},"request":[],"contents":"","session_id":""}`)
 	// Not valid JSON objects: must be read exactly as before.
 	add(`[{"session_id":"array"}]`)
 	add(`"session_id"`)
@@ -209,6 +218,180 @@ func TestSessionPayloadViewEquivalence(t *testing.T) {
 				assertProjectionEquivalent(t, headers, payload, metadata)
 			}
 		}
+	}
+}
+
+// referenceSessionProjection is the original gjson ForEach based projection,
+// without a size bound; the in-place scanner must produce identical bytes.
+func referenceSessionProjection(payload []byte) ([]byte, bool) {
+	if !gjson.ValidBytes(payload) {
+		return nil, false
+	}
+	root := gjson.ParseBytes(payload)
+	if !root.IsObject() {
+		return nil, false
+	}
+	var appendObj func(dst []byte, obj gjson.Result, top bool) []byte
+	appendObj = func(dst []byte, obj gjson.Result, top bool) []byte {
+		dst = append(dst, '{')
+		first := true
+		obj.ForEach(func(key, value gjson.Result) bool {
+			raw, nested := value.Raw, false
+			_, wanted := sessionPayloadKeys[key.Str]
+			switch {
+			case wanted:
+			case top && key.Str == sessionPayloadContentsKey:
+				raw = "null"
+			case top && key.Str == sessionPayloadRequestKey:
+				nested = value.IsObject()
+			default:
+				return true
+			}
+			if !first {
+				dst = append(dst, ',')
+			}
+			first = false
+			dst = append(append(dst, key.Raw...), ':')
+			if nested {
+				dst = appendObj(dst, value, false)
+			} else {
+				dst = append(dst, raw...)
+			}
+			return true
+		})
+		return append(dst, '}')
+	}
+	return appendObj(nil, root, true), true
+}
+
+func TestSessionProjectionMatchesReference(t *testing.T) {
+	for _, payload := range projectionPayloadFixtures() {
+		got, ok := projectSessionPayload(payload)
+		want, wantOK := referenceSessionProjection(payload)
+		if ok != wantOK || !bytes.Equal(got, want) {
+			t.Fatalf("projection mismatch for %.200q:\n got %q,%v\nwant %q,%v", payload, got, ok, want, wantOK)
+		}
+	}
+}
+
+// TestSessionProjectionBoundAtCap checks the projection is built up to exactly
+// the cap and aborted one byte past it.
+func TestSessionProjectionBoundAtCap(t *testing.T) {
+	frame := len(`{"session_id":""}`)
+	for _, extra := range []int{0, 1} {
+		value := strings.Repeat("v", sessionProjectionCacheMaxProjection-frame+extra)
+		payload := []byte(`{` + padMessages(1024) + `,"session_id":"` + value + `"}`)
+		view, ok := projectSessionPayload(payload)
+		if extra == 0 && (!ok || len(view) != sessionProjectionCacheMaxProjection || string(view) != `{"session_id":"`+value+`"}`) {
+			t.Fatalf("projection at the cap: ok=%v len=%d", ok, len(view))
+		}
+		if extra == 1 && ok {
+			t.Fatalf("projection one byte over the cap was built (len %d)", len(view))
+		}
+		if got := sessionPayloadView(payload); extra == 1 && unsafe.SliceData(got) != unsafe.SliceData(payload) {
+			t.Fatal("oversize projection must fall back to the original payload")
+		}
+		assertProjectionEquivalent(t, http.Header{}, payload, nil)
+	}
+}
+
+// bigEscapedString is an n-byte JSON string body full of escapes, so a reader
+// that unescapes it (as gjson does for string values it visits) must copy it.
+func bigEscapedString(n int) string {
+	return strings.Repeat(`ab\n\"cd\\`, n/10)
+}
+
+func allocatedBytes(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// TestSessionProjectionOversizeValuesFallBackWithoutCopy covers the security
+// fix: a client-controlled huge value under a projected key must not be copied
+// by the projection (neither into the projection nor into a cached body copy),
+// extraction must equal the legacy path, and later calls on the same payload
+// must not rebuild the aborted projection.
+func TestSessionProjectionOversizeValuesFallBackWithoutCopy(t *testing.T) {
+	const big = 10 << 20
+	const allocBound = 2 * sessionProjectionCacheMaxProjection
+	blob := bigEscapedString(big)
+	userID := `"user_id":"{\"session_id\":\"meta-sid\",\"parent_session_id\":\"meta-parent\"}"`
+	bigMetadata := []byte(`{"model":"m","messages":[],"metadata":{` + userID + `,"blob":"` + blob + `"},"conversation_id":"cid"}`)
+	bigSessionID := []byte(`{"model":"m","session_id":"` + blob + `","metadata":{` + userID + `}}`)
+	bigBoth := []byte(`{"metadata":{` + userID + `,"blob":"` + blob + `"},"session_id":"` + blob + `","messages":[]}`)
+	if len(bigMetadata) > sessionProjectionCacheMaxPayload || len(bigSessionID) > sessionProjectionCacheMaxPayload || len(bigBoth) <= sessionProjectionCacheMaxPayload {
+		t.Fatal("fixtures: single-value payloads must be cacheable, the combined one must not")
+	}
+
+	for name, payload := range map[string][]byte{"metadata": bigMetadata, "session_id": bigSessionID, "both": bigBoth} {
+		t.Run(name, func(t *testing.T) {
+			var ok bool
+			if n := allocatedBytes(func() { _, ok = projectSessionPayload(payload) }); ok || n > allocBound {
+				t.Fatalf("projection build: ok=%v allocated %d bytes, want abort within %d", ok, n, allocBound)
+			}
+
+			c := newSessionProjectionCache()
+			builds := 0
+			sessionProjectionBuildObserver = func() { builds++ }
+			defer func() { sessionProjectionBuildObserver = nil }()
+			for i := 0; i < 3; i++ {
+				var view []byte
+				if n := allocatedBytes(func() { view = c.view(payload) }); n > allocBound {
+					t.Fatalf("call %d: view allocated %d bytes (body copied?)", i, n)
+				}
+				if unsafe.SliceData(view) != unsafe.SliceData(payload) {
+					t.Fatalf("call %d: oversize projection did not fall back to the original payload", i)
+				}
+			}
+			if len(payload) > sessionProjectionCacheMaxPayload {
+				// Never cached; each call is a bounded, aborted build.
+				if c.count != 0 || c.bytes != 0 {
+					t.Fatalf("uncacheable payload cached: count=%d bytes=%d", c.count, c.bytes)
+				}
+			} else {
+				if builds != 1 {
+					t.Fatalf("projection built %d times for one payload, want 1", builds)
+				}
+				entry, found := c.get(sessionProjectionKey{n: len(payload), sum: c.sum(payload)})
+				if !found || !entry.fallback || entry.body != nil || entry.view != nil || c.bytes != 0 {
+					t.Fatalf("fallback entry = %+v found=%v bytes=%d; want a body-less marker", entry, found, c.bytes)
+				}
+				if allocs := testing.AllocsPerRun(5, func() { c.view(payload) }); allocs != 0 {
+					t.Fatalf("cached fallback allocated %v times per call", allocs)
+				}
+			}
+
+			for _, headers := range []http.Header{{}, {"X-Claude-Code-Session-Id": {"hdr"}}} {
+				assertProjectionEquivalent(t, headers, payload, nil)
+			}
+		})
+	}
+}
+
+// TestSessionProjectionFallbackCollisionIsSafe checks that a fallback marker hit
+// by a different payload under the same key only sends it to the legacy path.
+func TestSessionProjectionFallbackCollisionIsSafe(t *testing.T) {
+	saved := sessionProjections
+	sessionProjections = collidingProjectionCache()
+	defer func() { sessionProjections = saved }()
+	pad := padMessages(32 << 10)
+	invalid := []byte(`{` + pad + `,"metadata":{"user_id":"{\"session_id\":\"coll-a\"}"}`)
+	valid := []byte(`{` + pad + `,"metadata":{"user_id":"{\"session_id\":\"coll-b\"}"}}`)
+	invalid = append(invalid, ' ') // truncated JSON padded to the same length as valid
+	if len(invalid) != len(valid) {
+		t.Fatalf("fixture lengths %d vs %d", len(invalid), len(valid))
+	}
+	if view := sessionPayloadView(invalid); unsafe.SliceData(view) != unsafe.SliceData(invalid) {
+		t.Fatal("invalid payload should be read directly")
+	}
+	if view := sessionPayloadView(valid); unsafe.SliceData(view) != unsafe.SliceData(valid) {
+		t.Fatal("colliding payload should be read directly via the fallback marker")
+	}
+	if info, ok := ExtractSessionInfo(http.Header{}, valid, nil); !ok || info.SessionID != "claude:coll-b" {
+		t.Fatalf("colliding payload info = %+v, %v", info, ok)
 	}
 }
 
