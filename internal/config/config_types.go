@@ -367,9 +367,13 @@ type RoutingConfig struct {
 	// execution or derived session identity, and the existing message-content hash fallback.
 	// Unavailable bindings may fail over unless the request contains compacted
 	// context that is unsafe to replay on another credential. Those requests fail closed.
-	// Standalone gateways persist bindings in auth-dir/session-affinity.state;
+	// Standalone gateways persist bindings outside auth-dir in SessionAffinityStateDir;
 	// Home owns routing and does not use this local state file.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
+
+	// SessionAffinityStateDir stores session-affinity.state outside the auth directory.
+	// Default: $XDG_STATE_HOME/cliproxyapi, or ~/.local/state/cliproxyapi.
+	SessionAffinityStateDir string `yaml:"session-affinity-state-dir,omitempty" json:"session-affinity-state-dir,omitempty"`
 
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 6h. Accepts duration strings like "30m", "1h", "6h".

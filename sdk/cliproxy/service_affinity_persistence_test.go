@@ -11,12 +11,12 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestServiceAffinityTTLNormalization(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if got := normalizedRoutingRuntimeState(nil).sessionAffinityTTL; got != 6*time.Hour || got <= 2*time.Hour {
 		t.Fatalf("nil config TTL = %v, want 6h and more than 2h", got)
 	}
@@ -41,6 +41,7 @@ func TestServiceAffinityTTLNormalization(t *testing.T) {
 }
 
 func TestServiceAffinityStatePathAliasesShareOwner(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	root := t.TempDir()
 	dir := filepath.Join(root, "auths")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -55,7 +56,7 @@ func TestServiceAffinityStatePathAliasesShareOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	stateFor := func(path string) routingRuntimeState {
-		return normalizedRoutingRuntimeState(&internalconfig.Config{AuthDir: path, Routing: internalconfig.RoutingConfig{SessionAffinity: true}})
+		return normalizedRoutingRuntimeState(&internalconfig.Config{AuthDir: filepath.Join(root, "auth-dir"), Routing: internalconfig.RoutingConfig{SessionAffinity: true, SessionAffinityStateDir: path}})
 	}
 	absolute := stateFor(dir)
 	if got := stateFor(relative); got != absolute {
@@ -72,6 +73,7 @@ func TestServiceAffinityStatePathAliasesShareOwner(t *testing.T) {
 }
 
 func TestServiceAffinityMissingSymlinkLeavesShareOwner(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, suffix := range []string{"new", filepath.Join("new", "nested", "auths")} {
 		t.Run(suffix, func(t *testing.T) {
 			ctx := context.Background()
@@ -88,13 +90,13 @@ func TestServiceAffinityMissingSymlinkLeavesShareOwner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cfg := &internalconfig.Config{AuthDir: filepath.Join(link, suffix), Routing: internalconfig.RoutingConfig{SessionAffinity: true}}
+			cfg := &internalconfig.Config{AuthDir: filepath.Join(root, "auth-dir"), Routing: internalconfig.RoutingConfig{SessionAffinity: true, SessionAffinityStateDir: filepath.Join(link, suffix)}}
 			state := normalizedRoutingRuntimeState(cfg)
 			wantPath := filepath.Join(realDir, suffix, "session-affinity.state")
 			if state.statePathUnavailable || state.statePath != wantPath {
 				t.Fatalf("missing-directory state = %#v, want %q", state, wantPath)
 			}
-			if _, errStat := os.Stat(cfg.AuthDir); !os.IsNotExist(errStat) {
+			if _, errStat := os.Stat(cfg.Routing.SessionAffinityStateDir); !os.IsNotExist(errStat) {
 				t.Fatalf("normalization created the directory or stat failed: %v", errStat)
 			}
 			// The builder creates its selector before the Service adopts the cache.
@@ -167,6 +169,7 @@ func TestServiceAffinityMissingSymlinkLeavesShareOwner(t *testing.T) {
 }
 
 func TestServiceAffinityStatePath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := t.TempDir()
 	for _, tc := range []struct {
 		name    string
@@ -186,15 +189,7 @@ func TestServiceAffinityStatePath(t *testing.T) {
 			cfg.Home.Enabled = tc.home
 			want := ""
 			if tc.enabled && !tc.home && tc.authDir != "" && tc.authDir != "  " {
-				resolved, errResolve := util.ResolveAuthDir(tc.authDir)
-				if errResolve != nil {
-					t.Fatal(errResolve)
-				}
-				resolved, errResolve = filepath.Abs(resolved)
-				if errResolve != nil {
-					t.Fatal(errResolve)
-				}
-				resolved, errResolve = resolveAffinityStateDir(resolved)
+				resolved, errResolve := cfg.ResolveSessionAffinityStateDir()
 				if errResolve != nil {
 					t.Fatal(errResolve)
 				}
@@ -208,10 +203,11 @@ func TestServiceAffinityStatePath(t *testing.T) {
 }
 
 func TestServiceAffinityUnresolvedDirectoryFailsClosed(t *testing.T) {
-	// ResolveAuthDir fails for a tilde path when the platform home variable is empty.
+	t.Setenv("XDG_STATE_HOME", "")
+	// Resolving the default state directory fails when the platform home is unavailable.
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "")
-	if _, errResolve := util.ResolveAuthDir("~/affinity-test"); errResolve == nil {
+	if _, errResolve := os.UserHomeDir(); errResolve == nil {
 		t.Skip("platform can resolve the home directory without HOME or USERPROFILE")
 	}
 	cfg := &internalconfig.Config{AuthDir: "~/affinity-test", Routing: internalconfig.RoutingConfig{SessionAffinity: true}}
@@ -227,6 +223,7 @@ func TestServiceAffinityUnresolvedDirectoryFailsClosed(t *testing.T) {
 }
 
 func TestServiceAffinityStateDirectoryPermissionFailsClosed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := filepath.Join(t.TempDir(), "denied")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -239,7 +236,7 @@ func TestServiceAffinityStateDirectoryPermissionFailsClosed(t *testing.T) {
 	if _, err := filepath.EvalSymlinks(path); !os.IsPermission(err) {
 		t.Skipf("platform or user does not enforce directory permissions: %v", err)
 	}
-	cfg := &internalconfig.Config{AuthDir: path, Routing: internalconfig.RoutingConfig{SessionAffinity: true}}
+	cfg := &internalconfig.Config{AuthDir: filepath.Join(t.TempDir(), "auth-dir"), Routing: internalconfig.RoutingConfig{SessionAffinity: true, SessionAffinityStateDir: path}}
 	state := normalizedRoutingRuntimeState(cfg)
 	if state.statePath != "" || !state.statePathUnavailable {
 		t.Fatalf("permission error did not fail closed: %#v", state)
@@ -252,6 +249,7 @@ func TestServiceAffinityStateDirectoryPermissionFailsClosed(t *testing.T) {
 }
 
 func TestServiceAffinityConfigReloadPreservesBinding(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	ctx := context.Background()
 	dir := t.TempDir()
 	cfg := &internalconfig.Config{AuthDir: dir, Routing: internalconfig.RoutingConfig{SessionAffinity: true}}
@@ -285,7 +283,7 @@ func TestServiceAffinityConfigReloadPreservesBinding(t *testing.T) {
 	beforePick := time.Now()
 	pick([]*coreauth.Auth{bound}, bound.ID)
 	afterPick := time.Now()
-	statePath := filepath.Join(dir, "session-affinity.state")
+	statePath := normalizedRoutingRuntimeState(cfg).statePath
 	data, errRead := os.ReadFile(statePath)
 	if errRead != nil {
 		t.Fatalf("affinity state not initialized: %v", errRead)
@@ -324,8 +322,14 @@ func TestServiceAffinityConfigReloadPreservesBinding(t *testing.T) {
 	previous := service.coreManager.Selector()
 	updated.AuthDir = t.TempDir()
 	apply(&updated)
+	if service.coreManager.Selector() != previous {
+		t.Fatal("changed auth-dir recreated the external state owner")
+	}
+	pick([]*coreauth.Auth{other, bound}, bound.ID)
+	updated.Routing.SessionAffinityStateDir = t.TempDir()
+	apply(&updated)
 	if service.coreManager.Selector() == previous {
-		t.Fatal("changed auth-dir did not recreate selector")
+		t.Fatal("changed state directory did not recreate selector")
 	}
 	pick([]*coreauth.Auth{other, bound}, other.ID)
 }
@@ -348,6 +352,7 @@ func (s *affinityBarrierSelector) Pick(ctx context.Context, _ string, _ string, 
 }
 
 func TestServiceAffinityConfigReloadSharesInflightCache(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	ctx := context.Background()
 	cfg := &internalconfig.Config{AuthDir: t.TempDir(), Routing: internalconfig.RoutingConfig{SessionAffinity: true}}
 	state := normalizedRoutingRuntimeState(cfg)
@@ -414,6 +419,7 @@ func TestServiceAffinityConfigReloadSharesInflightCache(t *testing.T) {
 }
 
 func TestServiceAffinityCacheSurvivesPathAndModeChanges(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	ctx := context.Background()
 	cfg := &internalconfig.Config{AuthDir: t.TempDir(), Routing: internalconfig.RoutingConfig{SessionAffinity: true, Strategy: "fill-first"}}
 	service := &Service{coreManager: coreauth.NewManager(nil, nil, nil)}
@@ -450,7 +456,7 @@ func TestServiceAffinityCacheSurvivesPathAndModeChanges(t *testing.T) {
 			case "Home":
 				updated.Home.Enabled = true
 			case "new directory":
-				updated.AuthDir = t.TempDir()
+				updated.Routing.SessionAffinityStateDir = t.TempDir()
 			}
 			apply(t, &updated)
 			if selector, ok := service.coreManager.Selector().(*coreauth.SessionAffinitySelector); ok {
@@ -489,6 +495,7 @@ func TestServiceAffinityCacheSurvivesPathAndModeChanges(t *testing.T) {
 }
 
 func TestServiceHomeAffinityDoesNotPersist(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := &internalconfig.Config{AuthDir: t.TempDir(), Routing: internalconfig.RoutingConfig{SessionAffinity: true}}
 	cfg.Home.Enabled = true
 	selector := newRoutingSelector(normalizedRoutingRuntimeState(cfg))
