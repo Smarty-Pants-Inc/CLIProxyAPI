@@ -275,6 +275,23 @@ func extractSessionIDsFromRequest(request *http.Request) (string, string) {
 	return "", ""
 }
 
+// senderName returns one sender-name header (smarty-dev#6207) when it is a single value of
+// 1..64 bytes in [A-Za-z0-9._:/-]; otherwise it returns "" so the usage record stores nothing.
+func senderName(headers http.Header, name string) string {
+	values := headers.Values(name)
+	if len(values) != 1 || values[0] == "" || len(values[0]) > 64 {
+		return ""
+	}
+	for _, ch := range []byte(values[0]) {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9', strings.IndexByte("._:/-", ch) >= 0:
+		default:
+			return ""
+		}
+	}
+	return values[0]
+}
+
 // EnrichContextWithSessionHierarchy extracts canonical session and parent session identities
 // from headers, payload, and metadata and records them in ClientRequestMetadata.
 func EnrichContextWithSessionHierarchy(ctx context.Context, headers http.Header, payload []byte, metadata map[string]any) context.Context {
@@ -531,6 +548,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			UserAgent:        strings.TrimSpace(c.Request.UserAgent()),
 			SessionID:        sessionID,
 			ParentSessionID:  parentSessionID,
+			SenderRole:       senderName(c.Request.Header, "X-Smarty-Role"),
+			SenderAgent:      senderName(c.Request.Header, "X-Smarty-Agent"),
+			SenderSpawner:    senderName(c.Request.Header, "X-Smarty-Spawner"),
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)

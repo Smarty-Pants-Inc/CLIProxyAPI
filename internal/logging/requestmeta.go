@@ -20,9 +20,13 @@ type ClientRequestMetadata struct {
 	UserAgent        string
 	SessionID        string
 	ParentSessionID  string
-	NodeKind         string
-	IsFork           bool
-	IsCompaction     bool
+	// Sender names from X-Smarty-Role/Agent/Spawner (smarty-dev#6207); empty when absent or invalid.
+	SenderRole    string
+	SenderAgent   string
+	SenderSpawner string
+	NodeKind      string
+	IsFork        bool
+	IsCompaction  bool
 }
 
 type responseStatusHolder struct {
