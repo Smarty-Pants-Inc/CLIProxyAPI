@@ -14,6 +14,12 @@ func RestrictAuthDir(path string) error {
 	return config.RestrictAuthDir(path)
 }
 
+// RestrictAuthDirForStartup secures and verifies the entire existing auth tree
+// without following symlinks or reparse points, before any tokens are loaded.
+func RestrictAuthDirForStartup(path string) error {
+	return config.RestrictAuthDirForStartup(path)
+}
+
 func createPrivateAuthTemp(dir string) (*os.File, error) {
 	// The shared helper creates and validates the private DACL before returning
 	// the empty file, so token bytes never land in an inherited broad ACL.

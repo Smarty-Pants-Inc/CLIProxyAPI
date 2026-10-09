@@ -11,6 +11,10 @@ import (
 // POSIX directory mode tightening.
 func RestrictAuthDir(path string) error { return nil }
 
+// RestrictAuthDirForStartup is a no-op outside Windows, preserving the existing
+// POSIX startup policy and file modes.
+func RestrictAuthDirForStartup(path string) error { return nil }
+
 func createPrivateAuthTemp(dir string) (*os.File, error) {
 	// ponytail: a short fixed prefix keeps staging names independent of the auth
 	// name's length; watchers only react to .json names.
