@@ -1,7 +1,9 @@
 package management
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -9,6 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+// maxOAuthCallbackBodyBytes bounds the public, key-less callback body before decoding (smarty-dev#7643).
+// A callback carries a provider, a redirect URL, a code and a state: a few KiB at most.
+const maxOAuthCallbackBodyBytes = 64 << 10
 
 type oauthCallbackRequest struct {
 	Provider    string `json:"provider"`
@@ -25,7 +31,18 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 
 	var req oauthCallbackRequest
-	if errBindJSON := c.ShouldBindJSON(&req); errBindJSON != nil {
+	// Read the whole body under the cap, so bytes after the JSON value (whitespace included) count too.
+	body, errRead := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxOAuthCallbackBodyBytes))
+	if errRead != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(errRead, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"status": "error", "error": "body too large"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+		return
+	}
+	if errDecode := json.Unmarshal(body, &req); errDecode != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
 		return
 	}
