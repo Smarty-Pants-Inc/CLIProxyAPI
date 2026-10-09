@@ -493,12 +493,13 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			addReplacement(turnID.original, turnID.confused)
 		}
 
+		var usageLines helps.StreamUsageLines
+		defer usageLines.Close(streamUsage.ObserveOpenAIStream)
 		emitChunk := func(chunk []byte) bool {
 			chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
-			// Keep the base's per-chunk usage observation, without accumulating
-			// potentially multi-megabyte SSE lines.
-			helps.ObserveStreamUsageChunkLines(chunk, streamUsage.ObserveOpenAIStream)
+			// Usage lines are reassembled across reads, bounded per line.
+			usageLines.Observe(chunk, streamUsage.ObserveOpenAIStream)
 			clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
