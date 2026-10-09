@@ -91,7 +91,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	// Remap credential-scoped identifiers before the payload rules run, so the
 	// rules stay the final barrier; the client view restores the originals.
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+	beforeRulesKey := codexPromptCacheKey(upstreamBody)
 	upstreamBody = finalizePayload(upstreamBody)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, upstreamBody)
 	clientBody := applyCodexIdentityExposeResponsePayload(upstreamBody, identityState)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, nativeRequest, opts.Headers)
@@ -166,13 +168,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if cliproxyexecutor.UpstreamAttempted(dialCtx) {
 				cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			}
-			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return resp, statusErr{code: respHS.StatusCode, msg: string(applyCodexIdentityExposeResponsePayload(bodyErr, identityState))}
 		}
 		if cliproxyexecutor.UpstreamAttempted(dialCtx) {
 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
-			return resp, newCodexStatusErrWithCooling(respHS.StatusCode, bodyErr, e.modelLevelCooling())
+			return resp, newCodexStatusErrWithCooling(respHS.StatusCode, applyCodexIdentityExposeResponsePayload(bodyErr, identityState), e.modelLevelCooling())
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		return resp, errDial
@@ -333,7 +335,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			unverifiedObserverBytes += len(payload)
 		}
 
-		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+		if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 			}
@@ -343,7 +345,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 			return resp, wsErr
 		}
-		if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+		if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 			if sess != nil {
 				unlockSession()
 				e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)

@@ -97,6 +97,27 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		}
 		delete(steeringSettings, parent)
 	}
+	// exposeRejectionIdentity restores client identifiers on a rejection that is
+	// forwarded before its owning request is known. Confused values are scoped
+	// per credential and original value, so restoring with every live request's
+	// mapping cannot rewrite one client's identifier into another's.
+	exposeRejectionIdentity := func(payload []byte) []byte {
+		metadataMu.Lock()
+		defer metadataMu.Unlock()
+		candidates := append([]*codexWebsocketPrepared{current}, pending...)
+		for _, settings := range steeringSettings {
+			candidates = append(candidates, settings)
+		}
+		for _, settings := range responseSettings {
+			candidates = append(candidates, settings)
+		}
+		for _, candidate := range candidates {
+			if candidate != nil {
+				payload = applyCodexIdentityExposeResponsePayload(payload, candidate.identityState)
+			}
+		}
+		return payload
+	}
 	waitingParent := ""
 	automaticActive := false
 	stateChanged := make(chan struct{}, 1)
@@ -566,9 +587,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			if !firstResponse && (eventType == "error" || eventType == "response.failed") {
 				var credentialErr error
-				if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+				clientPayload := exposeRejectionIdentity(payload)
+				if wsErr, ok := parseCodexWebsocketErrorWithCooling(clientPayload, e.modelLevelCooling()); ok {
 					credentialErr = wsErr
-				} else if streamErr, _, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+				} else if streamErr, _, ok := codexTerminalFailureErrWithCooling(clientPayload, e.modelLevelCooling()); ok {
 					credentialErr = streamErr
 				}
 				var status interface{ StatusCode() int }
@@ -577,7 +599,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					// The conductor records the original classification without replaying
 					// this already-started stream on another credential.
 					reporter.PublishFailure(ctx, credentialErr)
-					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
+					if send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
 						send(cliproxyexecutor.StreamChunk{Err: credentialErr})
 					}
 					return
@@ -611,7 +633,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					// guessing a scope, replaying input, or cooling the credential.
 					connectionErr := &codexDuplexConnectionError{cause: fmt.Errorf("cannot associate websocket failure with a response or pending create")}
 					reporter.PublishFailure(ctx, connectionErr)
-					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
+					if send(cliproxyexecutor.StreamChunk{Payload: exposeRejectionIdentity(payload)}) {
 						send(cliproxyexecutor.StreamChunk{Err: connectionErr})
 					}
 					return
@@ -628,10 +650,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			// metadata that belongs to this event. Only the first rejection can
 			// enter conductor bootstrap retry; later failures stay on this socket.
 			var terminalErr, replayErr error
-			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+			clientErrPayload := applyCodexIdentityExposeResponsePayload(payload, eventPrepared.identityState)
+			if wsErr, ok := parseCodexWebsocketErrorWithCooling(clientErrPayload, e.modelLevelCooling()); ok {
 				terminalErr = wsErr
 				replayErr = clearCodexReasoningReplayOnWebsocketError(ctx, eventPrepared.replayScope, payload)
-			} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(clientErrPayload, e.modelLevelCooling()); ok {
 				terminalErr = streamErr
 				replayErr = clearCodexReasoningReplayOnInvalidSignature(ctx, eventPrepared.replayScope, streamErr.StatusCode(), body)
 			}

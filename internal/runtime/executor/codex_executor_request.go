@@ -111,6 +111,80 @@ type codexIdentityConfuseState struct {
 	originalPromptCacheKey string
 	promptCacheKey         string
 	turnIDs                []codexIdentityReplacement
+	// ruleKeyFrom/ruleKey record a payload rule that changed prompt_cache_key
+	// after the built-in mutations: ruleKeyFrom is the key before the rules
+	// and ruleKey the operator-owned key that went on the wire. Header mirrors
+	// of the key follow ruleKey so body and headers stay bound together.
+	ruleKeyFrom string
+	ruleKey     string
+}
+
+// bindCodexIdentityToFinalBody records a prompt_cache_key that a payload rule
+// set or changed, comparing the key before the payload finalizer (before)
+// with the final body.
+// It must run after the finalizer and before the identity headers are applied.
+// The rule-set value is operator-owned and is not remapped again.
+func bindCodexIdentityToFinalBody(state *codexIdentityConfuseState, before string, finalBody []byte) {
+	if state == nil {
+		return
+	}
+	final := codexPromptCacheKey(finalBody)
+	if final == "" || final == before {
+		return
+	}
+	state.ruleKeyFrom = before
+	state.ruleKey = final
+}
+
+// codexPromptCacheKey returns the trimmed prompt_cache_key of a request body.
+func codexPromptCacheKey(body []byte) string {
+	return strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+}
+
+// codexSessionKeyHeaders carry the session identity that must match
+// prompt_cache_key; codexPromptCacheKeyHeaders additionally mirror it when the
+// executor derived them from the key.
+var (
+	codexSessionKeyHeaders     = []string{"Session-Id", "Session_id", "Conversation_id"}
+	codexPromptCacheKeyHeaders = []string{"X-Client-Request-Id", "Thread-Id"}
+)
+
+// bindCodexHeadersToRuleKey binds the session headers to the operator-owned key
+// that is on the wire and rewrites every other header that mirrored the
+// pre-rule key, so body and headers always carry the same identity.
+func bindCodexHeadersToRuleKey(headers http.Header, state *codexIdentityConfuseState) {
+	if headers == nil || state == nil || state.ruleKey == "" {
+		return
+	}
+	from := state.ruleKeyFrom
+	for key, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		value := strings.TrimSpace(values[0])
+		for _, name := range codexSessionKeyHeaders {
+			if strings.EqualFold(key, name) {
+				headers[key] = []string{state.ruleKey}
+			}
+		}
+		for _, name := range codexPromptCacheKeyHeaders {
+			if strings.EqualFold(key, name) && from != "" && value == from {
+				headers[key] = []string{state.ruleKey}
+			}
+		}
+		if strings.EqualFold(key, "X-Codex-Window-Id") && from != "" && value == from+":0" {
+			headers[key] = []string{state.ruleKey + ":0"}
+		}
+		if strings.EqualFold(key, "X-Codex-Turn-Metadata") && from != "" && gjson.Get(value, "prompt_cache_key").String() == from {
+			updated, errSet := sjson.Set(value, "prompt_cache_key", state.ruleKey)
+			if errSet == nil {
+				headers[key] = []string{updated}
+			}
+		}
+	}
+	if codexSessionHeaderValue(headers) == "" {
+		setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.ruleKey)
+	}
 }
 
 type codexIdentityReplacement struct {
@@ -169,7 +243,14 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
+	beforeRulesKey := codexPromptCacheKey(rawJSON)
 	rawJSON = helps.FinalizePayload(ctx, rawJSON)
+	// Bind the session headers to the key that is actually on the wire, which a
+	// payload rule may have set or changed.
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, rawJSON)
+	if identityState.ruleKey != "" {
+		cache.ID = identityState.ruleKey
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
@@ -214,10 +295,12 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 }
 
 func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityConfuseState) {
-	if headers == nil {
+	if headers == nil || state == nil {
 		return
 	}
-	if state == nil || !state.enabled {
+	// Runs last, after every other header source, so a payload rule's key wins.
+	defer bindCodexHeadersToRuleKey(headers, state)
+	if !state.enabled {
 		return
 	}
 
@@ -266,6 +349,11 @@ func applyCodexIdentityConfuseResponsePayload(payload []byte, state codexIdentit
 
 func applyCodexIdentityExposeResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
 	payload = replaceCodexIdentityResponsePayload(payload, state.promptCacheKey, state.originalPromptCacheKey)
+	if state.enabled {
+		// A payload rule's operator-owned key replaced the client's key on the
+		// wire; the client still sees its own key.
+		payload = replaceCodexIdentityResponsePayload(payload, state.ruleKey, state.originalPromptCacheKey)
+	}
 	for _, turnID := range state.turnIDs {
 		payload = replaceCodexIdentityResponsePayload(payload, turnID.confused, turnID.original)
 	}

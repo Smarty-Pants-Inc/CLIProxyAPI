@@ -399,14 +399,17 @@ func (s *Service) ensureAuthDir() error {
 	// Tighten a group/world-accessible directory left by older releases
 	// (created 0755). Windows has no POSIX mode bits to tighten.
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		if errChmod := os.Chmod(s.cfg.AuthDir, 0o700); errChmod != nil {
-			log.Warnf("auth directory %s has mode %#o; failed to restrict it to 0700: %v", s.cfg.AuthDir, info.Mode().Perm(), errChmod)
-		} else {
-			log.Warnf("auth directory %s had mode %#o; restricted it to 0700", s.cfg.AuthDir, info.Mode().Perm())
+		// Fail closed: tokens must not be served from a directory others can read.
+		if errChmod := chmodAuthDir(s.cfg.AuthDir, 0o700); errChmod != nil {
+			return fmt.Errorf("cliproxy: auth directory %s has mode %#o and could not be restricted to owner-only 0700 (fix it with: chmod 700 %s): %w", s.cfg.AuthDir, info.Mode().Perm(), s.cfg.AuthDir, errChmod)
 		}
+		log.Warnf("auth directory %s had mode %#o; restricted it to 0700", s.cfg.AuthDir, info.Mode().Perm())
 	}
 	return nil
 }
+
+// chmodAuthDir is os.Chmod; tests replace it to simulate a failure.
+var chmodAuthDir = os.Chmod
 
 // startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
 func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
