@@ -77,6 +77,14 @@ func TestGitTokenStoreRecoveryRestoresOwnerOnlyModes(t *testing.T) {
 	if errChmod := os.Chmod(localPath, 0o644); errChmod != nil {
 		t.Fatal(errChmod)
 	}
+	// A preserved non-auth executable keeps its own mode.
+	scriptPath := filepath.Join(repoDir, "run.sh")
+	if errWrite := os.WriteFile(scriptPath, []byte("#!/bin/sh\n"), 0o755); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if errChmod := os.Chmod(scriptPath, 0o755); errChmod != nil {
+		t.Fatal(errChmod)
+	}
 	outsidePath := filepath.Join(root, "outside.json")
 	if errWrite := os.WriteFile(outsidePath, []byte("{}"), 0o644); errWrite != nil {
 		t.Fatal(errWrite)
@@ -100,6 +108,7 @@ func TestGitTokenStoreRecoveryRestoresOwnerOnlyModes(t *testing.T) {
 	assertMode(t, filepath.Join(authDir, "victim.json"), 0o600)
 	assertMode(t, filepath.Join(authDir, "team", "nested.json"), 0o600)
 	assertMode(t, localPath, 0o600)
+	assertMode(t, scriptPath, 0o755)
 	assertMode(t, outsidePath, 0o644)
 	if info, errStat := os.Lstat(filepath.Join(authDir, "link.json")); errStat != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("preserved symlink = %v, %v; want a symlink", info, errStat)
@@ -264,7 +273,7 @@ func TestApplyRecoveryLocalChangesDoesNotKeepLooseMode(t *testing.T) {
 	if errChmod := os.Chmod(local, 0o644); errChmod != nil {
 		t.Fatal(errChmod)
 	}
-	if errApply := applyRecoveryLocalChanges(source, target, map[string]struct{}{"auths/local.json": {}}); errApply != nil {
+	if errApply := applyRecoveryLocalChanges(source, target, map[string]struct{}{"auths/local.json": {}}, "auths"); errApply != nil {
 		t.Fatalf("applyRecoveryLocalChanges: %v", errApply)
 	}
 	recovered := filepath.Join(target, "auths", "local.json")

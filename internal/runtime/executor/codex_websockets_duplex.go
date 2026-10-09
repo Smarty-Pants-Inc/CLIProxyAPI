@@ -98,9 +98,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		delete(steeringSettings, parent)
 	}
 	// exposeRejectionIdentity restores client identifiers on a rejection that is
-	// forwarded before its owning request is known. Confused values are scoped
-	// per credential and original value, so restoring with every live request's
-	// mapping cannot rewrite one client's identifier into another's.
+	// forwarded before its owning request is known. Only credential-scoped
+	// remapped values that map to exactly one original among the live requests
+	// are restored; shared operator-owned rule keys are never rewritten, so one
+	// client's identifier cannot appear in another client's view.
 	exposeRejectionIdentity := func(payload []byte) []byte {
 		metadataMu.Lock()
 		defer metadataMu.Unlock()
@@ -111,12 +112,13 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		for _, settings := range responseSettings {
 			candidates = append(candidates, settings)
 		}
+		states := make([]codexIdentityConfuseState, 0, len(candidates))
 		for _, candidate := range candidates {
 			if candidate != nil {
-				payload = applyCodexIdentityExposeResponsePayload(payload, candidate.identityState)
+				states = append(states, candidate.identityState)
 			}
 		}
-		return payload
+		return exposeCodexUnassignedIdentity(payload, states)
 	}
 	waitingParent := ""
 	automaticActive := false

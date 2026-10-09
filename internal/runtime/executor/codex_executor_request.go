@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -117,6 +118,10 @@ type codexIdentityConfuseState struct {
 	// of the key follow ruleKey so body and headers stay bound together.
 	ruleKeyFrom string
 	ruleKey     string
+	// keyRemoved records that a payload rule removed prompt_cache_key or set it
+	// empty/null; ruleKeyFrom then holds the removed key, and no header may
+	// keep carrying it.
+	keyRemoved bool
 }
 
 // bindCodexIdentityToFinalBody records a prompt_cache_key that a payload rule
@@ -129,10 +134,14 @@ func bindCodexIdentityToFinalBody(state *codexIdentityConfuseState, before strin
 		return
 	}
 	final := codexPromptCacheKey(finalBody)
-	if final == "" || final == before {
+	if final == before {
 		return
 	}
 	state.ruleKeyFrom = before
+	if final == "" {
+		state.keyRemoved = true
+		return
+	}
 	state.ruleKey = final
 }
 
@@ -153,7 +162,14 @@ var (
 // that is on the wire and rewrites every other header that mirrored the
 // pre-rule key, so body and headers always carry the same identity.
 func bindCodexHeadersToRuleKey(headers http.Header, state *codexIdentityConfuseState) {
-	if headers == nil || state == nil || state.ruleKey == "" {
+	if headers == nil || state == nil {
+		return
+	}
+	if state.keyRemoved {
+		clearCodexHeadersForRemovedKey(headers, state.ruleKeyFrom, state.originalPromptCacheKey)
+		return
+	}
+	if state.ruleKey == "" {
 		return
 	}
 	from := state.ruleKeyFrom
@@ -184,6 +200,51 @@ func bindCodexHeadersToRuleKey(headers http.Header, state *codexIdentityConfuseS
 	}
 	if codexSessionHeaderValue(headers) == "" {
 		setCodexSessionHeaderCasePreserved(headers, "Session-Id", state.ruleKey)
+	}
+}
+
+// clearCodexHeadersForRemovedKey drops the session headers and every header
+// copy of a prompt_cache_key that a payload rule removed from the body, so no
+// header keeps carrying an identity the final body no longer has.
+func clearCodexHeadersForRemovedKey(headers http.Header, removed ...string) {
+	isRemoved := func(value string) bool {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return false
+		}
+		for _, key := range removed {
+			if key = strings.TrimSpace(key); key != "" && (value == key || value == key+":0") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range append([]string{"session_id"}, codexSessionKeyHeaders...) {
+		deleteHeaderCaseInsensitive(headers, name)
+	}
+	for key, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		value := values[0]
+		for _, name := range append([]string{"X-Codex-Window-Id"}, codexPromptCacheKeyHeaders...) {
+			if strings.EqualFold(key, name) && isRemoved(value) {
+				delete(headers, key)
+			}
+		}
+		if strings.EqualFold(key, "X-Codex-Turn-Metadata") {
+			updated := value
+			for _, field := range []string{"prompt_cache_key", "window_id"} {
+				if isRemoved(gjson.Get(updated, field).String()) {
+					if next, errDelete := sjson.Delete(updated, field); errDelete == nil {
+						updated = next
+					}
+				}
+			}
+			if updated != value {
+				headers[key] = []string{updated}
+			}
+		}
 	}
 }
 
@@ -250,6 +311,10 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, rawJSON)
 	if identityState.ruleKey != "" {
 		cache.ID = identityState.ruleKey
+	}
+	if identityState.keyRemoved {
+		// The final body carries no key, so no session header may carry one.
+		cache.ID = ""
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
@@ -358,6 +423,57 @@ func applyCodexIdentityExposeResponsePayload(payload []byte, state codexIdentity
 		payload = replaceCodexIdentityResponsePayload(payload, turnID.confused, turnID.original)
 	}
 	return payload
+}
+
+// exposeCodexUnassignedIdentity restores client identifiers on a payload whose
+// owning request is unknown, given the identity state of every live request.
+// Only credential-scoped remapped values (UUIDs derived per credential and
+// original) that map to exactly one original are restored; a value that maps
+// to several originals is left alone. Payload rule keys are operator-owned and
+// may be shared by several requests, so they are never rewritten here.
+func exposeCodexUnassignedIdentity(payload []byte, states []codexIdentityConfuseState) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	originals := make(map[string]map[string]struct{})
+	add := func(confused, original string) {
+		confused = strings.TrimSpace(confused)
+		original = strings.TrimSpace(original)
+		if confused == "" || original == "" || confused == original {
+			return
+		}
+		if originals[confused] == nil {
+			originals[confused] = make(map[string]struct{})
+		}
+		originals[confused][original] = struct{}{}
+	}
+	for _, state := range states {
+		if !state.enabled {
+			continue
+		}
+		add(state.promptCacheKey, state.originalPromptCacheKey)
+		for _, turnID := range state.turnIDs {
+			add(turnID.confused, turnID.original)
+		}
+	}
+	confusedValues := make([]string, 0, len(originals))
+	for confused, set := range originals {
+		if len(set) == 1 && bytes.Contains(payload, []byte(confused)) {
+			confusedValues = append(confusedValues, confused)
+		}
+	}
+	if len(confusedValues) == 0 {
+		return payload
+	}
+	sort.Strings(confusedValues)
+	pairs := make([]string, 0, 2*len(confusedValues))
+	for _, confused := range confusedValues {
+		for original := range originals[confused] {
+			pairs = append(pairs, confused, original)
+		}
+	}
+	// One pass, so a restored value is never rewritten again.
+	return []byte(strings.NewReplacer(pairs...).Replace(string(payload)))
 }
 
 func (state *codexIdentityConfuseState) confuseTurnID(turnID string) string {
