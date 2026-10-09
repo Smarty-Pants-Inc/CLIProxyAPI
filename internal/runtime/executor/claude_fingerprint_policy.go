@@ -5,10 +5,11 @@ import (
 	"strings"
 	"sync"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -54,7 +55,7 @@ func normalizeClaudeFingerprintProfile(raw string) string {
 	profile, ok := config.NormalizeClaudeFingerprintProfile(raw)
 	if !ok {
 		if _, warned := claudeFingerprintProfileWarned.LoadOrStore(strings.TrimSpace(raw), struct{}{}); !warned {
-			log.Warnf("unrecognized claude fingerprint-profile %q (supported: %q); falling back to default", raw, claudeFingerprintProfileClaudeCodeCLI)
+			log.Warnf("unrecognized claude fingerprint-profile %q (supported: %q); falling back to default", logging.SafeDiagnosticForLog(raw), claudeFingerprintProfileClaudeCodeCLI)
 		}
 	}
 	return profile

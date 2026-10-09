@@ -16,12 +16,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -107,14 +107,17 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	if errBuild != nil {
 		return resp, errBuild
 	}
-	reporter.SetTranslatedReasoningEffort(body, "codex")
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	payloadOpts := opts
+	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts))
 	var identityState codexIdentityConfuseState
 	httpReq, body, identityState, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, auth, req, req.Payload, body)
 	if errCache != nil {
 		return resp, errCache
 	}
+	reporter.SetTranslatedReasoningEffort(body, "codex")
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, mainModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
@@ -143,7 +146,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErrWithCooling(httpResp.StatusCode, data, e.modelLevelCooling())
+		err = newCodexStatusErrWithCooling(httpResp.StatusCode, applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling())
 		return resp, err
 	}
 
@@ -154,7 +157,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 			continue
 		}
 		eventData := bytes.TrimSpace(line[len(dataTag):])
-		reporter.ObserveCodexResponseModel(eventData)
+		reporter.ObserveResponseModel(eventData)
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -205,14 +208,17 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	if errBuild != nil {
 		return nil, errBuild
 	}
-	reporter.SetTranslatedReasoningEffort(body, "codex")
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	payloadOpts := opts
+	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts))
 	var identityState codexIdentityConfuseState
 	httpReq, body, identityState, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, auth, req, req.Payload, body)
 	if errCache != nil {
 		return nil, errCache
 	}
+	reporter.SetTranslatedReasoningEffort(body, "codex")
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, mainModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
@@ -238,7 +244,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErrWithCooling(httpResp.StatusCode, data, e.modelLevelCooling())
+		err = newCodexStatusErrWithCooling(httpResp.StatusCode, applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling())
 		return nil, err
 	}
 
@@ -279,7 +285,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 				continue
 			}
 			eventData := bytes.TrimSpace(line[len(dataTag):])
-			reporter.ObserveCodexResponseModel(eventData)
+			reporter.ObserveResponseModel(eventData)
 			switch gjson.GetBytes(eventData, "type").String() {
 			case "response.output_item.done":
 				collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -341,6 +347,15 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	if errCache != nil {
 		return resp, errCache
 	}
+	payloadOpts := opts
+	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
+	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
+	if errPrepare != nil {
+		return resp, errPrepare
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(body))
+	httpReq.ContentLength = int64(len(body))
+	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	applyCodexDirectImageHeaders(httpReq, auth, apiKey, false, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, model)
 	if contentType != "" {
@@ -372,13 +387,14 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErrWithCooling(httpResp.StatusCode, data, e.modelLevelCooling())
+		err = newCodexStatusErrWithCooling(httpResp.StatusCode, applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling())
 		return resp, err
 	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
-	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+	clientData := applyCodexIdentityExposeResponsePayload(data, identityState)
+	return cliproxyexecutor.Response{Payload: clientData, Headers: httpResp.Header.Clone()}, nil
 }
 
 func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -402,6 +418,15 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	if errCache != nil {
 		return nil, errCache
 	}
+	payloadOpts := opts
+	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
+	body, contentType, errPrepare = helps.ApplyMediaPayloadConfig(e.cfg, e.Identifier(), model, "openai", body, contentType, req, payloadOpts)
+	if errPrepare != nil {
+		return nil, errPrepare
+	}
+	httpReq.Body = io.NopCloser(bytes.NewReader(body))
+	httpReq.ContentLength = int64(len(body))
+	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	applyCodexDirectImageHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyModelHeaderOverrides(httpReq.Header, model)
 	if contentType != "" {
@@ -430,7 +455,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErrWithCooling(httpResp.StatusCode, data, e.modelLevelCooling())
+		err = newCodexStatusErrWithCooling(httpResp.StatusCode, applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling())
 		return nil, err
 	}
 
@@ -456,8 +481,9 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 				for _, line := range bytes.Split(chunk, []byte("\n")) {
 					streamUsage.ObserveOpenAIStream(bytes.TrimSpace(line))
 				}
+				clientChunk := applyCodexIdentityExposeResponsePayload(chunk, identityState)
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: clientChunk}:
 				case <-ctx.Done():
 					return
 				}
@@ -684,9 +710,6 @@ func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexe
 		return nil, errThinking
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	out = helps.ApplyPayloadConfigWithRequest(e.cfg, mainModel, "codex", codexOpenAIImageSourceFormat, "", out, body, requestedModel, requestPath, opts.Headers)
 	out = helps.SetStringIfDifferent(out, "model", mainModel)
 	out = helps.SetBoolIfDifferent(out, "stream", true)
 	out, _ = sjson.DeleteBytes(out, "previous_response_id")

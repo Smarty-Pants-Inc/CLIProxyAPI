@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -271,6 +271,9 @@ func MaskSensitiveQuery(raw string) string {
 			decodedValue = valuePart
 		}
 		masked := HideAPIKey(strings.TrimSpace(decodedValue))
+		if shouldRedactQueryParam(decodedKey) {
+			masked = "[REDACTED]"
+		}
 		parts[i] = keyPart + "=" + url.QueryEscape(masked)
 		changed = true
 	}
@@ -289,8 +292,17 @@ func shouldMaskQueryParam(key string) bool {
 	if key == "key" || key == "value" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
 		return true
 	}
+	// Covers access_token, refresh_token, id_token, client_secret, etc.
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {
 		return true
 	}
-	return false
+	return key == "password" || shouldRedactQueryParam(key)
+}
+
+func shouldRedactQueryParam(key string) bool {
+	key = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(key)), "[]")
+	// OAuth callback/PKCE values must not expose even a prefix or suffix:
+	// the authorization code and state are bearer-equivalent until redeemed,
+	// and the verifier redeems the code.
+	return key == "code" || key == "state" || strings.Contains(key, "verifier")
 }

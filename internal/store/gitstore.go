@@ -22,7 +22,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -390,6 +391,12 @@ func (s *GitTokenStore) ensureRepositoryLocked() (errResult error) {
 		s.dirLock.Unlock()
 		return fmt.Errorf("git token store: create auth dir: %w", err)
 	}
+	// Clone, pull, checkout and recovery write files with git's modes; auth
+	// material must end owner-only on every path.
+	if err := enforceOwnerOnlyTree(s.baseDir); err != nil {
+		s.dirLock.Unlock()
+		return fmt.Errorf("git token store: restrict auth dir: %w", err)
+	}
 	if err := os.MkdirAll(s.configDir, 0o700); err != nil {
 		s.dirLock.Unlock()
 		return fmt.Errorf("git token store: create config dir: %w", err)
@@ -469,12 +476,8 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
 		if !contentsMatch {
-			tmp := path + ".tmp"
-			if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-				return "", fmt.Errorf("auth filestore: write temp failed: %w", errWrite)
-			}
-			if errRename := os.Rename(tmp, path); errRename != nil {
-				return "", fmt.Errorf("auth filestore: rename failed: %w", errRename)
+			if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
+				return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
 			}
 		}
 	default:
@@ -1157,7 +1160,7 @@ func applyTreePaths(tree *object.Tree, repoDir string, paths []string) error {
 		if errMkdir := os.MkdirAll(filepath.Dir(destination), 0o700); errMkdir != nil {
 			return fmt.Errorf("create parent for %s: %w", path, errMkdir)
 		}
-		if errWrite := os.WriteFile(destination, []byte(contents), 0o600); errWrite != nil {
+		if errWrite := misc.WriteAuthFileAtomic(destination, []byte(contents)); errWrite != nil {
 			return fmt.Errorf("write %s: %w", path, errWrite)
 		}
 	}
@@ -1267,8 +1270,20 @@ func (s *GitTokenStore) recoverRepositoryLocked(repoDir string, authMethod []cli
 	if errPreserve != nil {
 		return errPreserve
 	}
-	if errApply := applyRecoveryLocalChanges(repoDir, cloneDir, preservedPaths); errApply != nil {
+	authRel, authInRepo := s.authDirRelativeTo(repoDir)
+	authTree := ""
+	if authInRepo {
+		authTree = authRel
+	}
+	if errApply := applyRecoveryLocalChanges(repoDir, cloneDir, preservedPaths, authTree); errApply != nil {
 		return fmt.Errorf("preserve local worktree changes: %w", errApply)
+	}
+	// The clone's checkout uses git's modes; tighten the auth tree before it
+	// is moved into the live repository.
+	if authInRepo {
+		if errPerm := enforceOwnerOnlyTree(filepath.Join(cloneDir, authRel)); errPerm != nil {
+			return fmt.Errorf("restrict recovered auth dir: %w", errPerm)
+		}
 	}
 
 	errClose := closeRecoveryRepositories(closeRepository, baselineRepo, clonedRepo)
@@ -1329,7 +1344,25 @@ func (s *GitTokenStore) recoverRepositoryLocked(repoDir string, authMethod []cli
 		}
 		return errRecovered
 	}
+	if authInRepo {
+		if errPerm := enforceOwnerOnlyTree(filepath.Join(repoDir, authRel)); errPerm != nil {
+			return fmt.Errorf("restrict recovered auth dir: %w", errPerm)
+		}
+	}
 	return nil
+}
+
+// authDirRelativeTo returns the auth directory relative to repoDir when it lies
+// inside the repository.
+func (s *GitTokenStore) authDirRelativeTo(repoDir string) (string, bool) {
+	if s.baseDir == "" {
+		return "", false
+	}
+	rel, errRel := filepath.Rel(repoDir, s.baseDir)
+	if errRel != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return rel, true
 }
 
 func inspectRecoveryBaseline(repoDir string) (repoResult *git.Repository, treeResult *object.Tree, dirtyResult map[string]struct{}, errResult error) {
@@ -1384,7 +1417,43 @@ func recoveryPreservedPaths(baselineTree, remoteTree *object.Tree, dirtyPaths ma
 	return dirtyPaths, nil
 }
 
-func applyRecoveryLocalChanges(sourceDir, targetDir string, paths map[string]struct{}) error {
+// recoveryPathInAuthTree reports whether the slash-separated repository path
+// lies in the auth tree authRel (relative to the repository; "" means the
+// auth tree is not inside the repository, "." that it is the repository).
+func recoveryPathInAuthTree(path, authRel string) bool {
+	if authRel == "" {
+		return false
+	}
+	authRel = filepath.ToSlash(filepath.Clean(authRel))
+	if authRel == "." {
+		return true
+	}
+	return path == authRel || strings.HasPrefix(path, authRel+"/")
+}
+
+// writeRecoveredFileWithMode creates target exclusively and gives it exactly
+// perm through the open descriptor, so a preserved non-auth file keeps its
+// own mode (for example an executable script).
+func writeRecoveredFileWithMode(target string, contents []byte, perm fs.FileMode) (errResult error) {
+	file, errOpen := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if errOpen != nil {
+		return errOpen
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil && errResult == nil {
+			errResult = errClose
+		}
+	}()
+	if _, errWrite := file.Write(contents); errWrite != nil {
+		return errWrite
+	}
+	return file.Chmod(perm)
+}
+
+// applyRecoveryLocalChanges copies preserved local changes into the recovery
+// clone. Files in the auth tree (authRel, see recoveryPathInAuthTree) go
+// through the owner-only atomic auth writer; other files keep their mode.
+func applyRecoveryLocalChanges(sourceDir, targetDir string, paths map[string]struct{}, authRel string) error {
 	sortedPaths := make([]string, 0, len(paths))
 	for path := range paths {
 		sortedPaths = append(sortedPaths, path)
@@ -1415,7 +1484,13 @@ func applyRecoveryLocalChanges(sourceDir, targetDir string, paths map[string]str
 			if errRead != nil {
 				return fmt.Errorf("read local change %s: %w", path, errRead)
 			}
-			if errWrite := os.WriteFile(target, contents, info.Mode().Perm()); errWrite != nil {
+			var errWrite error
+			if recoveryPathInAuthTree(path, authRel) {
+				errWrite = misc.WriteAuthFileAtomic(target, contents)
+			} else {
+				errWrite = writeRecoveredFileWithMode(target, contents, info.Mode().Perm())
+			}
+			if errWrite != nil {
 				return fmt.Errorf("write local change %s: %w", path, errWrite)
 			}
 		case info.Mode()&os.ModeSymlink != 0:
@@ -1587,7 +1662,7 @@ func restoreMissingTrackedFiles(repo *git.Repository, repoDir string) error {
 		if errMkdir := os.MkdirAll(filepath.Dir(destination), 0o700); errMkdir != nil {
 			return errMkdir
 		}
-		return os.WriteFile(destination, []byte(contents), 0o600)
+		return misc.WriteAuthFileAtomic(destination, []byte(contents))
 	})
 }
 
@@ -1978,7 +2053,7 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 func ensureEmptyFile(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return os.WriteFile(path, []byte{}, 0o600)
+			return misc.WriteAuthFileAtomic(path, []byte{})
 		}
 		return err
 	}

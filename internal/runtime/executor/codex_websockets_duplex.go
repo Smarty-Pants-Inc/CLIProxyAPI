@@ -11,9 +11,10 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -95,6 +96,29 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 		}
 		delete(steeringSettings, parent)
+	}
+	// exposeRejectionIdentity restores client identifiers on a rejection that is
+	// forwarded before its owning request is known. Only credential-scoped
+	// remapped values that map to exactly one original among the live requests
+	// are restored; shared operator-owned rule keys are never rewritten, so one
+	// client's identifier cannot appear in another client's view.
+	exposeRejectionIdentity := func(payload []byte) []byte {
+		metadataMu.Lock()
+		defer metadataMu.Unlock()
+		candidates := append([]*codexWebsocketPrepared{current}, pending...)
+		for _, settings := range steeringSettings {
+			candidates = append(candidates, settings)
+		}
+		for _, settings := range responseSettings {
+			candidates = append(candidates, settings)
+		}
+		states := make([]codexIdentityConfuseState, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate != nil {
+				states = append(states, candidate.identityState)
+			}
+		}
+		return exposeCodexUnassignedIdentity(payload, states)
 	}
 	waitingParent := ""
 	automaticActive := false
@@ -226,9 +250,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
-			payload = buildCodexWebsocketRequestBody(prepared.upstreamBody)
-			// Preparation can merge signed input. Validate the actual submission,
-			// on the actual socket account, before logging or writing any bytes.
+			payload = frameCodexWebsocketRequestBody(prepared.upstreamBody)
+			// Preparation can merge signed input or apply payload rules. Validate
+			// the final submission on the actual socket account before any write.
 			if errAffinity := validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
 				fail(errAffinity)
 				return false
@@ -309,6 +333,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.steer":
+					// Steering carries business input but must not inherit response.create defaults.
+					steerReq := req
+					steerReq.Payload = payload
+					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
+					payload, _ = sjson.SetBytes(payload, "type", "response.steer")
 					if errAffinity := validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
 						fail(errAffinity)
 						return
@@ -331,8 +360,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 						steeringSettings[parent] = settings
 					}
 					metadataMu.Unlock()
-					// Control frames bypass ALL response.create translations and defaults.
-					// Preserve the raw frame after local compaction affinity validation.
+					// Control frames bypass response.create translations and built-in defaults.
+					// Only explicit payload rules may change the raw business input; affinity
+					// validation above checks exactly the frame sent on this socket.
 					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
 						fail(fmt.Errorf("websocket credential is no longer enabled"))
 						return
@@ -559,9 +589,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			if !firstResponse && (eventType == "error" || eventType == "response.failed") {
 				var credentialErr error
-				if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+				clientPayload := exposeRejectionIdentity(payload)
+				if wsErr, ok := parseCodexWebsocketErrorWithCooling(clientPayload, e.modelLevelCooling()); ok {
 					credentialErr = wsErr
-				} else if streamErr, _, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+				} else if streamErr, _, ok := codexTerminalFailureErrWithCooling(clientPayload, e.modelLevelCooling()); ok {
 					credentialErr = streamErr
 				}
 				var status interface{ StatusCode() int }
@@ -570,7 +601,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					// The conductor records the original classification without replaying
 					// this already-started stream on another credential.
 					reporter.PublishFailure(ctx, credentialErr)
-					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
+					if send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
 						send(cliproxyexecutor.StreamChunk{Err: credentialErr})
 					}
 					return
@@ -604,7 +635,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					// guessing a scope, replaying input, or cooling the credential.
 					connectionErr := &codexDuplexConnectionError{cause: fmt.Errorf("cannot associate websocket failure with a response or pending create")}
 					reporter.PublishFailure(ctx, connectionErr)
-					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
+					if send(cliproxyexecutor.StreamChunk{Payload: exposeRejectionIdentity(payload)}) {
 						send(cliproxyexecutor.StreamChunk{Err: connectionErr})
 					}
 					return
@@ -621,10 +652,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			// metadata that belongs to this event. Only the first rejection can
 			// enter conductor bootstrap retry; later failures stay on this socket.
 			var terminalErr, replayErr error
-			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+			clientErrPayload := applyCodexIdentityExposeResponsePayload(payload, eventPrepared.identityState)
+			if wsErr, ok := parseCodexWebsocketErrorWithCooling(clientErrPayload, e.modelLevelCooling()); ok {
 				terminalErr = wsErr
 				replayErr = clearCodexReasoningReplayOnWebsocketError(ctx, eventPrepared.replayScope, payload)
-			} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(clientErrPayload, e.modelLevelCooling()); ok {
 				terminalErr = streamErr
 				replayErr = clearCodexReasoningReplayOnInvalidSignature(ctx, eventPrepared.replayScope, streamErr.StatusCode(), body)
 			}
