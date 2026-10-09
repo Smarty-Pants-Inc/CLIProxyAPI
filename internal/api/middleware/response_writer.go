@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -49,6 +50,10 @@ type ResponseWriterWrapper struct {
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	// streamMu orders streaming chunk sends against Finalize closing chunkChannel (smarty-dev#7617): a Write that
+	// overlaps Finalize either sends before the close or sees streamClosed and skips logging.
+	streamMu     sync.Mutex
+	streamClosed bool
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -85,16 +90,7 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(data)
 
 	// THEN: Handle logging based on response type
-	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
-		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
-		}
-		// For streaming responses: Send to async logging channel (non-blocking)
-		select {
-		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
-		default: // Channel full, skip logging to avoid blocking
-		}
+	if w.isStreaming && w.sendStreamingChunk(data) {
 		return n, err
 	}
 
@@ -103,6 +99,29 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	}
 
 	return n, err
+}
+
+// sendStreamingChunk hands a copy of data to the async chunk logger without blocking. It reports false only when
+// no streaming logger was started, so the caller falls back to body buffering; after Finalize the chunk is
+// already on the wire and is no longer logged.
+func (w *ResponseWriterWrapper) sendStreamingChunk(data []byte) bool {
+	w.streamMu.Lock()
+	defer w.streamMu.Unlock()
+	if w.streamClosed {
+		return true
+	}
+	if w.chunkChannel == nil {
+		return false
+	}
+	// Capture TTFB on first chunk (synchronous, before async channel send)
+	if w.firstChunkTimestamp.IsZero() {
+		w.firstChunkTimestamp = time.Now()
+	}
+	select {
+	case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
+	default: // Channel full, skip logging to avoid blocking
+	}
+	return true
 }
 
 // FlushError forwards transport errors without bypassing inner middleware.
@@ -138,15 +157,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	n, err := w.ResponseWriter.WriteString(data)
 
 	// THEN: Capture for logging
-	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
-		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
-		}
-		select {
-		case w.chunkChannel <- []byte(data):
-		default:
-		}
+	if w.isStreaming && w.sendStreamingChunk([]byte(data)) {
 		return n, err
 	}
 
@@ -304,18 +315,24 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
+		w.streamMu.Lock()
+		w.streamClosed = true
 		if w.chunkChannel != nil {
 			close(w.chunkChannel)
 		}
+		w.streamMu.Unlock()
 
 		if w.streamDone != nil {
 			<-w.streamDone
 			w.streamDone = nil
 		}
 		// The chunk processor reads chunkChannel; clear it only after it exits.
+		w.streamMu.Lock()
 		w.chunkChannel = nil
+		firstChunkTimestamp := w.firstChunkTimestamp
+		w.streamMu.Unlock()
 
-		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
+		w.streamWriter.SetFirstChunkTimestamp(firstChunkTimestamp)
 
 		// Write API Request and Response to the streaming log before closing
 		apiRequest := w.extractAPIRequest(c)
