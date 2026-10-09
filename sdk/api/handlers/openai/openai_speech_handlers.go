@@ -49,13 +49,14 @@ func (h *OpenAIAPIHandler) XAITTS(c *gin.Context) {
 }
 
 func (h *OpenAIAPIHandler) handleXAISpeech(c *gin.Context) {
-	raw, err := handlers.ReadRequestBody(c)
-	if err != nil {
-		writeSpeechError(c, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+	// Cap the wire and decoded body before buffering, not after.
+	raw, err := handlers.ReadRequestBodyLimit(c, maxXAISpeechBody)
+	if errors.Is(err, handlers.ErrRequestBodyTooLarge) || (err == nil && len(raw) > maxXAISpeechBody) {
+		writeSpeechError(c, http.StatusRequestEntityTooLarge, "request body is larger than 1MB")
 		return
 	}
-	if len(raw) > maxXAISpeechBody {
-		writeSpeechError(c, http.StatusBadRequest, "request body is larger than 1MB")
+	if err != nil {
+		writeSpeechError(c, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
 		return
 	}
 
