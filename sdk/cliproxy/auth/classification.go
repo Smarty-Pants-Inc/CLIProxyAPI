@@ -108,7 +108,7 @@ func normalizeAuthSourceKind(source string) string {
 }
 
 func authHasOAuthMetadata(auth *Auth) bool {
-	if auth == nil || len(auth.Metadata) == 0 {
+	if auth == nil {
 		return false
 	}
 	for _, key := range []string{"access_token", "refresh_token", "id_token", "email", "token_type", "expires_at", "expired"} {
@@ -116,7 +116,8 @@ func authHasOAuthMetadata(auth *Auth) bool {
 			return true
 		}
 	}
-	if token, ok := auth.Metadata["token"].(map[string]any); ok && len(token) > 0 {
+	raw, _ := auth.MetadataValue("token")
+	if token, ok := raw.(map[string]any); ok && len(token) > 0 {
 		return true
 	}
 	return false
@@ -130,13 +131,5 @@ func authAttribute(auth *Auth, key string) string {
 }
 
 func authMetadataString(auth *Auth, key string) string {
-	if auth == nil || auth.Metadata == nil {
-		return ""
-	}
-	switch value := auth.Metadata[key].(type) {
-	case string:
-		return strings.TrimSpace(value)
-	default:
-		return ""
-	}
+	return strings.TrimSpace(auth.MetadataString(key))
 }

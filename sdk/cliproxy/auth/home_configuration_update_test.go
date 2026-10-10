@@ -56,7 +56,7 @@ func TestHomeDispatchConfigurationUpdateCapabilityAndLegacyFallback(t *testing.T
 				cfg.CodexKey = []internalconfig.CodexKey{{APIKey: "home-update-key", Prefix: "tenant", Models: []internalconfig.CodexModel{{Name: model, SupportConfigurationUpdate: true}}}}
 			}
 			manager.SetConfig(cfg)
-			payload, errMarshal := json.Marshal(homeAuthDispatchResponse{Model: model, Auth: *auth})
+			payload, errMarshal := json.Marshal(map[string]any{"model": model, "auth": auth.Clone()})
 			if errMarshal != nil {
 				t.Fatal(errMarshal)
 			}

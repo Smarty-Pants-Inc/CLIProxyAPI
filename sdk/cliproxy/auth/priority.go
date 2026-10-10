@@ -30,10 +30,7 @@ func ApplyAuthPriorityMetadata(auth *Auth, metadata map[string]any) {
 	default:
 		return
 	}
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-	auth.Metadata["priority"] = rawPriority
+	auth.SetMetadata("priority", rawPriority)
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}

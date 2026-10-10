@@ -78,7 +78,7 @@ func claudeDiagnosticsCredentialIdentity(auth *cliproxyauth.Auth) string {
 	if index := strings.TrimSpace(auth.Index); index != "" {
 		return "index:" + index
 	}
-	deviceIDs := claudeauth.NormalizeDeviceIDPool(claudeauth.ReadDeviceIDPool(&auth.Metadata))
+	deviceIDs := claudeauth.NormalizeDeviceIDPool(claudeauth.ReadDeviceIDPool(auth))
 	if len(deviceIDs) > 0 {
 		return "device:" + deviceIDs[0]
 	}

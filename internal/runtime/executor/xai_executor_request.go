@@ -204,13 +204,12 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 		token = strings.TrimSpace(auth.Attributes["api_key"])
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	if auth.Metadata != nil {
-		if token == "" {
-			token = xaiMetadataString(auth.Metadata, "access_token")
-		}
-		if baseURL == "" {
-			baseURL = xaiMetadataString(auth.Metadata, "base_url")
-		}
+	metadata := auth.CloneMetadata()
+	if token == "" {
+		token = xaiMetadataString(metadata, "access_token")
+	}
+	if baseURL == "" {
+		baseURL = xaiMetadataString(metadata, "base_url")
 	}
 	return token, baseURL
 }
@@ -229,8 +228,7 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 			}
 		}
 	}
-	if len(auth.Metadata) > 0 {
-		raw, ok := auth.Metadata[xaiUsingAPIAttr]
+	if raw, ok := auth.MetadataValue(xaiUsingAPIAttr); ok {
 		if ok && raw != nil {
 			switch v := raw.(type) {
 			case bool:
@@ -247,7 +245,7 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 	if raw := strings.TrimSpace(auth.Attributes["auth_kind"]); raw != "" {
 		return !strings.EqualFold(raw, "oauth")
 	}
-	return !strings.EqualFold(xaiMetadataString(auth.Metadata, "auth_kind"), "oauth")
+	return !strings.EqualFold(xaiMetadataString(auth.CloneMetadata(), "auth_kind"), "oauth")
 }
 
 // xaiChatBaseURL returns the base URL for xAI HTTP chat and media (image/video) requests.

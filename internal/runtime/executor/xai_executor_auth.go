@@ -21,6 +21,8 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	if auth == nil {
 		return nil, statusErr{code: http.StatusInternalServerError, msg: "xai executor: auth is nil"}
 	}
+	// Build an unpublished candidate; callers may share the input credential.
+	auth = auth.Clone()
 	refreshToken := xaiMetadataString(auth.Metadata, "refresh_token")
 	if refreshToken == "" {
 		return auth, nil

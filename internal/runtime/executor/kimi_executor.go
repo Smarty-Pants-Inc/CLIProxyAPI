@@ -1049,13 +1049,9 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if auth == nil {
 		return nil, fmt.Errorf("kimi executor: auth is nil")
 	}
-	// Expect refresh_token in metadata for OAuth-based accounts
-	var refreshToken string
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["refresh_token"].(string); ok && strings.TrimSpace(v) != "" {
-			refreshToken = v
-		}
-	}
+	// Build an unpublished candidate; the input credential may be shared.
+	auth = auth.Clone()
+	refreshToken := auth.MetadataString("refresh_token")
 	if strings.TrimSpace(refreshToken) == "" {
 		// Nothing to refresh
 		return auth, nil
@@ -1136,21 +1132,7 @@ func applyKimiHeaders(r *http.Request, token string, stream bool) {
 }
 
 func resolveKimiDeviceIDFromAuth(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Metadata == nil {
-		return ""
-	}
-
-	deviceIDRaw, ok := auth.Metadata["device_id"]
-	if !ok {
-		return ""
-	}
-
-	deviceID, ok := deviceIDRaw.(string)
-	if !ok {
-		return ""
-	}
-
-	return strings.TrimSpace(deviceID)
+	return strings.TrimSpace(auth.MetadataString("device_id"))
 }
 
 func resolveKimiDeviceIDFromStorage(auth *cliproxyauth.Auth) string {
@@ -1229,10 +1211,8 @@ func kimiCreds(a *cliproxyauth.Auth) (token string) {
 		return ""
 	}
 	// Check metadata first (OAuth flow stores tokens here)
-	if a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok && strings.TrimSpace(v) != "" {
-			return v
-		}
+	if v := a.MetadataString("access_token"); strings.TrimSpace(v) != "" {
+		return v
 	}
 	// Fallback to attributes (API key style)
 	if a.Attributes != nil {

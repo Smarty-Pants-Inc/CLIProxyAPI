@@ -386,7 +386,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		data.ProxyURL = auth.ProxyURL
 	}
 	if len(data.Metadata) == 0 {
-		data.Metadata = cloneAnyMap(auth.Metadata)
+		data.Metadata = auth.CloneMetadata()
 	}
 	if len(data.Attributes) == 0 {
 		if auth != nil {
@@ -448,7 +448,7 @@ func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
 	if data.Metadata == nil {
 		data.Metadata = make(map[string]any)
 	}
-	if priority, ok := auth.Metadata["priority"]; ok {
+	if priority, ok := auth.MetadataValue("priority"); ok {
 		data.Metadata["priority"] = priority
 	} else {
 		delete(data.Metadata, "priority")

@@ -19,10 +19,8 @@ func ResolveKimiBaseURL(auth *cliproxyauth.Auth) string {
 				return raw
 			}
 		}
-		if auth.Metadata != nil {
-			if raw, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(raw) != "" {
-				return strings.TrimRight(strings.TrimSpace(raw), "/")
-			}
+		if raw := strings.TrimSpace(auth.MetadataString("base_url")); raw != "" {
+			return strings.TrimRight(raw, "/")
 		}
 		if kimiauth.IsKimiAIAuth(auth) {
 			return kimiauth.KimiAIAPIBaseURL

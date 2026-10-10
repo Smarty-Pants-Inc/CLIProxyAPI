@@ -67,7 +67,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 				return value
 			}
 		}
-		if value := claudeauth.ReadMetadataString(&auth.Metadata, key); value != "" {
+		if value := claudeauth.ReadMetadataString(auth, key); value != "" {
 			return strings.TrimSpace(value)
 		}
 		return ""
@@ -1252,7 +1252,7 @@ func claudeCredentialTimezone(auth *cliproxyauth.Auth) string {
 			return timezone
 		}
 	}
-	return strings.TrimSpace(claudeauth.ReadMetadataString(&auth.Metadata, "timezone"))
+	return strings.TrimSpace(claudeauth.ReadMetadataString(auth, "timezone"))
 }
 
 func claudeCodeCurrentDateReminder(date string) string {

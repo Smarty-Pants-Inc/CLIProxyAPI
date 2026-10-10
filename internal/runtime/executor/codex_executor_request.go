@@ -627,8 +627,8 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		r.Header.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
-		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
+		if raw, exists := auth.MetadataValue("account_id"); exists {
+			if accountID, ok := raw.(string); ok {
 				r.Header.Set("Chatgpt-Account-Id", accountID)
 			}
 		}

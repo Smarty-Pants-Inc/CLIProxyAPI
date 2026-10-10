@@ -117,7 +117,7 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesUpstreamWebsocketPasst
 		} else if authProvider != provider {
 			return false
 		}
-		if !websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
+		if !websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.CloneMetadata()) {
 			return false
 		}
 	}
@@ -128,7 +128,7 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
 	if auth == nil {
 		return false
 	}
-	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
+	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.CloneMetadata())
 }
 
 func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName string, pinnedModelKey string, homeRuntime bool) bool {
