@@ -126,12 +126,19 @@ func TestSidebandDialPendingTLSUpgradeEndsOnContextCancel(t *testing.T) {
 	}
 }
 
-// Closing a real downstream TCP connection cancels the HTTP request context.
-// Exercise every live dialer caller, not merely a synthetic cancelled context.
+// Owner cancellation (a real downstream TCP close cancels the HTTP request
+// context) and Handler.Close (restart) must each end a blocked upstream
+// handshake. Exercise every live dialer caller, including the direct Realtime
+// WebSocket (F33, smarty-dev#3509), not merely a synthetic cancelled context.
 func TestPendingLiveUpgradeClientDisconnectReleasesDialAndSocket(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, path := range []string{"/v1/realtime", "/v1/realtime?call_id=call", "/v1/realtime/calls/call", "/v1/live/call"} {
-		t.Run(path, func(t *testing.T) {
+	for _, tc := range []struct{ trigger, path string }{
+		{"client-disconnect", "/v1/realtime"}, {"client-disconnect", "/v1/realtime?call_id=call"},
+		{"client-disconnect", "/v1/realtime/calls/call"}, {"client-disconnect", "/v1/live/call"},
+		{"handler-close", "/v1/realtime"}, {"handler-close", "/v1/realtime?call_id=call"},
+	} {
+		path := tc.path
+		t.Run(tc.trigger+path, func(t *testing.T) {
 			arrived, gone, stall := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Authorization") != "Bearer synthetic" {
@@ -180,16 +187,18 @@ func TestPendingLiveUpgradeClientDisconnectReleasesDialAndSocket(t *testing.T) {
 				t.Fatal(errWrite)
 			}
 			waitLiveEvent(t, arrived, "authenticated upstream upgrade")
-			if errClose := conn.Close(); errClose != nil {
+			if tc.trigger == "handler-close" {
+				h.Close()
+			} else if errClose := conn.Close(); errClose != nil {
 				t.Fatal(errClose)
 			}
-			waitLiveEvent(t, gone, "client disconnect closing upstream socket")
-			waitLiveEvent(t, released, "client disconnect releasing dial goroutine and relay")
+			waitLiveEvent(t, gone, tc.trigger+" closing upstream socket")
+			waitLiveEvent(t, released, tc.trigger+" releasing dial goroutine and relay")
 			h.mediaRelayMu.Lock()
 			n := len(h.rawRelayOwners)
 			h.mediaRelayMu.Unlock()
 			if n != 0 {
-				t.Fatalf("client disconnect left %d raw relay owners", n)
+				t.Fatalf("%s left %d raw relay owners", tc.trigger, n)
 			}
 		})
 	}
