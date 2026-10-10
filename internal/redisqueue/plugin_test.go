@@ -590,6 +590,42 @@ func requireHeaderField(t *testing.T, payload map[string]json.RawMessage, field,
 	}
 }
 
+func TestUsageQueuePluginPayloadPreservesCallerMetadataAndExplicitCompaction(t *testing.T) {
+	for _, explicitCompaction := range []bool{false, true} {
+		t.Run(map[bool]string{false: "explicit_false", true: "explicit_true"}[explicitCompaction], func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				ctx := internallogging.WithRequestID(context.Background(), "ctx-caller-meta-1")
+				ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
+					Role:                  "project-agent@abcdef1234567890",
+					CallerSession:         "018f0a31-6b4c-7d8e-9f01-23456789abcd",
+					SessionID:             "routing-session",
+					IsCompaction:          !explicitCompaction,
+					HasExplicitCompaction: true,
+					ExplicitCompaction:    explicitCompaction,
+				})
+				ctx = internallogging.WithResponseStatusHolder(ctx)
+				internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+				(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+					Provider: "openai",
+					Model:    "gpt-5.6-sol",
+					Detail: coreusage.Detail{
+						InputTokens:  1,
+						OutputTokens: 1,
+						TotalTokens:  2,
+					},
+				})
+
+				payload := popSinglePayload(t)
+				requireStringField(t, payload, "role", "project-agent@abcdef1234567890")
+				requireStringField(t, payload, "caller_session", "018f0a31-6b4c-7d8e-9f01-23456789abcd")
+				requireStringField(t, payload, "session_id", coresession.NormalizeToCanonicalUUID("routing-session"))
+				requireBoolField(t, payload, "is_compaction", explicitCompaction)
+			})
+		})
+	}
+}
+
 func TestUsageQueuePluginPayloadIncludesExplicitSessionHierarchy(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-session-req-1")
