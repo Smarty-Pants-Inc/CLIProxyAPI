@@ -13,16 +13,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// #7705: a rotated turn ID overlaps every adjacent pair of cache IDs. The
-// former per-needle carry heuristic walks back to its floor inside a cache ID,
-// and sequential confuse/expose passes also let turn matches hide cache IDs.
+// #7705: a rotated turn ID overlaps every adjacent pair of cache IDs. Keep
+// exercising that raw carry chain, but #7599 makes the concatenation one longer
+// identifier: it must stay unchanged, while a separate whole cache ID restores.
 func TestCodexDirectImageStreamRotatedIdentityCarryChain(t *testing.T) {
 	confused := codexIdentityConfuseUUID(identityTestAuthID, "prompt-cache", identityTestCacheKey)
 	turnID := confused[1:] + confused[:1]
 	confusedTurn := codexIdentityConfuseUUID(identityTestAuthID, "turn", turnID)
 	const repetitions = 900 // 32,400 bytes: fits in the executor's 32 KiB read.
-	wire := strings.Repeat(confused, repetitions)
-	want := strings.Repeat(identityTestCacheKey, repetitions)
+	prefix := `data: {"long":"` + strings.Repeat(confused, repetitions) + `","exact":"`
+	wire := prefix + confused + "\"}\n\n"
+	want := prefix + identityTestCacheKey + "\"}\n\n"
 	for _, tc := range []struct {
 		name      string
 		fragments [][]byte
@@ -56,28 +57,25 @@ func TestCodexDirectImageStreamRotatedIdentityCarryChain(t *testing.T) {
 			}
 			var output bytes.Buffer
 			chunks := 0
-			unsafeChunks := 0
+			wholeRestored := false
 			for chunk := range result.Chunks {
 				if chunk.Err != nil {
 					t.Errorf("stream error: %v", chunk.Err)
 				}
-				// Each emitted chunk must consist of complete restored cache
-				// keys, not just become safe after the consumer joins it.
-				if len(chunk.Payload)%len(identityTestCacheKey) != 0 ||
-					!bytes.Equal(chunk.Payload, bytes.Repeat([]byte(identityTestCacheKey), len(chunk.Payload)/len(identityTestCacheKey))) {
-					unsafeChunks++
-				}
+				// The separate whole identity is emitted intact; the long token
+				// may be forwarded in bounded chunks without any rewriting.
+				wholeRestored = wholeRestored || bytes.Contains(chunk.Payload, []byte(identityTestCacheKey))
 				output.Write(chunk.Payload)
 				chunks++
 			}
-			if unsafeChunks != 0 {
-				t.Errorf("%d of %d client chunks contain partial or unexposed cache identities", unsafeChunks, chunks)
+			if !wholeRestored {
+				t.Error("whole cache identity was not restored in one client chunk")
 			}
 			if got := output.String(); got != want {
 				t.Errorf("rotation carry chain: reassembled client output differs: got %d bytes, want %d restored bytes", len(got), len(want))
 			}
-			if bytes.Contains(output.Bytes(), []byte(confused)) || bytes.Contains(output.Bytes(), []byte(confusedTurn)) {
-				t.Error("rotation carry chain leaks a credential-scoped identity to the client")
+			if bytes.Contains(output.Bytes(), []byte(confusedTurn)) {
+				t.Error("rotation carry chain rematched an embedded turn identity")
 			}
 			if reader.reads != len(tc.fragments) || !reader.closed || chunks == 0 {
 				t.Errorf("reads=%d closed=%t chunks=%d, want %d reads, closed, nonempty output", reader.reads, reader.closed, chunks, len(tc.fragments))
@@ -97,15 +95,17 @@ func TestCodexDirectImageStreamCarryLeftmostLongestEverySplit(t *testing.T) {
 	}{
 		{"shorter-turn-prefix", confused[:12], confused, identityTestCacheKey},
 		{"longer-turn-full-prefix", confused + "-turn", confused + "-turn", confused + "-turn"},
-		{"longer-turn-mismatch", confused + "-turn", confused + "-other", identityTestCacheKey + "-other"},
+		{"longer-turn-mismatch", confused + "-turn", confused + "-other", confused + "-other"},
+		{"punctuated-longer-mismatch", confused + ".turn", confused + ".other", identityTestCacheKey + ".other"},
 		{"longer-turn-prefix-at-EOF", confused + "-turn", confused, identityTestCacheKey},
 	} {
 		for split := 1; split < len(tc.wire); split++ {
 			t.Run(fmt.Sprintf("%s/byte=%d", tc.name, split), func(t *testing.T) {
 				auth := identityImageAuth("https://images.example.invalid")
 				auth.Attributes["header:X-Codex-Turn-Metadata"] = fmt.Sprintf(`{"turn_id":%q}`, tc.turnID)
+				prefix, suffix := `data: {"note":"`, "\"}\n\n"
 				reader := &imageIdentitySplitReader{fragments: [][]byte{
-					[]byte(tc.wire[:split]), []byte(tc.wire[split:]),
+					[]byte(prefix + tc.wire[:split]), []byte(tc.wire[split:] + suffix),
 				}}
 				result := imageChunkTestStream(t, context.Background(), imageIdentityRuleConfig(true, "none"), auth, identityImagePayload(), reader)
 				var output bytes.Buffer
@@ -119,8 +119,8 @@ func TestCodexDirectImageStreamCarryLeftmostLongestEverySplit(t *testing.T) {
 					}
 					output.Write(chunk.Payload)
 				}
-				if got := output.String(); got != tc.want {
-					t.Errorf("leftmost-longest restoration: got %q, want %q", got, tc.want)
+				if got, want := output.String(), prefix+tc.want+suffix; got != want {
+					t.Errorf("leftmost-longest restoration: got %q, want %q", got, want)
 				}
 				if reader.reads != 2 || !reader.closed {
 					t.Errorf("reads=%d closed=%t, want 2, true", reader.reads, reader.closed)
