@@ -12,11 +12,20 @@ import (
 // numbers. Unchanged bytes (including string escapes and SSE metadata) are kept.
 func ReplaceCodexIdentityResponse(payload []byte, from, to string) []byte {
 	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
-	if len(payload) == 0 || from == "" || to == "" || from == to {
+	if from == "" || to == "" || from == to {
+		return payload
+	}
+	return ReplaceCodexIdentityResponseWithMappings(payload, [][2]string{{from, to}})
+}
+
+// ReplaceCodexIdentityResponseWithMappings applies one view's mapping table to
+// the raw payload. Generated values are emitted directly, never matched again.
+func ReplaceCodexIdentityResponseWithMappings(payload []byte, mappings [][2]string) []byte {
+	if len(payload) == 0 || len(mappings) == 0 {
 		return payload
 	}
 	if json.Valid(payload) {
-		return NewCodexIdentityResponseRewriter(from, to, false, true).Rewrite(payload, true)
+		return NewCodexIdentityResponseRewriterWithMappings(mappings, false, true).Rewrite(payload, true)
 	}
 	sse := false
 	for _, line := range bytes.FieldsFunc(payload, func(r rune) bool { return r == '\r' || r == '\n' }) {
@@ -26,14 +35,19 @@ func ReplaceCodexIdentityResponse(payload []byte, from, to string) []byte {
 		}
 	}
 	if !sse {
-		return NewCodexIdentityResponseRewriter(from, to, false, false).Rewrite(payload, true)
+		return NewCodexIdentityResponseRewriterWithMappings(mappings, false, false).Rewrite(payload, true)
 	}
-	return NewCodexIdentityResponseRewriter(from, to, true, false).Rewrite(payload, true)
+	return NewCodexIdentityResponseRewriterWithMappings(mappings, true, false).Rewrite(payload, true)
 }
 
 type codexIdentityAtom struct {
 	raw []byte
 	r   rune
+}
+
+type codexIdentityResponseMapping struct {
+	from, to string
+	jsonTo   []byte
 }
 
 // CodexIdentityResponseRewriter carries only an undecided identity prefix and
@@ -43,8 +57,7 @@ type codexIdentityAtom struct {
 // prefixes use bounded lookahead so plaintext starting with t/f/n is not JSON.
 // The caller must flush with final=true at EOF (also on a terminal read error).
 type CodexIdentityResponseRewriter struct {
-	from, to  string
-	jsonTo    []byte
+	mappings  []codexIdentityResponseMapping
 	sse       bool
 	line      int // 0: SSE field prefix, 1: metadata, 2: data format, 3: data, 4: literal probe
 	prefix    []byte
@@ -60,73 +73,117 @@ type CodexIdentityResponseRewriter struct {
 	keyEscape bool
 	pending   []byte
 	atoms     []codexIdentityAtom
-	matched   int
-	leftID    bool
+	candidate string // decoded atoms; bounded by the longest source plus one rune
+	leftID    bool   // lexical class of the last consumed raw rune, not generated text
 }
 
 func NewCodexIdentityResponseRewriter(from, to string, sse, jsonBody bool) *CodexIdentityResponseRewriter {
-	encoded, _ := json.Marshal(to)
-	return &CodexIdentityResponseRewriter{from: from, to: to, jsonTo: encoded[1 : len(encoded)-1], sse: sse, jsonMode: jsonBody}
+	return NewCodexIdentityResponseRewriterWithMappings([][2]string{{from, to}}, sse, jsonBody)
+}
+
+// NewCodexIdentityResponseRewriterWithMappings selects leftmost-longest whole
+// identifiers in one pass. Equal sources keep the first registration; no-op
+// mappings still participate in selection and preserve their original escapes.
+func NewCodexIdentityResponseRewriterWithMappings(mappings [][2]string, sse, jsonBody bool) *CodexIdentityResponseRewriter {
+	w := &CodexIdentityResponseRewriter{sse: sse, jsonMode: jsonBody}
+	seen := make(map[string]bool)
+	for _, pair := range mappings {
+		if pair[0] == "" || seen[pair[0]] {
+			continue
+		}
+		seen[pair[0]] = true
+		encoded, _ := json.Marshal(pair[1])
+		w.mappings = append(w.mappings, codexIdentityResponseMapping{from: pair[0], to: pair[1], jsonTo: encoded[1 : len(encoded)-1]})
+	}
+	return w
 }
 
 func codexIdentityRune(r rune) bool {
 	return r == '_' || r == '-' || unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
 }
 
-func (w *CodexIdentityResponseRewriter) flush(out *[]byte, replace bool) {
-	if replace {
-		if w.jsonMode {
-			*out = append(*out, w.jsonTo...)
+// drain consumes only decided raw atoms. A shorter whole match waits while a
+// longer source is possible; a failed prefix is reconsidered at the next raw
+// offset, with its original left boundary. Replacement bytes never enter atoms.
+func (w *CodexIdentityResponseRewriter) drain(out *[]byte, final bool) {
+	for len(w.atoms) > 0 {
+		best, undecided := -1, false
+		if !w.leftID {
+			for i, mapping := range w.mappings {
+				if !final && strings.HasPrefix(mapping.from, w.candidate) {
+					undecided = true
+				}
+				if !strings.HasPrefix(w.candidate, mapping.from) {
+					continue
+				}
+				right := w.candidate[len(mapping.from):]
+				if right == "" {
+					if !final {
+						continue
+					}
+				} else if r, _ := utf8.DecodeRuneInString(right); codexIdentityRune(r) {
+					continue
+				}
+				if best < 0 || len(mapping.from) > len(w.mappings[best].from) {
+					best = i
+				}
+			}
+		}
+		if undecided {
+			return
+		}
+		consumed, decodedBytes := 1, len(string(w.atoms[0].r))
+		if best >= 0 {
+			mapping := w.mappings[best]
+			consumed, decodedBytes = 0, 0
+			for decodedBytes < len(mapping.from) {
+				decodedBytes += len(string(w.atoms[consumed].r))
+				consumed++
+			}
+			if mapping.from == mapping.to {
+				for _, atom := range w.atoms[:consumed] {
+					*out = append(*out, atom.raw...)
+				}
+			} else if w.jsonMode {
+				*out = append(*out, mapping.jsonTo...)
+			} else {
+				*out = append(*out, mapping.to...)
+			}
 		} else {
-			*out = append(*out, w.to...)
+			*out = append(*out, w.atoms[0].raw...)
 		}
-	} else {
-		for _, atom := range w.atoms {
-			*out = append(*out, atom.raw...)
-		}
+		w.leftID = codexIdentityRune(w.atoms[consumed-1].r)
+		w.atoms = w.atoms[consumed:]
+		w.candidate = w.candidate[decodedBytes:]
 	}
-	w.atoms = w.atoms[:0]
-	w.matched = 0
 }
 
 func (w *CodexIdentityResponseRewriter) atom(out *[]byte, atom codexIdentityAtom) {
-	if w.matched == len(w.from) && w.matched > 0 {
-		w.flush(out, !codexIdentityRune(atom.r))
-	}
-	if w.matched > 0 {
-		next := string(atom.r)
-		if strings.HasPrefix(w.from[w.matched:], next) {
-			atom.raw = bytes.Clone(atom.raw)
-			w.atoms = append(w.atoms, atom)
-			w.matched += len(next)
+	next := string(atom.r)
+	if len(w.atoms) == 0 {
+		starts := false
+		if !w.leftID {
+			for _, mapping := range w.mappings {
+				if strings.HasPrefix(mapping.from, next) {
+					starts = true
+					break
+				}
+			}
+		}
+		if !starts {
+			*out = append(*out, atom.raw...)
 			w.leftID = codexIdentityRune(atom.r)
 			return
 		}
-		// Reconsider suffixes after a failed prefix, without keeping a growing
-		// token. This also handles operator keys containing punctuation.
-		saved := append([]codexIdentityAtom(nil), w.atoms...)
-		w.atoms = w.atoms[:0]
-		w.matched = 0
-		*out = append(*out, saved[0].raw...)
-		w.leftID = codexIdentityRune(saved[0].r)
-		for _, old := range saved[1:] {
-			w.atom(out, old)
-		}
-		w.atom(out, atom)
-		return
 	}
-	if !w.leftID && w.from != "" && strings.HasPrefix(w.from, string(atom.r)) {
-		atom.raw = bytes.Clone(atom.raw)
-		w.atoms = append(w.atoms, atom)
-		w.matched = len(string(atom.r))
-	} else {
-		*out = append(*out, atom.raw...)
-	}
-	w.leftID = codexIdentityRune(atom.r)
+	atom.raw = bytes.Clone(atom.raw)
+	w.atoms = append(w.atoms, atom)
+	w.candidate += next
+	w.drain(out, false)
 }
 
 func (w *CodexIdentityResponseRewriter) finishToken(out *[]byte) {
-	w.flush(out, w.matched == len(w.from) && w.matched > 0)
+	w.drain(out, true)
 	w.leftID = false
 }
 

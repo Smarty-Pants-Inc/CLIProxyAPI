@@ -386,17 +386,18 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
-	data = applyCodexIdentityConfuseResponsePayload(data, identityState)
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	// One pass over the raw upstream bytes for each view, as the stream path does: sequential
+	// confuse-then-expose passes can rematch a generated value and leak it (smarty-dev#7705).
+	hiddenData, clientData := codexImageIdentityViews(data, identityState)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, hiddenData)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErrWithCooling(httpResp.StatusCode, applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling())
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), hiddenData))
+		err = newCodexStatusErrWithCooling(httpResp.StatusCode, clientData, e.modelLevelCooling())
 		return resp, err
 	}
 
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(hiddenData))
 	reporter.EnsurePublished(ctx)
-	clientData := applyCodexIdentityExposeResponsePayload(data, identityState)
 	return cliproxyexecutor.Response{Payload: clientData, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -458,10 +459,10 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
-		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErrWithCooling(httpResp.StatusCode, applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling())
+		hiddenData, clientData := codexImageIdentityViews(data, identityState)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, hiddenData)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), hiddenData))
+		err = newCodexStatusErrWithCooling(httpResp.StatusCode, clientData, e.modelLevelCooling())
 		return nil, err
 	}
 
@@ -477,54 +478,27 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			reporter.EnsurePublished(ctx)
 		}()
 
-		var needles [][]byte
-		var confusers, exposers []*helps.CodexIdentityResponseRewriter
-		maxLen := 0
+		hide, expose, needles, maxLen := codexImageIdentityReplacers(identityState)
 		contentType := strings.ToLower(httpResp.Header.Get("Content-Type"))
 		isSSE := strings.Contains(contentType, "text/event-stream")
 		isJSON := strings.Contains(contentType, "json")
-		addReplacement := func(from, to string, expose bool) {
-			from, to = strings.TrimSpace(from), strings.TrimSpace(to)
-			if from == "" || to == "" || from == to {
-				return
-			}
-			needles = append(needles, []byte(from), []byte(to))
-			maxLen = max(maxLen, len(from), len(to))
-			rewriter := helps.NewCodexIdentityResponseRewriter(from, to, isSSE, isJSON)
-			if expose {
-				exposers = append(exposers, rewriter)
-			} else {
-				confusers = append(confusers, rewriter)
-			}
-		}
-		addReplacement(identityState.originalPromptCacheKey, identityState.promptCacheKey, false)
-		for _, turnID := range identityState.turnIDs {
-			addReplacement(turnID.original, turnID.confused, false)
-		}
-		addReplacement(identityState.promptCacheKey, identityState.originalPromptCacheKey, true)
-		if identityState.enabled {
-			addReplacement(identityState.ruleKey, identityState.originalPromptCacheKey, true)
-		}
-		for _, turnID := range identityState.turnIDs {
-			addReplacement(turnID.confused, turnID.original, true)
-		}
+		hider := helps.NewCodexIdentityResponseRewriterWithMappings(hide, isSSE, isJSON)
+		exposer := helps.NewCodexIdentityResponseRewriterWithMappings(expose, isSSE, isJSON)
 
 		var usageLines helps.StreamUsageLines
 		defer usageLines.Close(streamUsage.ObserveOpenAIStream)
 		emitChunk := func(chunk []byte, final bool) bool {
-			// Lexical state retains the left boundary across carry cuts and holds
-			// a complete match until its decoded right boundary is known. A cut
-			// is not an end-of-string/end-of-token boundary.
-			for _, rewriter := range confusers {
-				chunk = rewriter.Rewrite(chunk, final)
+			hiddenChunk, clientChunk := chunk, chunk
+			if maxLen > 0 {
+				// Both views consume the same raw bytes exactly once. A carry cut
+				// is not a token boundary: each view retains decoded lexical state
+				// and waits for the right boundary, including escaped JSON.
+				hiddenChunk = hider.Rewrite(chunk, final)
+				clientChunk = exposer.Rewrite(chunk, final)
 			}
-			helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, hiddenChunk)
 			// Usage lines are reassembled across reads, bounded per line.
-			usageLines.Observe(chunk, streamUsage.ObserveOpenAIStream)
-			clientChunk := chunk
-			for _, rewriter := range exposers {
-				clientChunk = rewriter.Rewrite(clientChunk, final)
-			}
+			usageLines.Observe(hiddenChunk, streamUsage.ObserveOpenAIStream)
 			if len(clientChunk) == 0 {
 				return true
 			}
@@ -1220,40 +1194,66 @@ func codexMimeTypeFromOutputFormat(outputFormat string) string {
 	}
 }
 
-// codexImageCarryCut returns how much of pending can be emitted now: everything except a tail that may hold the
-// start of an identifier continuing in the next read. The cut only moves back to the start of a match that
-// actually crosses it, using leftmost non-overlapping matches as bytes.ReplaceAll does, and never below a floor,
-// so the carry stays bounded even for self-overlapping identifiers ("aa" in "aaaa…") (CLIProxyAPI#115 r2 P2).
-// This is only a raw-byte cut, not a token boundary. The streaming identity rewriters separately retain
-// decoded left context and a bounded candidate until its right boundary is known, including escaped JSON.
+// codexImageCarryCut preserves the executor test seam; the matcher retains only
+// an unresolved suffix, bounded by maxLen-1, and never splits a consumed match.
+// This is a raw-byte cut, not a token boundary. The identity rewriters separately
+// retain decoded lexical context and a bounded candidate, including JSON escapes.
 func codexImageCarryCut(pending []byte, needles [][]byte, maxLen int) int {
 	if maxLen == 0 {
 		return len(pending)
 	}
-	cut := max(0, len(pending)-(maxLen-1))
-	floor := max(0, len(pending)-(maxLen-1)-len(needles)*maxLen)
-	var matches [][2]int
+	return helps.CodexImageCarryCut(pending, needles)
+}
+
+// codexImageIdentityReplacers builds the two single-pass views of the direct image routes:
+// hide (what logs and usage see) and expose (what the client gets). The boundary-aware
+// rewriters consume these tables leftmost-longest over raw upstream identifiers,
+// without rematching generated values (smarty-dev#7705, smarty-dev#7599).
+func codexImageIdentityReplacers(identityState codexIdentityConfuseState) (hide, expose [][2]string, needles [][]byte, maxLen int) {
+	mappings := make(map[string][2]string)
+	addToken := func(original, hidden, client string) {
+		original, hidden, client = strings.TrimSpace(original), strings.TrimSpace(hidden), strings.TrimSpace(client)
+		if original == "" || hidden == "" || client == "" {
+			return
+		}
+		if _, exists := mappings[original]; exists {
+			return
+		}
+		mappings[original] = [2]string{hidden, client}
+		needles = append(needles, []byte(original))
+		maxLen = max(maxLen, len(original))
+	}
+	addIdentity := func(original, confused string) {
+		original, confused = strings.TrimSpace(original), strings.TrimSpace(confused)
+		if original == "" || confused == "" || original == confused {
+			return
+		}
+		addToken(original, confused, original)
+		addToken(confused, confused, original)
+	}
+	// Exact source collisions retain the first registration: cache, rule, turns.
+	addIdentity(identityState.originalPromptCacheKey, identityState.promptCacheKey)
+	if identityState.enabled {
+		addToken(identityState.ruleKey, identityState.ruleKey, identityState.originalPromptCacheKey)
+	}
+	for _, turnID := range identityState.turnIDs {
+		addIdentity(turnID.original, turnID.confused)
+	}
+	sort.SliceStable(needles, func(i, j int) bool { return len(needles[i]) > len(needles[j]) })
 	for _, needle := range needles {
-		if len(needle) == 0 {
-			continue
-		}
-		for i := max(0, floor-len(needle)); i < len(pending); {
-			j := bytes.Index(pending[i:], needle)
-			if j < 0 {
-				break
-			}
-			start := i + j
-			matches = append(matches, [2]int{start, start + len(needle)})
-			i = start + len(needle)
-		}
+		token := string(needle)
+		mapping := mappings[token]
+		hide = append(hide, [2]string{token, mapping[0]})
+		expose = append(expose, [2]string{token, mapping[1]})
 	}
-	for moved := true; moved; {
-		moved = false
-		for _, m := range matches {
-			if m[0] < cut && m[1] > cut && m[0] >= floor {
-				cut, moved = m[0], true
-			}
-		}
+	return hide, expose, needles, maxLen
+}
+
+// codexImageIdentityViews returns the hidden (log/usage) and client views of a whole response body.
+func codexImageIdentityViews(data []byte, identityState codexIdentityConfuseState) (hidden, client []byte) {
+	hide, expose, _, maxLen := codexImageIdentityReplacers(identityState)
+	if maxLen == 0 {
+		return data, data
 	}
-	return cut
+	return helps.ReplaceCodexIdentityResponseWithMappings(data, hide), helps.ReplaceCodexIdentityResponseWithMappings(data, expose)
 }
