@@ -71,16 +71,21 @@ func TestWriteAuthFileAtomicMissingDirLeavesNothing(t *testing.T) {
 }
 
 func TestWriteAuthFileAtomicRemovesTempOnRenameError(t *testing.T) {
-	dir := t.TempDir()
+	// Keep the TempDir parent unchanged. On Windows the fixture restores
+	// inherited child access through a fresh owner-authorized recovery handle.
+	dir := authFileRenameErrorDir(t)
 	// Renaming a file over a non-empty directory fails, which exercises cleanup.
 	path := filepath.Join(dir, "auth.json")
 	if errMkdir := os.MkdirAll(filepath.Join(path, "child"), 0o700); errMkdir != nil {
 		t.Fatalf("mkdir: %v", errMkdir)
 	}
-	if errWrite := WriteAuthFileAtomic(path, []byte(`{}`)); errWrite == nil {
-		t.Fatal("expected rename error")
+	if errWrite := WriteAuthFileAtomic(path, []byte(`{}`)); errWrite == nil || !strings.Contains(errWrite.Error(), "rename temp auth file") {
+		t.Fatalf("expected rename error, got %v", errWrite)
 	}
-	entries, _ := os.ReadDir(dir)
+	entries, errReadDir := os.ReadDir(dir)
+	if errReadDir != nil {
+		t.Fatalf("read auth directory: %v", errReadDir)
+	}
 	if len(entries) != 1 || entries[0].Name() != "auth.json" {
 		names := make([]string, 0, len(entries))
 		for _, entry := range entries {
@@ -138,5 +143,50 @@ func TestWriteAuthFileAtomicRewriteTightensLegacyMode(t *testing.T) {
 func TestWriteAuthFileAtomicRejectsEmptyPath(t *testing.T) {
 	if errWrite := WriteAuthFileAtomic("", []byte(`{}`)); errWrite == nil {
 		t.Fatal("expected error for empty path")
+	}
+}
+
+func TestPrivateAuthTempPOSIXModeBeforeWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows descriptors are covered by TestWindowsAuthPrivateStageBeforeTokenBytes")
+	}
+	stage, err := createPrivateAuthTemp(t.TempDir())
+	if err != nil {
+		t.Fatalf("create stage: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stage.Close(); err != nil {
+			t.Errorf("close stage: %v", err)
+		}
+		if err := os.Remove(stage.Name()); err != nil {
+			t.Errorf("remove stage: %v", err)
+		}
+	})
+	info, err := stage.Stat()
+	if err != nil {
+		t.Fatalf("stat stage: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 || info.Size() != 0 {
+		t.Fatalf("stage mode = %o, size = %d; want 0600 and empty", info.Mode().Perm(), info.Size())
+	}
+}
+
+func TestRestrictAuthDirPOSIXNoOp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory restrictions are covered by TestWindowsAuthRestrictDirectory")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestrictAuthDir(dir); err != nil {
+		t.Fatalf("no-op restriction: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("directory mode should not change: %v, %v", info, err)
+	}
+	if err := RestrictAuthDir(filepath.Join(dir, "missing")); err != nil {
+		t.Fatalf("no-op restriction on missing path: %v", err)
 	}
 }
