@@ -44,15 +44,20 @@ func (e *codexDuplexAffinityError) StatusCode() int {
 	return http.StatusConflict
 }
 
-func validateCodexDuplexCompaction(opts cliproxyexecutor.Options, authID string, payload []byte) error {
+// validateCodexDuplexCompaction first removes compaction blocks this socket's
+// account did not sign (smarty-dev#8742), then validates what remains.
+func validateCodexDuplexCompaction(opts cliproxyexecutor.Options, authID string, payload []byte) ([]byte, error) {
+	if sanitize, _ := opts.Metadata[cliproxyexecutor.CompactionAffinitySanitizerMetadataKey].(func(string, []byte) []byte); sanitize != nil {
+		payload = sanitize(authID, payload)
+	}
 	validate, _ := opts.Metadata[cliproxyexecutor.CompactionAffinityValidatorMetadataKey].(func(string, []byte) error)
 	if validate == nil {
-		return nil
+		return payload, nil
 	}
 	if err := validate(authID, payload); err != nil {
-		return &codexDuplexAffinityError{cause: err}
+		return payload, &codexDuplexAffinityError{cause: err}
 	}
-	return nil
+	return payload, nil
 }
 
 // streamCodexDuplex owns the already authenticated socket until downstream
@@ -253,7 +258,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			payload = frameCodexWebsocketRequestBody(prepared.upstreamBody)
 			// Preparation can merge signed input or apply payload rules. Validate
 			// the final submission on the actual socket account before any write.
-			if errAffinity := validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
+			var errAffinity error
+			if payload, errAffinity = validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
 				fail(errAffinity)
 				return false
 			}
@@ -338,7 +344,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					steerReq.Payload = payload
 					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
 					payload, _ = sjson.SetBytes(payload, "type", "response.steer")
-					if errAffinity := validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
+					var errAffinity error
+					if payload, errAffinity = validateCodexDuplexCompaction(opts, auth.ID, payload); errAffinity != nil {
 						fail(errAffinity)
 						return
 					}

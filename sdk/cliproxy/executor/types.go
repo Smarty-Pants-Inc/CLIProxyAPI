@@ -33,6 +33,12 @@ const ServiceTierMetadataKey = "service_tier"
 // Absence preserves requests whose origin has no local compaction affinity.
 const CompactionAffinityValidatorMetadataKey = "compaction_affinity_validator"
 
+// CompactionAffinitySanitizerMetadataKey carries an optional
+// func(authID string, payload []byte) []byte that removes compaction blocks the
+// socket account did not sign (or whose signer is unknown) before validation
+// (smarty-dev#8742: degrade instead of refusing the frame).
+const CompactionAffinitySanitizerMetadataKey = "compaction_affinity_sanitizer"
+
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"
