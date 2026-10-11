@@ -354,7 +354,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if h.AuthManager == nil {
 		errOrigin = fmt.Errorf("auth manager is unavailable")
 	} else {
-		opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+		req, opts, errOrigin = h.AuthManager.PrepareCompactionPayload(ctx, req, opts)
 	}
 	if errOrigin != nil {
 		errMsg := executionErrorMessage(errOrigin)
@@ -376,7 +376,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	// Keep the same origin and signer pin across HTTP bootstrap reinvocations,
 	// and validate any interceptor replacement before hierarchy extraction.
-	opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = h.AuthManager.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		errMsg := executionErrorMessage(errOrigin)
 		lifecycle.completeError(ctx, errMsg)

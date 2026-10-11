@@ -1009,6 +1009,9 @@ type SessionAffinityConfig struct {
 	SubagentAffinity *bool
 	// StatePath persists affinity bindings; empty retains in-memory SDK behavior.
 	StatePath string
+	// LegacyStatePath is read once, read-only, when StatePath does not exist yet
+	// (smarty-dev#8742: the state file moved out of auth-dir).
+	LegacyStatePath string
 	// Cache reuses one binding-store owner across selector/config rebuilds.
 	// StatePath is loaded only when Cache is nil.
 	Cache *SessionCache
@@ -1043,7 +1046,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cache.persistenceErr = cfg.InitializationError
 		cache.mu.Unlock()
 		if cfg.InitializationError == nil && cfg.StatePath != "" {
-			if errLoad := cache.EnablePersistence(cfg.StatePath); errLoad != nil {
+			if errLoad := cache.EnablePersistenceWithLegacy(cfg.StatePath, cfg.LegacyStatePath); errLoad != nil {
 				log.WithError(errLoad).Error("failed to load session affinity state; routing will fail closed")
 			}
 		}

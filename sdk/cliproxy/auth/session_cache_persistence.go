@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type sessionCacheFile struct {
@@ -31,6 +34,21 @@ type sessionCacheRecord struct {
 // Errors are sticky so a selector can fail closed, including after a failed
 // initialization.
 func (c *SessionCache) EnablePersistence(path string) error {
+	return c.EnablePersistenceWithLegacy(path, "")
+}
+
+// maxLegacySessionCacheBytes bounds the one-time read of a legacy state file.
+const maxLegacySessionCacheBytes = 64 << 20
+
+// EnablePersistenceWithLegacy is EnablePersistence plus a one-time migration
+// (smarty-dev#8742): when path does not exist yet, a valid legacy state file
+// (the pre-34efa7bb location inside auth-dir) is read once, read-only, and its
+// live groups are written to path. The legacy file is never written, moved or
+// removed. A missing, unreadable or invalid legacy file is ignored with a
+// warning: it must not make routing fail closed.
+// An existing new file always wins and the legacy file is then not read, so a
+// stale legacy binding never overrides a newer one.
+func (c *SessionCache) EnablePersistenceWithLegacy(path, legacyPath string) error {
 	if c == nil {
 		return errors.New("session cache persistence: nil cache")
 	}
@@ -61,10 +79,25 @@ func (c *SessionCache) EnablePersistence(path string) error {
 	if errRead != nil && !errors.Is(errRead, os.ErrNotExist) {
 		return fail("session cache persistence: read failed")
 	}
+	migrated := false
+	if errors.Is(errRead, os.ErrNotExist) && strings.TrimSpace(legacyPath) != "" {
+		if legacy, ok := readLegacySessionCacheFile(legacyPath); ok {
+			data, errRead, migrated = legacy, nil, true
+		}
+	}
 	var state sessionCacheFile
 	if errRead == nil {
 		if errDecode := json.Unmarshal(data, &state); errDecode != nil || state.Version != 1 {
-			return fail("session cache persistence: invalid state")
+			if migrated {
+				log.Warn("session affinity: legacy state file is not valid; not migrated")
+				state, migrated = sessionCacheFile{}, false
+			} else {
+				return fail("session cache persistence: invalid state")
+			}
+		}
+		if migrated && !legacyGroupsValid(state.Groups) {
+			log.Warn("session affinity: legacy state file is not valid; not migrated")
+			state, migrated = sessionCacheFile{}, false
 		}
 		// Validate the whole file before modifying the cache, including stale groups.
 		seen := make(map[string]bool)
@@ -108,7 +141,58 @@ func (c *SessionCache) EnablePersistence(path string) error {
 	c.persistenceDirty = false
 	c.persistencePath = path
 	c.persistenceRoot = root
+	if migrated {
+		// Write the migrated groups to the new path now, through the pinned root.
+		c.persistenceDirty = true
+		c.persistLocked()
+		if c.persistenceErr != nil {
+			return c.persistenceErr
+		}
+		log.Warnf("session affinity: migrated %d binding group(s) from the legacy state file", len(state.Groups))
+	}
 	return nil
+}
+
+// readLegacySessionCacheFile reads a regular, non-symlink legacy file once.
+func readLegacySessionCacheFile(path string) ([]byte, bool) {
+	info, errStat := os.Lstat(path)
+	if errStat != nil {
+		return nil, false
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxLegacySessionCacheBytes {
+		log.Warn("session affinity: legacy state file is not a regular file within the size limit; not migrated")
+		return nil, false
+	}
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		log.Warn("session affinity: legacy state file is unreadable; not migrated")
+		return nil, false
+	}
+	defer func() { _ = file.Close() }()
+	if opened, errFstat := file.Stat(); errFstat != nil || !os.SameFile(info, opened) {
+		return nil, false
+	}
+	data, errRead := io.ReadAll(io.LimitReader(file, maxLegacySessionCacheBytes+1))
+	if errRead != nil || len(data) > maxLegacySessionCacheBytes {
+		return nil, false
+	}
+	return data, true
+}
+
+func legacyGroupsValid(groups []sessionCacheRecord) bool {
+	seen := make(map[string]bool)
+	for _, record := range groups {
+		if record.AuthID == "" || record.ExpiresAt.IsZero() || len(record.Aliases) == 0 {
+			return false
+		}
+		for _, alias := range record.Aliases {
+			if alias == "" || seen[alias] {
+				return false
+			}
+			seen[alias] = true
+		}
+	}
+	return true
 }
 
 // PersistenceError returns the first load or save error. A non-nil error means

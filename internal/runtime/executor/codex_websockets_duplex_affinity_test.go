@@ -194,7 +194,7 @@ func TestCodexDuplexSteerAffinityValidatorPreservesLocalError(t *testing.T) {
 			return cause
 		},
 	}}
-	err := validateCodexDuplexCompaction(opts, "A", payload)
+	_, err := validateCodexDuplexCompaction(opts, "A", payload)
 	var local *codexDuplexAffinityError
 	var typedCause *auth.Error
 	if !errors.As(err, &local) || !errors.As(err, &typedCause) || typedCause != cause || !errors.Is(err, cause) || local.StatusCode() != http.StatusConflict || !local.IsRequestScoped() {
@@ -206,7 +206,7 @@ func TestCodexDuplexSteerAffinityValidatorPreservesLocalError(t *testing.T) {
 }
 
 func TestCodexDuplexAffinityAbsentCallback(t *testing.T) {
-	if err := validateCodexDuplexCompaction(core.Options{}, "A", []byte(`{"input":[{"type":"compaction","encrypted_content":"unknown"}]}`)); err != nil {
+	if _, err := validateCodexDuplexCompaction(core.Options{}, "A", []byte(`{"input":[{"type":"compaction","encrypted_content":"unknown"}]}`)); err != nil {
 		t.Fatalf("no-affinity origin changed behavior: %v", err)
 	}
 }

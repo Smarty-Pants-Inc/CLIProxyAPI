@@ -9,6 +9,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -33,6 +34,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	statePath                string
+	legacyStatePath          string
 	statePathUnavailable     bool
 	sessionAffinitySubagents bool
 }
@@ -62,6 +64,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 			state.statePathUnavailable = true
 		} else {
 			state.statePath = filepath.Join(stateDir, "session-affinity.state")
+			// smarty-dev#8742: builds before 34efa7bb kept the file in auth-dir.
+			// It is read once (never written) when the new file is missing.
+			if authDir, errAuth := util.ResolveAuthDir(cfg.AuthDir); errAuth == nil {
+				if legacy := filepath.Join(authDir, "session-affinity.state"); legacy != state.statePath {
+					state.legacyStatePath = legacy
+				}
+			}
 		}
 	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -76,6 +85,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
 	return state
+}
+
+// sameRouting ignores legacyStatePath: it is read only when a state file is
+// first created, so an auth-dir change alone must not rebuild the selector.
+func (s routingRuntimeState) sameRouting(other routingRuntimeState) bool {
+	s.legacyStatePath, other.legacyStatePath = "", ""
+	return s == other
 }
 
 func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCache) coreauth.Selector {
@@ -102,6 +118,7 @@ func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCac
 			Fallback:            selector,
 			TTL:                 state.sessionAffinityTTL,
 			StatePath:           state.statePath,
+			LegacyStatePath:     state.legacyStatePath,
 			InitializationError: initializationError,
 			SubagentAffinity:    &subagents,
 			Cache:               sharedCache,
@@ -280,7 +297,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		}
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
-	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+	if s.appliedRoutingState == nil || !s.appliedRoutingState.sameRouting(routingState) {
 		var sharedCache *coreauth.SessionCache
 		if routingState.statePath != "" {
 			sharedCache = s.affinityCaches[routingState.statePath]
