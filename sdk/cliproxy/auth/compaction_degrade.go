@@ -193,6 +193,106 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 	return out, dropped, reason, target
 }
 
+// rawStringMember returns the raw JSON string literal (quotes included) of
+// object member KEY, or "" when it is absent or not a string. It only scans:
+// it never unescapes or copies, so a large or escape-heavy value costs no
+// allocation. Malformed input gives "".
+func rawStringMember(object, key string) string {
+	i := skipJSONSpace(object, 0)
+	if i >= len(object) || object[i] != '{' {
+		return ""
+	}
+	i++
+	for {
+		i = skipJSONSpace(object, i)
+		if i >= len(object) || object[i] != '"' {
+			return ""
+		}
+		nameEnd := skipJSONString(object, i)
+		if nameEnd < 0 {
+			return ""
+		}
+		name := object[i:nameEnd]
+		i = skipJSONSpace(object, nameEnd)
+		if i >= len(object) || object[i] != ':' {
+			return ""
+		}
+		start := skipJSONSpace(object, i+1)
+		end := skipJSONValue(object, start)
+		if end < 0 {
+			return ""
+		}
+		if name == `"`+key+`"` {
+			if object[start] == '"' {
+				return object[start:end]
+			}
+			return ""
+		}
+		i = skipJSONSpace(object, end)
+		if i >= len(object) || object[i] != ',' {
+			return ""
+		}
+		i++
+	}
+}
+
+func skipJSONSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// skipJSONString returns the index just past the string starting at s[i] ('"'), or -1.
+func skipJSONString(s string, i int) int {
+	for i++; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '"':
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// skipJSONValue returns the index just past the value starting at s[i], or -1.
+func skipJSONValue(s string, i int) int {
+	if i >= len(s) {
+		return -1
+	}
+	switch s[i] {
+	case '"':
+		return skipJSONString(s, i)
+	case '{', '[':
+		depth := 0
+		for ; i < len(s); i++ {
+			switch s[i] {
+			case '"':
+				if i = skipJSONString(s, i); i < 0 {
+					return -1
+				}
+				i--
+			case '{', '[':
+				depth++
+			case '}', ']':
+				if depth--; depth == 0 {
+					return i + 1
+				}
+			}
+		}
+		return -1
+	default:
+		for ; i < len(s); i++ {
+			switch s[i] {
+			case ',', '}', ']', ' ', '\t', '\n', '\r':
+				return i
+			}
+		}
+		return i
+	}
+}
+
 // compactionItems lists the compaction items in input[], then in
 // messages[].content[]; each Result carries its byte offset (Index) in the
 // payload, which is how rewrite decisions are matched to blocks. The
@@ -268,17 +368,14 @@ func rewriteCompactionItems(payload []byte, root gjson.Result, drop func(gjson.R
 				return true
 			}
 			changed = true
-			// Budget first (smarty-dev#8742 security r3): a summary can be no larger
-			// than its block, so a block that does not fit the remaining output
-			// budget ends the rewrite (413) before its content is even looked up.
-			// A block that fits has its raw JSON string literal copied as-is through
-			// the capped writer: no marshal and no concatenation.
-			if summaries && out.Len()+len(item.Raw) > limit {
-				full = true
-				return false
-			}
-			if content := item.Get("content"); summaries && content.Type == gjson.String && len(content.Raw) > len(`""`) {
-				write(`{"type":"text","text":`, content.Raw, `}`)
+			// Only the summary that is actually emitted is budgeted (#135 r5): its
+			// raw JSON string literal is located without unescaping and copied
+			// as-is through the capped writer, so a large encrypted block with a
+			// small or absent summary still degrades. A summary that does not fit
+			// the remaining budget ends the rewrite (413) inside put(); no
+			// marshal, unescape or concatenation happens for it (security r3).
+			if summary := rawStringMember(item.Raw, "content"); summaries && len(summary) > len(`""`) {
+				write(`{"type":"text","text":`, summary, `}`)
 			}
 			return true
 		})

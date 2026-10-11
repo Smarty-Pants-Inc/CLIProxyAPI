@@ -365,6 +365,55 @@ func TestCompactionDegradeMatchesBlocksByOffsetWithBothFields(t *testing.T) {
 	}
 }
 
+// #135 r5: a 16-64 MiB request whose dropped messages[] block carries about
+// 30 MB of encrypted data with a small summary, or none. Only the emitted
+// summary is budgeted, so the request degrades (served) instead of 413, with
+// allocation bounded by the 16 MiB output cap.
+func TestCompactionLargeEncryptedBlockWithSmallSummaryDegrades(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	encrypted := strings.Repeat("E", 30<<20)
+	for name, tc := range map[string]struct{ summary, want string }{
+		"small-summary":  {`,"content":"short summary of earlier turns"`, `{"type":"text","text":"short summary of earlier turns"}`},
+		"absent-summary": {``, compactionOmittedBlock},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"compaction","encrypted_content":"` + encrypted + `"` + tc.summary + `}]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+			req, opts := degradeTestRequest(cliproxyexecutor.Options{OriginalRequest: body, SourceFormat: sdktranslator.FormatOpenAIResponse})
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			req, _, err := manager.PrepareCompactionPayload(context.Background(), req, opts)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("%d-byte body refused: %v", len(body), err)
+			}
+			sent := string(req.Payload)
+			if strings.Contains(sent, `"compaction"`) || !strings.Contains(sent, tc.want) || !strings.Contains(sent, "continue") {
+				t.Fatalf("payload %.300s", sent)
+			}
+			if allocated, limit := after.TotalAlloc-before.TotalAlloc, uint64(maxCompactionJSONBytes)+4<<20; allocated > limit {
+				t.Fatalf("degrade allocated %d bytes for a %d-byte body (limit %d)", allocated, len(body), limit)
+			}
+		})
+	}
+}
+
+func TestCompactionRawStringMember(t *testing.T) {
+	for _, tc := range []struct{ object, want string }{
+		{`{"type":"compaction","content":"a\"b"}`, `"a\"b"`},
+		{` { "x" : [1, {"content":"nested"}, "]"] , "content" : "top" } `, `"top"`},
+		{`{"content":{"text":"object"}}`, ``},
+		{`{"encrypted_content":"x"}`, ``},
+		{`{"content":"unterminated`, ``},
+	} {
+		if got := rawStringMember(tc.object, "content"); got != tc.want {
+			t.Fatalf("rawStringMember(%s) = %q, want %q", tc.object, got, tc.want)
+		}
+	}
+}
+
 func TestCompactionDuplexSanitizerKeepsOnlyTheSocketAccountsBlocks(t *testing.T) {
 	origin := NewSessionAffinitySelector(nil)
 	defer origin.Stop()
