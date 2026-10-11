@@ -4,7 +4,9 @@
 The BASE build compacts one Codex session (POST /v1/responses/compact) and one Claude session (POST /v1/messages with
 a compaction request) against a local stub upstream that returns canned compaction blocks. BASE is stopped, then the
 HEAD build is cold-started twice: (i) on a copy of BASE's state dir, (ii) on an empty state dir. Each start replays
-both compacted sessions. All four replays must answer 200; a 409 or a compaction_* 4xx fails. Each replay's
+both compacted sessions. All four replays must answer 200 with a well-formed success body for their route that
+carries the stub's reply (a fresh nonce per replay); a 409, a compaction_* 4xx, or an empty, malformed or error body
+fails. Each replay's
 upstream request (what the stub received) must also carry the intended content:
 - base-state (HEAD knows the signer): the compaction block itself, unchanged, still reaches the upstream;
 - empty-state (signer unknown): no compaction block reaches the upstream, the Claude block's plain summary is
@@ -30,9 +32,11 @@ def free_port():
 
 
 class Stub(http.server.BaseHTTPRequestHandler):
-    """Canned upstream: Codex /responses/compact and /responses, Anthropic /messages."""
+    """Canned upstream: Codex /responses/compact and /responses, Anthropic /messages. REPLY is the text it answers
+    with, a fresh nonce per replay, so the gateway's response body can be checked end to end."""
     protocol_version = 'HTTP/1.1'
     seen = []
+    reply = 'replayed'
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0) or 0))
@@ -44,7 +48,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
         if '/messages' in self.path:
             req = json.loads(body or b'{}')
             content = ([{'type': 'compaction', 'content': CLAUDE_BLOCK}] if req.get('compaction')
-                       else [{'type': 'text', 'text': 'replayed'}])
+                       else [{'type': 'text', 'text': Stub.reply}])
             return self.json({'id': 'msg_stub', 'type': 'message', 'role': 'assistant', 'model': req.get('model', 'm'),
                               'content': content, 'stop_reason': 'end_turn', 'stop_sequence': None,
                               'usage': {'input_tokens': 1, 'output_tokens': 1}})
@@ -52,7 +56,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
             sse = ('event: response.completed\ndata: ' + json.dumps({'type': 'response.completed', 'response': {
                 'id': 'resp_2', 'object': 'response', 'status': 'completed',
                 'model': json.loads(body or b'{}').get('model', 'gpt-6-luna'), 'output': [
-                    {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'replayed'}]}],
+                    {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': Stub.reply}]}],
                 'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}}) + '\n\n').encode()
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -105,6 +109,9 @@ claude-api-key:
     return path
 
 
+LIVE = []  # started gateways; main() reaps every one on any exit
+
+
 class Gateway:
     def __init__(self, binary, root, stub_port, name):
         self.root, self.port, self.name = root, free_port(), name
@@ -116,9 +123,11 @@ class Gateway:
         self.log = open(root / f'{name}.log', 'wb')
         self.proc = subprocess.Popen([binary, '-config', str(cfg)], cwd=root, env=env, stdout=self.log,
                                      stderr=subprocess.STDOUT, start_new_session=True)
+        LIVE.append(self)
         deadline = time.time() + 60
         while time.time() < deadline:
             if self.proc.poll() is not None:
+                self.stop()
                 raise SystemExit(f'{name}: exited {self.proc.returncode} at start; see {root}/{name}.log')
             try:
                 status, _ = self.call('GET', '/v1/models')
@@ -127,6 +136,7 @@ class Gateway:
             except OSError:
                 pass
             time.sleep(0.25)
+        self.stop()  # alive but not ready: never leave its process group running
         raise SystemExit(f'{name}: not ready in 60 s')
 
     def call(self, method, path, doc=None, headers=None):
@@ -140,13 +150,26 @@ class Gateway:
             return error.code, error.read().decode(errors='replace')
 
     def stop(self):
-        if self.proc.poll() is None:
-            os.killpg(self.proc.pid, signal.SIGTERM)
+        """SIGTERM this gateway's own process group, SIGKILL it after 5 s, and reap the leader. Idempotent."""
+        if self not in LIVE:
+            return
+        LIVE.remove(self)
+        for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, None)):
             try:
-                self.proc.wait(20)
+                os.killpg(self.proc.pid, sig)
+            except ProcessLookupError:
+                break  # the whole group is gone
+            try:
+                self.proc.wait(wait)
+                if sig == signal.SIGTERM:
+                    os.killpg(self.proc.pid, signal.SIGKILL)  # any child left in the group
             except subprocess.TimeoutExpired:
-                os.killpg(self.proc.pid, signal.SIGKILL)
-                self.proc.wait()
+                continue
+            except ProcessLookupError:
+                pass
+            break
+        if self.proc.poll() is None:
+            self.proc.wait()
         self.log.close()
 
 
@@ -190,6 +213,27 @@ def items(doc):
     elif isinstance(doc, list):
         for value in doc:
             yield from items(value)
+
+
+def response_problem(name, body):
+    """None when BODY is a well-formed success for the route and carries the stub's nonce reply, else what is wrong."""
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return f'response body is not JSON: {body[:120]!r}'
+    if not isinstance(doc, dict) or 'error' in doc:
+        return f'response body is not a success: {body[:160]}'
+    if name == 'codex':
+        texts = [part.get('text') for item in doc.get('output') or [] if isinstance(item, dict)
+                 for part in item.get('content') or [] if isinstance(part, dict)]
+        if not isinstance(doc.get('output'), list) or Stub.reply not in texts:
+            return f'Codex response lacks an output text equal to the stub reply: {body[:160]}'
+        return None
+    content = doc.get('content')
+    if doc.get('type') != 'message' or not isinstance(content, list) or not content or \
+            not isinstance(content[0], dict) or content[0].get('text') != Stub.reply:
+        return f'Claude response is not a message whose content[0].text is the stub reply: {body[:160]}'
+    return None
 
 
 def upstream_problem(case, name):
@@ -244,21 +288,25 @@ def main():
             try:
                 for name, path, doc, headers in replays:
                     Stub.seen.clear()
+                    Stub.reply = f'replayed-{case}-{name}-{os.urandom(6).hex()}'
                     status, body = gateway.call('POST', path, doc, headers)
-                    problem = f'HTTP {status}  {body[:240]}' if status != 200 else upstream_problem(case, name)
-                    results.append(f'{case:12} {name:7} HTTP {status}' + (f'  FAIL: {problem}' if problem else '  upstream ok'))
+                    problem = (f'HTTP {status}  {body[:240]}' if status != 200
+                               else response_problem(name, body) or upstream_problem(case, name))
+                    results.append(f'{case:12} {name:7} HTTP {status}' + (f'  FAIL: {problem}' if problem else '  body and upstream ok'))
                     if problem:
                         failures.append(f'{case}/{name}')
             finally:
                 gateway.stop()
     finally:
+        for gateway in list(LIVE):  # any exit, including an exception or SystemExit
+            gateway.stop()
         stub.shutdown()
     print('\n'.join(results))
     if failures:
         print(f'FAIL: {len(failures)} of 4 replays failed: {", ".join(failures)} (logs in {work})')
         return 1
     shutil.rmtree(work, ignore_errors=True)
-    print('PASS: 4 of 4 replays answered 200 with the intended upstream content')
+    print('PASS: 4 of 4 replays answered 200 with a well-formed body carrying the stub reply and the intended upstream content')
     return 0
 
 
