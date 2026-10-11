@@ -12,11 +12,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/testwait"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
@@ -26,7 +26,7 @@ func waitForAsyncReload(t *testing.T, reloads <-chan *config.Config) *config.Con
 	select {
 	case cfg := <-reloads:
 		return cfg
-	case <-time.After(time.Second):
+	case <-testwait.Context(t).Done():
 		t.Fatal("timed out waiting for async config reload")
 		return nil
 	}
@@ -36,7 +36,7 @@ func waitForReloadDone(t *testing.T, done <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-testwait.Context(t).Done():
 		t.Fatal("timed out waiting for config reload hook to finish")
 	}
 }
@@ -618,9 +618,12 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 		close(done)
 	}()
 
+	// The reload hook stays blocked until releaseReload closes after this
+	// select, so a synchronous reload never closes done; the bound only
+	// reports that hang.
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-testwait.Context(t).Done():
 		t.Fatal("DeletePlugin blocked waiting for config reload")
 	}
 
