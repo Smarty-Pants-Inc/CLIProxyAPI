@@ -4,7 +4,11 @@
 The BASE build compacts one Codex session (POST /v1/responses/compact) and one Claude session (POST /v1/messages with
 a compaction request) against a local stub upstream that returns canned compaction blocks. BASE is stopped, then the
 HEAD build is cold-started twice: (i) on a copy of BASE's state dir, (ii) on an empty state dir. Each start replays
-both compacted sessions. All four replays must answer 200; a 409 or a compaction_* 4xx fails.
+both compacted sessions. All four replays must answer 200; a 409 or a compaction_* 4xx fails. Each replay's
+upstream request (what the stub received) must also carry the intended content:
+- base-state (HEAD knows the signer): the compaction block itself, unchanged, still reaches the upstream;
+- empty-state (signer unknown): no compaction block reaches the upstream, the Claude block's plain summary is
+  kept as a text block, and the user's turn is kept.
 
 No real accounts and no network: scratch HOME, config and auth dir; only loopback; HTTP(S)_PROXY points at a closed
 loopback port, so any request meant for a real provider fails instead of leaving the host.
@@ -177,6 +181,43 @@ def compact(gateway):
     ]
 
 
+def items(doc):
+    """Every JSON object nested anywhere in DOC."""
+    if isinstance(doc, dict):
+        yield doc
+        for value in doc.values():
+            yield from items(value)
+    elif isinstance(doc, list):
+        for value in doc:
+            yield from items(value)
+
+
+def upstream_problem(case, name):
+    """None when the replay's upstream request carries the intended content, else what is wrong."""
+    sent = [body for path, body in Stub.seen if ('/messages' if name == 'claude' else '/responses') in path]
+    if not sent:
+        return 'no upstream request reached the stub'
+    try:
+        doc = json.loads(sent[-1])
+    except ValueError:
+        return 'upstream request is not JSON'
+    blocks = [item for item in items(doc) if item.get('type') == 'compaction']
+    texts = [str(item.get('text', '')) for item in items(doc) if item.get('type') in ('text', 'input_text')]
+    texts += [item['content'] for item in items(doc) if isinstance(item.get('content'), str)]
+    if not any('continue' in text for text in texts):
+        return "the user's turn is missing upstream"
+    if case == 'base-state':
+        want = ({'encrypted_content': CODEX_BLOCK} if name == 'codex' else {'content': CLAUDE_BLOCK})
+        if not any(all(block.get(key) == value for key, value in want.items()) for block in blocks):
+            return f'the compacted block did not reach the upstream (signer known): {sent[-1][:200]}'
+        return None
+    if blocks:
+        return f'a compaction block with an unknown signer reached the upstream: {sent[-1][:200]}'
+    if name == 'claude' and not any(text == CLAUDE_BLOCK for text in texts):
+        return "the Claude block's summary was not kept as text"
+    return None
+
+
 def main():
     base, head = (str(Path(arg).resolve()) for arg in sys.argv[1:3])
     work = Path(tempfile.mkdtemp(prefix='cpa-replay-'))
@@ -202,10 +243,11 @@ def main():
             gateway = Gateway(head, root, stub_port, 'head-' + case)
             try:
                 for name, path, doc, headers in replays:
+                    Stub.seen.clear()
                     status, body = gateway.call('POST', path, doc, headers)
-                    ok = status == 200
-                    results.append(f'{case:12} {name:7} HTTP {status}' + ('' if ok else f'  {body[:240]}'))
-                    if not ok:
+                    problem = f'HTTP {status}  {body[:240]}' if status != 200 else upstream_problem(case, name)
+                    results.append(f'{case:12} {name:7} HTTP {status}' + (f'  FAIL: {problem}' if problem else '  upstream ok'))
+                    if problem:
                         failures.append(f'{case}/{name}')
             finally:
                 gateway.stop()
@@ -213,10 +255,10 @@ def main():
         stub.shutdown()
     print('\n'.join(results))
     if failures:
-        print(f'FAIL: {len(failures)} of 4 replays refused: {", ".join(failures)} (logs in {work})')
+        print(f'FAIL: {len(failures)} of 4 replays failed: {", ".join(failures)} (logs in {work})')
         return 1
     shutil.rmtree(work, ignore_errors=True)
-    print('PASS: 4 of 4 replays answered 200')
+    print('PASS: 4 of 4 replays answered 200 with the intended upstream content')
     return 0
 
 
