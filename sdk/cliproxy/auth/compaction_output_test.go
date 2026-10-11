@@ -530,7 +530,7 @@ func TestManagerCompactionSignerEvidenceCannotBeGuessed(t *testing.T) {
 				}
 				body := []byte(`{"input":[` + input + `,{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
 				req.Payload, opts.OriginalRequest = body, body
-				executor.attempts = nil
+				executor.attempts, executor.payloads = nil, nil
 				errReplay := runCompactionAffinityRequest(t, manager, executor, path, req, opts)
 				if scenario == "duplicate" {
 					var statusErr cliproxyexecutor.StatusError
@@ -542,16 +542,23 @@ func TestManagerCompactionSignerEvidenceCannotBeGuessed(t *testing.T) {
 						t.Fatalf("duplicate-list attempts = %v, want one pinned A", executor.attempts)
 					}
 				} else {
-					var affinityErr *Error
-					code := "compaction_affinity_missing"
-					if scenario == "conflicting" {
-						code = "compaction_affinity_conflict"
+					// smarty-dev#8742: degrade, never refuse. A block whose signer was
+					// lost (expired, evicted) or that another account signed is removed
+					// before any attempt, so no account receives a block it did not sign.
+					if errReplay != nil {
+						t.Fatalf("replay = %v, want served without the unsigned block", errReplay)
 					}
-					if !errors.As(errReplay, &affinityErr) || affinityErr.HTTPStatus != http.StatusConflict || affinityErr.Code != code {
-						t.Fatalf("replay = %v, want %s / 409", errReplay, code)
+					if len(executor.attempts) == 0 {
+						t.Fatal("degraded request was not executed")
 					}
-					if len(executor.attempts) != 0 {
-						t.Fatalf("rejected signer invoked an executor (including B): %v", executor.attempts)
+					for i, call := range executor.attempts {
+						sent := executor.payloads[i]
+						if strings.Contains(sent, `"signed-block"`) || !strings.Contains(sent, "continue") {
+							t.Fatalf("attempt %d on %s sent %s", i, call.authID, sent)
+						}
+						if scenario == "conflicting" && (call.authID != secondID || !strings.Contains(sent, "signed-block-D")) {
+							t.Fatalf("conflicting: attempt on %s sent %s; want only B with its own block D", call.authID, sent)
+						}
 					}
 				}
 			})

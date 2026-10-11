@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 // prepareCompactionDuplexValidation installs authority from the captured request
@@ -16,9 +17,17 @@ func (m *Manager) prepareCompactionDuplexValidation(opts cliproxyexecutor.Option
 	origin, _ := opts.Metadata[compactionAffinityStoreMetadataKey].(*SessionAffinitySelector)
 	if origin == nil {
 		delete(opts.Metadata, cliproxyexecutor.CompactionAffinityValidatorMetadataKey)
+		delete(opts.Metadata, cliproxyexecutor.CompactionAffinitySanitizerMetadataKey)
 		return
 	}
 	ctx := compactionContext(opts)
+	opts.Metadata[cliproxyexecutor.CompactionAffinitySanitizerMetadataKey] = func(authID string, payload []byte) []byte {
+		degraded, dropped, reason, _ := degradeCompactionPayload(ctx, origin, payload, authID)
+		if dropped > 0 {
+			log.WithField("auth", authID).Warnf("compaction: removed %d compaction block(s) from a websocket frame (%s) (smarty-dev#8742)", dropped, reason)
+		}
+		return degraded
+	}
 	opts.Metadata[cliproxyexecutor.CompactionAffinityValidatorMetadataKey] = func(authID string, payload []byte) (err error) {
 		defer func() { err = wrapRequestStopError(err) }()
 		keys, errCollect := compactionAffinityKeysChecked(ctx, cliproxyexecutor.Options{OriginalRequest: payload})
