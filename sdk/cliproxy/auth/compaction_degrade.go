@@ -174,11 +174,18 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 			dropped++
 		}
 	}
-	index := 0
-	out, ok := rewriteCompactionItems(payload, root, func(gjson.Result) bool {
-		removed := drop[keys[index]]
-		index++
-		return removed
+	// Decide by each block's own byte offset in the payload, never by visit
+	// order: compactionItems scans input[] before messages[], while the rewrite
+	// writes spans in payload order, so with both fields present an order-based
+	// decision could remove the wrong blocks (#135 Astra P2).
+	dropAt := make(map[int]bool, len(items))
+	for i, item := range items {
+		if drop[keys[i]] {
+			dropAt[item.Index] = true
+		}
+	}
+	out, ok := rewriteCompactionItems(payload, root, func(item gjson.Result) bool {
+		return dropAt[item.Index]
 	})
 	if !ok {
 		return payload, 0, reasonTooLarge, authID
@@ -186,8 +193,9 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 	return out, dropped, reason, target
 }
 
-// compactionItems lists the compaction items in input[] and
-// messages[].content[], in the order rewriteCompactionItems visits them. The
+// compactionItems lists the compaction items in input[], then in
+// messages[].content[]; each Result carries its byte offset (Index) in the
+// payload, which is how rewrite decisions are matched to blocks. The
 // scan stops as soon as the block or byte limit is passed (over = true): it
 // never holds more than maxCompactionBlocks+1 entries, whatever the input.
 func compactionItems(root gjson.Result) (items []gjson.Result, over bool) {

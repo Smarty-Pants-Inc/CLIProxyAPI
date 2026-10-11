@@ -336,6 +336,35 @@ func TestCompactionLargeSummaryIsBudgetedBeforeAnyCopy(t *testing.T) {
 	t.Logf("%d-byte body with a %d-byte escaped summary: 413 after %d bytes allocated", len(body), len(summary), allocated)
 }
 
+// #135 Astra P2: a body with BOTH messages[] (first in the payload) and
+// input[]. The unknown block sits in messages[] and the known block in input[].
+// Only the unknown block is removed; the known one stays and the request is
+// pinned to its signer, whichever field comes first in the body.
+func TestCompactionDegradeMatchesBlocksByOffsetWithBothFields(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	if err := selector.RecordCompactionOutput("auth-a", cliproxyexecutor.Options{}, []byte(`{"output":[{"type":"compaction","encrypted_content":"known-a"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(nil, selector, nil)
+	for name, body := range map[string]string{
+		"messages-first": `{"messages":[{"role":"assistant","content":[{"type":"compaction","encrypted_content":"unknown-b"}]}],"input":[{"type":"compaction","encrypted_content":"known-a"},{"role":"user","content":"continue"}]}`,
+		"input-first":    `{"input":[{"type":"compaction","encrypted_content":"known-a"},{"role":"user","content":"continue"}],"messages":[{"role":"assistant","content":[{"type":"compaction","encrypted_content":"unknown-b"}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req, opts := degradeTestRequest(cliproxyexecutor.Options{OriginalRequest: []byte(body), SourceFormat: sdktranslator.FormatOpenAIResponse})
+			req, opts, err := manager.PrepareCompactionPayload(context.Background(), req, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sent := string(req.Payload)
+			if !strings.Contains(sent, "known-a") || strings.Contains(sent, "unknown-b") || pinnedAuthIDFromMetadata(opts.Metadata) != "auth-a" {
+				t.Fatalf("wrong block removed: pinned %q payload %s", pinnedAuthIDFromMetadata(opts.Metadata), sent)
+			}
+		})
+	}
+}
+
 func TestCompactionDuplexSanitizerKeepsOnlyTheSocketAccountsBlocks(t *testing.T) {
 	origin := NewSessionAffinitySelector(nil)
 	defer origin.Stop()
