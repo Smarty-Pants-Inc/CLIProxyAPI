@@ -90,6 +90,20 @@ func TestResponsesUnknownOrOversizeCompactionIsServedWithoutTheBlock(t *testing.
 	router := gin.New()
 	router.POST("/v1/responses", h.Responses)
 
+	// smarty-dev#8742 security r1: a body over the hard input bound is refused with
+	// 413 while it is read, before any JSON parse, and never reaches an executor.
+	before := len(executor.payloads)
+	for _, path := range []string{"/v1/responses"} {
+		huge := `{"model":"` + compactionNoRetryResponsesModel + `","input":[{"role":"user","content":"` + strings.Repeat("A", coreauth.MaxCompactionInputBytes) + `"}]}`
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(huge))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusRequestEntityTooLarge || len(executor.payloads) != before {
+			t.Fatalf("%s over the input bound: status %d, executor calls %d; want 413 and none", path, recorder.Code, len(executor.payloads)-before)
+		}
+	}
+
 	blocks := map[string]string{
 		"unknown-signer": "never-recorded-signer",
 		"over-16MiB-cap": strings.Repeat("A", 17<<20),

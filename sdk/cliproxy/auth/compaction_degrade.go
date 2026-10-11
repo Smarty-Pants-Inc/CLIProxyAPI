@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -26,9 +27,22 @@ import (
 
 const compactionOmittedText = "[earlier conversation context was compacted and is unavailable on this account]"
 
+// MaxCompactionInputBytes is the documented maximum request (or websocket
+// frame) size for compaction handling: bodies above it are refused with 413
+// before any JSON parse. Between 16 MiB and this bound, compaction blocks are
+// dropped instead of refused (smarty-dev#8742 security r1).
+const MaxCompactionInputBytes = 64 << 20
+
+func compactionInputTooLargeError() error {
+	return wrapRequestStopError(&Error{Code: "request_too_large", Message: "request body exceeds the 64 MiB input limit", HTTPStatus: http.StatusRequestEntityTooLarge})
+}
+
 // PrepareCompactionPayload degrades req.Payload and opts.OriginalRequest, then
 // runs PrepareCompactionRequest. Callers use it wherever they hold both.
 func (m *Manager) PrepareCompactionPayload(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	if len(opts.OriginalRequest) > MaxCompactionInputBytes || len(req.Payload) > MaxCompactionInputBytes {
+		return req, opts, compactionInputTooLargeError()
+	}
 	req, opts = m.degradeCompactionInput(ctx, req, opts)
 	opts, err := m.PrepareCompactionRequest(req.Model, opts, ctx)
 	return req, opts, err
@@ -70,19 +84,23 @@ func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecut
 // ambiguous: those keep their existing fail-closed answers.
 // The returned target is the account whose blocks were kept ("" if none).
 func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelector, payload []byte, authID string) ([]byte, int, string, string) {
-	if origin == nil || origin.cache == nil || origin.cache.PersistenceError() != nil || len(payload) == 0 {
+	if origin == nil || origin.cache == nil || origin.cache.PersistenceError() != nil || len(payload) == 0 ||
+		len(payload) > MaxCompactionInputBytes {
+		// Above the hard bound nothing is parsed here; the caller refuses it.
 		return payload, 0, "", authID
 	}
 	root := gjson.ParseBytes(payload)
 	if !root.IsObject() {
 		return payload, 0, "", authID
 	}
-	items := compactionItems(root)
+	items, over := compactionItems(root)
 	if len(items) == 0 {
 		return payload, 0, "", authID
 	}
-	if len(payload) > maxCompactionJSONBytes || len(items) > maxCompactionBlocks {
-		return rewriteCompactionItems(payload, root, func(gjson.Result) bool { return true }), len(items), "over the compaction limits", authID
+	if over || len(payload) > maxCompactionJSONBytes {
+		dropped := 0
+		out := rewriteCompactionItems(payload, root, func(gjson.Result) bool { dropped++; return true })
+		return out, dropped, "over the compaction limits", authID
 	}
 	if ValidateCompactionJSON(ctx, payload) != nil {
 		return payload, 0, "", authID
@@ -136,24 +154,30 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 	return out, dropped, reason, target
 }
 
-// compactionItems lists every compaction item in input[] and
-// messages[].content[], in the order rewriteCompactionItems visits them.
-func compactionItems(root gjson.Result) []gjson.Result {
-	var items []gjson.Result
-	collect := func(list gjson.Result) {
+// compactionItems lists the compaction items in input[] and
+// messages[].content[], in the order rewriteCompactionItems visits them. The
+// scan stops as soon as the block or byte limit is passed (over = true): it
+// never holds more than maxCompactionBlocks+1 entries, whatever the input.
+func compactionItems(root gjson.Result) (items []gjson.Result, over bool) {
+	size := 0
+	collect := func(list gjson.Result) bool {
 		list.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "compaction" {
-				items = append(items, item)
+			if item.Get("type").String() != "compaction" {
+				return true
 			}
-			return true
+			items = append(items, item)
+			size += len(item.Raw)
+			over = len(items) > maxCompactionBlocks || size > maxCompactionJSONBytes
+			return !over
+		})
+		return !over
+	}
+	if collect(root.Get("input")) {
+		root.Get("messages").ForEach(func(_, message gjson.Result) bool {
+			return collect(message.Get("content"))
 		})
 	}
-	collect(root.Get("input"))
-	root.Get("messages").ForEach(func(_, message gjson.Result) bool {
-		collect(message.Get("content"))
-		return true
-	})
-	return items
+	return items, over
 }
 
 // rewriteCompactionItems removes each compaction item for which drop returns

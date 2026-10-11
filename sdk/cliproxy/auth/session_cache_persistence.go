@@ -153,8 +153,27 @@ func (c *SessionCache) EnablePersistenceWithLegacy(path, legacyPath string) erro
 	return nil
 }
 
-// readLegacySessionCacheFile reads a regular, non-symlink legacy file once.
+// Seams for tests; production uses the process uid and the real owner lookup.
+var (
+	legacyStateUID   = os.Getuid
+	legacyStateOwner = fileOwnerUID
+)
+
+// trustedLegacyEntry: owned by this process's uid and not group/other-writable.
+// Imported aliases decide which account a signed block is routed to, so a file
+// another principal could write must never be imported (smarty-dev#8742 r1).
+func trustedLegacyEntry(info os.FileInfo) bool {
+	owner, ok := legacyStateOwner(info)
+	return ok && owner == legacyStateUID() && info.Mode().Perm()&0o022 == 0
+}
+
+// readLegacySessionCacheFile reads a regular, non-symlink legacy file once,
+// only when it and its directory are this uid's and not group/other-writable.
 func readLegacySessionCacheFile(path string) ([]byte, bool) {
+	if dir, errDir := os.Lstat(filepath.Dir(path)); errDir != nil || !dir.IsDir() || !trustedLegacyEntry(dir) {
+		log.Warn("session affinity: legacy state directory is not owned by this user or is group/other-writable; not migrated")
+		return nil, false
+	}
 	info, errStat := os.Lstat(path)
 	if errStat != nil {
 		return nil, false
@@ -169,7 +188,12 @@ func readLegacySessionCacheFile(path string) ([]byte, bool) {
 		return nil, false
 	}
 	defer func() { _ = file.Close() }()
-	if opened, errFstat := file.Stat(); errFstat != nil || !os.SameFile(info, opened) {
+	opened, errFstat := file.Stat()
+	if errFstat != nil || !os.SameFile(info, opened) {
+		return nil, false
+	}
+	if !trustedLegacyEntry(opened) {
+		log.Warn("session affinity: legacy state file is not owned by this user or is group/other-writable; not migrated")
 		return nil, false
 	}
 	data, errRead := io.ReadAll(io.LimitReader(file, maxLegacySessionCacheBytes+1))

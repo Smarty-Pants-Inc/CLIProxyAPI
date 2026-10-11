@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +103,59 @@ func TestCompactionNewStateWinsOverLegacy(t *testing.T) {
 	}
 }
 
+// smarty-dev#8742 r1: imported aliases decide routing, so a legacy file another
+// principal could write is never imported; the request then degrades.
+func TestCompactionUntrustedLegacyStateIsIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, legacy string)
+		trusted bool
+	}{
+		{"own-0600-migrates", func(*testing.T, string) {}, true},
+		{"group-writable-file", func(t *testing.T, legacy string) { chmod(t, legacy, 0o620) }, false},
+		{"other-writable-file", func(t *testing.T, legacy string) { chmod(t, legacy, 0o602) }, false},
+		{"group-writable-directory", func(t *testing.T, legacy string) { chmod(t, filepath.Dir(legacy), 0o770) }, false},
+		{"other-owner", func(t *testing.T, _ string) {
+			saved := legacyStateUID
+			legacyStateUID = func() int { return saved() + 1 }
+			t.Cleanup(func() { legacyStateUID = saved })
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			legacy := filepath.Join(dir, "auth", "session-affinity.state")
+			buildN := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{StatePath: legacy})
+			recordAffinityTestOutput(t, buildN, "auth-b", affinityConversationOptions(false))
+			buildN.Stop()
+			tc.prepare(t, legacy)
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{StatePath: filepath.Join(dir, "state", "session-affinity.state"), LegacyStatePath: legacy})
+			defer selector.Stop()
+			if err := selector.cache.PersistenceError(); err != nil {
+				t.Fatalf("routing failed closed: %v", err)
+			}
+			req, opts := degradeTestRequest(affinityConversationOptions(true))
+			req, opts, err := NewManager(nil, selector, nil).PrepareCompactionPayload(context.Background(), req, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pinned := pinnedAuthIDFromMetadata(opts.Metadata)
+			if tc.trusted && (pinned != "auth-b" || !strings.Contains(string(req.Payload), "signed-account-a")) {
+				t.Fatalf("trusted legacy file not migrated: pinned %q", pinned)
+			}
+			if !tc.trusted && (pinned != "" || strings.Contains(string(req.Payload), "compaction")) {
+				t.Fatalf("untrusted legacy file imported: pinned %q payload %s", pinned, req.Payload)
+			}
+		})
+	}
+}
+
+func chmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCompactionInvalidLegacyStateIsIgnoredNotFailClosed(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "legacy.state")
@@ -140,6 +195,37 @@ func TestCompactionDegradeSummaryAndOverCap(t *testing.T) {
 				t.Fatalf("payload %.300s", req.Payload)
 			}
 		})
+	}
+}
+
+// smarty-dev#8742 security r1: the scan stops at the limit, and a body over
+// the hard input bound is refused before any compaction parse.
+func TestCompactionDegradeIsBoundedForManyBlocksAndRefusesOverTheInputBound(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+
+	block := `{"type":"compaction","encrypted_content":"x"},`
+	many := []byte(`{"input":[` + strings.Repeat(block, 10000) + `{"role":"user","content":"continue"}]}`)
+	items, over := compactionItems(gjson.ParseBytes(many))
+	if !over || len(items) != maxCompactionBlocks+1 || cap(items) > 2*(maxCompactionBlocks+1) {
+		t.Fatalf("scan held %d entries (cap %d, over %v); want it to stop at %d", len(items), cap(items), over, maxCompactionBlocks+1)
+	}
+	req, opts := degradeTestRequest(cliproxyexecutor.Options{OriginalRequest: many, SourceFormat: sdktranslator.FormatOpenAIResponse})
+	req, _, err := manager.PrepareCompactionPayload(context.Background(), req, opts)
+	if err != nil || strings.Contains(string(req.Payload), `"compaction"`) || !strings.Contains(string(req.Payload), "continue") {
+		t.Fatalf("10,000 blocks: err %v payload %.200s", err, req.Payload)
+	}
+
+	huge := []byte(`{"input":[` + block + `{"role":"user","content":"` + strings.Repeat("A", MaxCompactionInputBytes) + `"}]}`)
+	if out, dropped, _, _ := degradeCompactionPayload(context.Background(), selector, huge, ""); dropped != 0 || &out[0] != &huge[0] {
+		t.Fatal("a body over the hard input bound was scanned")
+	}
+	req, opts = degradeTestRequest(cliproxyexecutor.Options{OriginalRequest: huge, SourceFormat: sdktranslator.FormatOpenAIResponse})
+	_, _, err = manager.PrepareCompactionPayload(context.Background(), req, opts)
+	var local *Error
+	if !errors.As(err, &local) || local.HTTPStatus != http.StatusRequestEntityTooLarge || local.Code != "request_too_large" {
+		t.Fatalf("over the input bound = %v, want 413 request_too_large", err)
 	}
 }
 
