@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -51,10 +52,16 @@ func TestCompactionColdRestartMigratesLegacyStateOrDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrated signer refused: %v", err)
 	}
-	if !strings.Contains(string(req.Payload), "signed-account-a") || pinnedAuthIDFromMetadata(opts.Metadata) != "auth-b" {
+	if !legacyMigrationSupported {
+		// Windows cannot prove the legacy file's owner: it is never imported,
+		// so the block is removed and nothing is pinned (degrade).
+		if strings.Contains(string(req.Payload), "compaction") || pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+			t.Fatalf("windows imported an unproven legacy file: pinned %q", pinnedAuthIDFromMetadata(opts.Metadata))
+		}
+	} else if !strings.Contains(string(req.Payload), "signed-account-a") || pinnedAuthIDFromMetadata(opts.Metadata) != "auth-b" {
 		t.Fatalf("migrated block not kept on its signer: pinned %q payload %s", pinnedAuthIDFromMetadata(opts.Metadata), req.Payload)
 	}
-	if _, errStat := os.Stat(statePath); errStat != nil {
+	if _, errStat := os.Stat(statePath); legacyMigrationSupported && errStat != nil {
 		t.Fatalf("migrated state not written to the new path: %v", errStat)
 	}
 	if after, _ := os.ReadFile(legacy); !bytes.Equal(before, after) {
@@ -111,7 +118,7 @@ func TestCompactionUntrustedLegacyStateIsIgnored(t *testing.T) {
 		prepare func(t *testing.T, legacy string)
 		trusted bool
 	}{
-		{"own-0600-migrates", func(*testing.T, string) {}, true},
+		{"own-0600-migrates", func(*testing.T, string) {}, legacyMigrationSupported},
 		{"group-writable-file", func(t *testing.T, legacy string) { chmod(t, legacy, 0o620) }, false},
 		{"other-writable-file", func(t *testing.T, legacy string) { chmod(t, legacy, 0o602) }, false},
 		{"group-writable-directory", func(t *testing.T, legacy string) { chmod(t, filepath.Dir(legacy), 0o770) }, false},
@@ -148,6 +155,10 @@ func TestCompactionUntrustedLegacyStateIsIgnored(t *testing.T) {
 		})
 	}
 }
+
+// legacyMigrationSupported: a POSIX owner can be proven (not on Windows,
+// where session_cache_owner_windows.go never trusts a legacy file).
+var legacyMigrationSupported = runtime.GOOS != "windows"
 
 func chmod(t *testing.T, path string, mode os.FileMode) {
 	t.Helper()
@@ -227,6 +238,74 @@ func TestCompactionDegradeIsBoundedForManyBlocksAndRefusesOverTheInputBound(t *t
 	if !errors.As(err, &local) || local.HTTPStatus != http.StatusRequestEntityTooLarge || local.Code != "request_too_large" {
 		t.Fatalf("over the input bound = %v, want 413 request_too_large", err)
 	}
+}
+
+// smarty-dev#8742 security r2: one compaction item among 2,000,000 tiny input
+// entries. The rewrite allocates about one output buffer, never per entry.
+func TestCompactionRewriteAllocationIsNotPerEntry(t *testing.T) {
+	const entries = 2_000_000
+	var body bytes.Buffer
+	body.WriteString(`{"input":[{"type":"compaction","encrypted_content":"unknown"}`)
+	for i := 0; i < entries; i++ {
+		body.WriteString(`,{}`)
+	}
+	body.WriteString(`]}`)
+	payload := body.Bytes()
+	root := gjson.ParseBytes(payload)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	out, ok := rewriteCompactionItems(payload, root, func(gjson.Result) bool { return true })
+	if !ok {
+		t.Fatal("a 6 MB rewrite stopped at the output limit")
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	// One output buffer (about len(payload)) plus small constants. The
+	// per-entry version kept a 16-byte slice header per entry (32 MB here)
+	// and then joined them: several times the request.
+	if limit := uint64(len(payload))*2 + 1<<20; allocated > limit {
+		t.Fatalf("rewrite allocated %d bytes for a %d-byte request (limit %d)", allocated, len(payload), limit)
+	}
+	if bytes.Contains(out, []byte("compaction")) || len(out) != len(payload)-len(`{"type":"compaction","encrypted_content":"unknown"},`) {
+		t.Fatalf("rewrite output wrong: %d bytes, starts %.80s", len(out), out)
+	}
+	if !gjson.ValidBytes(out) {
+		t.Fatal("rewrite output is not valid JSON")
+	}
+}
+
+// smarty-dev#8742 (dev-lead, round 2): a body close to the 64 MiB bound with
+// one compaction item among ordinary entries. It is still over 16 MiB without
+// its block, so it is refused with 413. The streamed rewrite stops at the
+// 16 MiB output limit: allocation stays far below the body size.
+func TestCompactionNearInputBoundIsRefusedWithoutBodySizedAllocation(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	head := `{"input":[{"type":"compaction","encrypted_content":"unknown"}`
+	var body bytes.Buffer
+	body.Grow(MaxCompactionInputBytes)
+	body.WriteString(head)
+	for body.Len() < MaxCompactionInputBytes-(1<<20) {
+		body.WriteString(`,{"role":"user","content":"ordinary entry"}`)
+	}
+	body.WriteString(`]}`)
+	req, opts := degradeTestRequest(cliproxyexecutor.Options{OriginalRequest: body.Bytes(), SourceFormat: sdktranslator.FormatOpenAIResponse})
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, _, err := manager.PrepareCompactionPayload(context.Background(), req, opts)
+	runtime.ReadMemStats(&after)
+	var local *Error
+	if !errors.As(err, &local) || local.HTTPStatus != http.StatusRequestEntityTooLarge {
+		t.Fatalf("near-64 MiB body = %v, want 413", err)
+	}
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if limit := uint64(maxCompactionJSONBytes) + 4<<20; allocated > limit {
+		t.Fatalf("degrade allocated %d bytes for a %d-byte body (limit %d)", allocated, body.Len(), limit)
+	}
+	t.Logf("%d-byte body: 413 after %d bytes allocated", body.Len(), allocated)
 }
 
 func TestCompactionDuplexSanitizerKeepsOnlyTheSocketAccountsBlocks(t *testing.T) {

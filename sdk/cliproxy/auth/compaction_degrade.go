@@ -5,13 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strconv"
-	"strings"
+	"unsafe"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // Degrade instead of refuse (smarty-dev#8742). A signed compaction block whose
@@ -37,20 +35,34 @@ func compactionInputTooLargeError() error {
 	return wrapRequestStopError(&Error{Code: "request_too_large", Message: "request body exceeds the 64 MiB input limit", HTTPStatus: http.StatusRequestEntityTooLarge})
 }
 
+// compactionResultTooLargeError: the request is still over the 16 MiB
+// compaction JSON limit without its compaction blocks. It is refused with 413
+// as soon as the streamed rewrite passes that size, so no buffer larger than
+// the limit is ever built for it.
+func compactionResultTooLargeError() error {
+	return wrapRequestStopError(&Error{Code: "request_too_large", Message: "request exceeds 16 MiB without its compaction blocks", HTTPStatus: http.StatusRequestEntityTooLarge})
+}
+
+// reasonTooLarge marks a degrade that stopped at the output limit.
+const reasonTooLarge = "too large without compaction blocks"
+
 // PrepareCompactionPayload degrades req.Payload and opts.OriginalRequest, then
 // runs PrepareCompactionRequest. Callers use it wherever they hold both.
 func (m *Manager) PrepareCompactionPayload(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if len(opts.OriginalRequest) > MaxCompactionInputBytes || len(req.Payload) > MaxCompactionInputBytes {
 		return req, opts, compactionInputTooLargeError()
 	}
-	req, opts = m.degradeCompactionInput(ctx, req, opts)
-	opts, err := m.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, err := m.degradeCompactionInput(ctx, req, opts)
+	if err != nil {
+		return req, opts, err
+	}
+	opts, err = m.PrepareCompactionRequest(req.Model, opts, ctx)
 	return req, opts, err
 }
 
-func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if m == nil || len(opts.OriginalRequest) == 0 {
-		return req, opts
+		return req, opts, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -62,19 +74,26 @@ func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecut
 		origin, _ = m.Selector().(*SessionAffinitySelector)
 	}
 	degraded, dropped, reason, target := degradeCompactionPayload(ctx, origin, opts.OriginalRequest, "")
+	if reason == reasonTooLarge {
+		return req, opts, compactionResultTooLargeError()
+	}
 	if dropped == 0 {
-		return req, opts
+		return req, opts, nil
 	}
 	if bytes.Equal(req.Payload, opts.OriginalRequest) {
 		req.Payload = degraded
 	} else if len(req.Payload) > 0 {
 		// Same account rule for the executor's copy as for the checked original.
-		req.Payload, _, _, _ = degradeCompactionPayload(ctx, origin, req.Payload, target)
+		var payloadReason string
+		req.Payload, _, payloadReason, _ = degradeCompactionPayload(ctx, origin, req.Payload, target)
+		if payloadReason == reasonTooLarge {
+			return req, opts, compactionResultTooLargeError()
+		}
 	}
 	opts.OriginalRequest = degraded
 	session, _ := extractSessionIDs(opts.Headers, degraded, opts.Metadata)
 	log.WithField("session", session).Warnf("compaction: removed %d compaction block(s) (%s); serving the request without them (smarty-dev#8742)", dropped, reason)
-	return req, opts
+	return req, opts, nil
 }
 
 // degradeCompactionPayload returns payload without the compaction blocks it may
@@ -89,7 +108,9 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 		// Above the hard bound nothing is parsed here; the caller refuses it.
 		return payload, 0, "", authID
 	}
-	root := gjson.ParseBytes(payload)
+	// ponytail: gjson.ParseBytes copies the whole body into a string; this
+	// read-only view does not (payload is never written while root is used).
+	root := gjson.Parse(unsafe.String(unsafe.SliceData(payload), len(payload)))
 	if !root.IsObject() {
 		return payload, 0, "", authID
 	}
@@ -99,7 +120,10 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 	}
 	if over || len(payload) > maxCompactionJSONBytes {
 		dropped := 0
-		out := rewriteCompactionItems(payload, root, func(gjson.Result) bool { dropped++; return true })
+		out, ok := rewriteCompactionItems(payload, root, func(gjson.Result) bool { dropped++; return true })
+		if !ok {
+			return payload, 0, reasonTooLarge, authID
+		}
 		return out, dropped, "over the compaction limits", authID
 	}
 	if ValidateCompactionJSON(ctx, payload) != nil {
@@ -146,11 +170,14 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 		}
 	}
 	index := 0
-	out := rewriteCompactionItems(payload, root, func(gjson.Result) bool {
+	out, ok := rewriteCompactionItems(payload, root, func(gjson.Result) bool {
 		removed := drop[keys[index]]
 		index++
 		return removed
 	})
+	if !ok {
+		return payload, 0, reasonTooLarge, authID
+	}
 	return out, dropped, reason, target
 }
 
@@ -183,43 +210,80 @@ func compactionItems(root gjson.Result) (items []gjson.Result, over bool) {
 // rewriteCompactionItems removes each compaction item for which drop returns
 // true. In messages[].content[] a block with a plain "content" summary becomes
 // a text block; a message left empty gets a short placeholder text.
-func rewriteCompactionItems(payload []byte, root gjson.Result, drop func(gjson.Result) bool) []byte {
-	filter := func(list gjson.Result, summaries bool) (string, bool) {
-		var parts []string
-		changed := false
+// It writes the result in one pass into one buffer pre-sized to the payload:
+// unchanged bytes are copied by range, kept items by their raw span, and no
+// per-entry slice or per-list copy of the payload is ever built, so its
+// allocation is bounded by the output limit, whatever the entry count or body
+// size (smarty-dev#8742 security r2). It stops as soon as the output would
+// pass maxCompactionJSONBytes and returns ok == false: such a request is still
+// too large without its compaction blocks.
+func rewriteCompactionItems(payload []byte, root gjson.Result, drop func(gjson.Result) bool) ([]byte, bool) {
+	limit := maxCompactionJSONBytes
+	var out bytes.Buffer
+	out.Grow(min(len(payload), limit) + len(compactionOmittedText) + 64)
+	cursor, full := 0, false
+	put := func(chunk string) {
+		if full || out.Len()+len(chunk) > limit {
+			full = true
+			return
+		}
+		out.WriteString(chunk)
+	}
+	emit := func(list gjson.Result, summaries bool) {
+		start, end := list.Index, list.Index+len(list.Raw)
+		if !list.IsArray() || start < cursor || end > len(payload) || payload[start] != '[' {
+			return // span unknown: leave this list as it is
+		}
+		put(root.Raw[cursor:start])
+		put("[")
+		kept, changed := 0, false
+		write := func(raw string) {
+			if kept > 0 {
+				put(",")
+			}
+			put(raw)
+			kept++
+		}
 		list.ForEach(func(_, item gjson.Result) bool {
+			if full {
+				return false
+			}
 			if item.Get("type").String() != "compaction" || !drop(item) {
-				parts = append(parts, item.Raw)
+				write(item.Raw)
 				return true
 			}
 			changed = true
 			if content := item.Get("content"); summaries && content.Type == gjson.String && content.String() != "" {
 				text, _ := json.Marshal(content.String())
-				parts = append(parts, `{"type":"text","text":`+string(text)+`}`)
+				write(`{"type":"text","text":` + string(text) + `}`)
 			}
 			return true
 		})
-		if summaries && changed && len(parts) == 0 {
+		if summaries && changed && kept == 0 {
 			text, _ := json.Marshal(compactionOmittedText)
-			parts = append(parts, `{"type":"text","text":`+string(text)+`}`)
+			write(`{"type":"text","text":` + string(text) + `}`)
 		}
-		return "[" + strings.Join(parts, ",") + "]", changed
+		put("]")
+		cursor = end
 	}
-	out := payload
-	if input := root.Get("input"); input.IsArray() {
-		if raw, changed := filter(input, false); changed {
-			out, _ = sjson.SetRawBytes(out, "input", []byte(raw))
-		}
+	input, messages := root.Get("input"), root.Get("messages")
+	contents := func() {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			emit(message.Get("content"), true)
+			return true
+		})
 	}
-	i := 0
-	root.Get("messages").ForEach(func(_, message gjson.Result) bool {
-		if content := message.Get("content"); content.IsArray() {
-			if raw, changed := filter(content, true); changed {
-				out, _ = sjson.SetRawBytes(out, "messages."+strconv.Itoa(i)+".content", []byte(raw))
-			}
-		}
-		i++
-		return true
-	})
-	return out
+	// Spans must be written in payload order.
+	if messages.Exists() && input.Exists() && messages.Index < input.Index {
+		contents()
+		emit(input, false)
+	} else {
+		emit(input, false)
+		contents()
+	}
+	put(root.Raw[cursor:])
+	if full {
+		return nil, false
+	}
+	return out.Bytes(), true
 }
