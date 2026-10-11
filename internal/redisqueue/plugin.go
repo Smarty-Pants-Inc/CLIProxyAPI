@@ -56,6 +56,18 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		authType = "unknown"
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
+	accessProvider := strings.TrimSpace(record.AccessProvider)
+	if accessProvider == "" {
+		accessProvider = strings.TrimSpace(coreusage.AccessProviderFromContext(ctx))
+	}
+	isNativeKey := record.IsNativeKey
+	if !isNativeKey {
+		if nativeExplicit, ok := coreusage.IsNativeKeyFromContext(ctx); ok {
+			isNativeKey = nativeExplicit
+		} else if accessProvider != "" {
+			isNativeKey = coreusage.IsNativeAccessProvider(accessProvider)
+		}
+	}
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 	traceID := strings.TrimSpace(record.TraceID)
 	if traceID == "" {
@@ -151,6 +163,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		AuthType:            authType,
 		APIKey:              apiKey,
 		APIKeyHash:          record.APIKeySHA256,
+		IsNativeKey:         isNativeKey,
+		AccessProvider:      accessProvider,
 		RequestID:           requestID,
 		ExecutionID:         executionID,
 		TraceID:             traceID,
@@ -184,6 +198,8 @@ type queuedUsageDetail struct {
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`
 	APIKeyHash          string                   `json:"api_key_hash,omitempty"`
+	IsNativeKey         bool                     `json:"is_native_key"`
+	AccessProvider      string                   `json:"access_provider,omitempty"`
 	RequestID           string                   `json:"request_id"`
 	ExecutionID         string                   `json:"execution_id,omitempty"`
 	TraceID             string                   `json:"trace_id,omitempty"`
