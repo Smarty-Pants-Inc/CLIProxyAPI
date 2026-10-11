@@ -308,6 +308,34 @@ func TestCompactionNearInputBoundIsRefusedWithoutBodySizedAllocation(t *testing.
 	t.Logf("%d-byte body: 413 after %d bytes allocated", body.Len(), allocated)
 }
 
+// smarty-dev#8742 security r3: a dropped native compaction block whose plain
+// summary is about 20 MB of escape-heavy text (each NUL is 6 bytes escaped).
+// The summary must not be unescaped, marshalled or concatenated: the request is
+// refused with 413 at the 16 MiB output cap, with allocation under the cap
+// plus 1 MiB. A small summary is still kept as text.
+func TestCompactionLargeSummaryIsBudgetedBeforeAnyCopy(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	summary := strings.Repeat(`\u0000`, 20<<20/6)
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"compaction","content":"` + summary + `"}]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+	req, opts := degradeTestRequest(cliproxyexecutor.Options{OriginalRequest: body, SourceFormat: sdktranslator.FormatOpenAIResponse})
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, _, err := manager.PrepareCompactionPayload(context.Background(), req, opts)
+	runtime.ReadMemStats(&after)
+	var local *Error
+	if !errors.As(err, &local) || local.HTTPStatus != http.StatusRequestEntityTooLarge {
+		t.Fatalf("20 MB summary = %v, want 413", err)
+	}
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if limit := uint64(maxCompactionJSONBytes) + 1<<20; allocated > limit {
+		t.Fatalf("degrade allocated %d bytes for a %d-byte body (limit %d)", allocated, len(body), limit)
+	}
+	t.Logf("%d-byte body with a %d-byte escaped summary: 413 after %d bytes allocated", len(body), len(summary), allocated)
+}
+
 func TestCompactionDuplexSanitizerKeepsOnlyTheSocketAccountsBlocks(t *testing.T) {
 	origin := NewSessionAffinitySelector(nil)
 	defer origin.Stop()

@@ -25,6 +25,11 @@ import (
 
 const compactionOmittedText = "[earlier conversation context was compacted and is unavailable on this account]"
 
+var compactionOmittedBlock = func() string {
+	text, _ := json.Marshal(compactionOmittedText)
+	return `{"type":"text","text":` + string(text) + `}`
+}()
+
 // MaxCompactionInputBytes is the documented maximum request (or websocket
 // frame) size for compaction handling: bodies above it are refused with 413
 // before any JSON parse. Between 16 MiB and this bound, compaction blocks are
@@ -237,11 +242,13 @@ func rewriteCompactionItems(payload []byte, root gjson.Result, drop func(gjson.R
 		put(root.Raw[cursor:start])
 		put("[")
 		kept, changed := 0, false
-		write := func(raw string) {
+		write := func(raws ...string) {
 			if kept > 0 {
 				put(",")
 			}
-			put(raw)
+			for _, raw := range raws {
+				put(raw)
+			}
 			kept++
 		}
 		list.ForEach(func(_, item gjson.Result) bool {
@@ -253,15 +260,22 @@ func rewriteCompactionItems(payload []byte, root gjson.Result, drop func(gjson.R
 				return true
 			}
 			changed = true
-			if content := item.Get("content"); summaries && content.Type == gjson.String && content.String() != "" {
-				text, _ := json.Marshal(content.String())
-				write(`{"type":"text","text":` + string(text) + `}`)
+			// Budget first (smarty-dev#8742 security r3): a summary can be no larger
+			// than its block, so a block that does not fit the remaining output
+			// budget ends the rewrite (413) before its content is even looked up.
+			// A block that fits has its raw JSON string literal copied as-is through
+			// the capped writer: no marshal and no concatenation.
+			if summaries && out.Len()+len(item.Raw) > limit {
+				full = true
+				return false
+			}
+			if content := item.Get("content"); summaries && content.Type == gjson.String && len(content.Raw) > len(`""`) {
+				write(`{"type":"text","text":`, content.Raw, `}`)
 			}
 			return true
 		})
 		if summaries && changed && kept == 0 {
-			text, _ := json.Marshal(compactionOmittedText)
-			write(`{"type":"text","text":` + string(text) + `}`)
+			write(compactionOmittedBlock)
 		}
 		put("]")
 		cursor = end
