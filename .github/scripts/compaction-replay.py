@@ -17,7 +17,7 @@ loopback port, so any request meant for a real provider fails instead of leaving
 
 usage: compaction-replay.py BASE_BINARY HEAD_BINARY
 """
-import http.server, json, os, shutil, signal, socket, subprocess, sys, tempfile, threading, time
+import errno, http.server, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time
 import urllib.error, urllib.request
 from pathlib import Path
 
@@ -31,16 +31,21 @@ def free_port():
         return s.getsockname()[1]
 
 
+NONCE = re.compile(r'replay-nonce-[0-9a-f]{24}')
+
+
 class Stub(http.server.BaseHTTPRequestHandler):
-    """Canned upstream: Codex /responses/compact and /responses, Anthropic /messages. REPLY is the text it answers
-    with, a fresh nonce per replay, so the gateway's response body can be checked end to end."""
+    """Canned upstream: Codex /responses/compact and /responses, Anthropic /messages. Each replay request carries its
+    own nonce in its user turn; the stub answers THAT request with the nonce it found in it (or 'no-nonce'), so a
+    response can be matched to its own request end to end."""
     protocol_version = 'HTTP/1.1'
     seen = []
-    reply = 'replayed'
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0) or 0))
         Stub.seen.append((self.path, body.decode(errors='replace')))
+        found = NONCE.search(body.decode(errors='replace'))
+        reply = found.group(0) if found else 'no-nonce'
         if 'compact' in self.path:
             return self.json({'id': 'resp_stub', 'object': 'response.compaction', 'created_at': 1,
                               'output': [{'type': 'compaction', 'id': 'cmp_1', 'encrypted_content': CODEX_BLOCK}],
@@ -48,7 +53,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
         if '/messages' in self.path:
             req = json.loads(body or b'{}')
             content = ([{'type': 'compaction', 'content': CLAUDE_BLOCK}] if req.get('compaction')
-                       else [{'type': 'text', 'text': Stub.reply}])
+                       else [{'type': 'text', 'text': reply}])
             return self.json({'id': 'msg_stub', 'type': 'message', 'role': 'assistant', 'model': req.get('model', 'm'),
                               'content': content, 'stop_reason': 'end_turn', 'stop_sequence': None,
                               'usage': {'input_tokens': 1, 'output_tokens': 1}})
@@ -56,7 +61,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
             sse = ('event: response.completed\ndata: ' + json.dumps({'type': 'response.completed', 'response': {
                 'id': 'resp_2', 'object': 'response', 'status': 'completed',
                 'model': json.loads(body or b'{}').get('model', 'gpt-6-luna'), 'output': [
-                    {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': Stub.reply}]}],
+                    {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': reply}]}],
                 'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}}) + '\n\n').encode()
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -123,12 +128,13 @@ class Gateway:
         self.log = open(root / f'{name}.log', 'wb')
         self.proc = subprocess.Popen([binary, '-config', str(cfg)], cwd=root, env=env, stdout=self.log,
                                      stderr=subprocess.STDOUT, start_new_session=True)
+        self.pgid = self.proc.pid  # start_new_session: the leader's pid is the group id, recorded at spawn
         LIVE.append(self)
         deadline = time.time() + 60
         while time.time() < deadline:
-            if self.proc.poll() is not None:
+            if self.exited():
                 self.stop()
-                raise SystemExit(f'{name}: exited {self.proc.returncode} at start; see {root}/{name}.log')
+                raise SystemExit(f'{name}: exited at start; see {root}/{name}.log')
             try:
                 status, _ = self.call('GET', '/v1/models')
                 if status == 200:
@@ -149,27 +155,44 @@ class Gateway:
         except urllib.error.HTTPError as error:
             return error.code, error.read().decode(errors='replace')
 
+    def exited(self):
+        """Whether the leader has exited, WITHOUT reaping it: an unreaped (zombie) leader keeps its pid, so the
+        recorded process-group id cannot be reused while the group is signalled."""
+        try:
+            return os.waitid(os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return True
+
+    def members(self):
+        """Live (non-zombie) processes in this gateway's process group, from /proc."""
+        count = 0
+        for entry in os.listdir('/proc'):
+            if entry.isdigit():
+                try:
+                    fields = open(f'/proc/{entry}/stat').read().rsplit(')', 1)[1].split()
+                except OSError:
+                    continue
+                if fields[0] != 'Z' and int(fields[2]) == self.pgid:
+                    count += 1
+        return count
+
     def stop(self):
-        """SIGTERM this gateway's own process group, SIGKILL it after 5 s, and reap the leader. Idempotent."""
+        """Signal this gateway's whole process group BEFORE reaping its leader: SIGTERM, SIGKILL after 5 s, then wait
+        (at most 10 s in all) until no live member is left; only then reap the leader. Idempotent."""
         if self not in LIVE:
             return
         LIVE.remove(self)
-        for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, None)):
+        deadline = time.time() + 10
+        for sig, until in ((signal.SIGTERM, time.time() + 5), (signal.SIGKILL, deadline)):
             try:
-                os.killpg(self.proc.pid, sig)
+                os.killpg(self.pgid, sig)  # the leader is not reaped yet, so the group id is still ours
             except ProcessLookupError:
-                break  # the whole group is gone
-            try:
-                self.proc.wait(wait)
-                if sig == signal.SIGTERM:
-                    os.killpg(self.proc.pid, signal.SIGKILL)  # any child left in the group
-            except subprocess.TimeoutExpired:
-                continue
-            except ProcessLookupError:
-                pass
-            break
-        if self.proc.poll() is None:
-            self.proc.wait()
+                break
+            while self.members() and time.time() < until:
+                time.sleep(0.05)
+            if not self.members():
+                break
+        self.proc.wait()  # reap the leader last
         self.log.close()
 
 
@@ -215,8 +238,8 @@ def items(doc):
             yield from items(value)
 
 
-def response_problem(name, body):
-    """None when BODY is a well-formed success for the route and carries the stub's nonce reply, else what is wrong."""
+def response_problem(name, body, nonce):
+    """None when BODY is a well-formed success for the route and echoes NONCE, the nonce of its own request."""
     try:
         doc = json.loads(body)
     except ValueError:
@@ -226,13 +249,13 @@ def response_problem(name, body):
     if name == 'codex':
         texts = [part.get('text') for item in doc.get('output') or [] if isinstance(item, dict)
                  for part in item.get('content') or [] if isinstance(part, dict)]
-        if not isinstance(doc.get('output'), list) or Stub.reply not in texts:
-            return f'Codex response lacks an output text equal to the stub reply: {body[:160]}'
+        if not isinstance(doc.get('output'), list) or nonce not in texts:
+            return f'Codex response does not echo its own request nonce: {body[:160]}'
         return None
     content = doc.get('content')
     if doc.get('type') != 'message' or not isinstance(content, list) or not content or \
-            not isinstance(content[0], dict) or content[0].get('text') != Stub.reply:
-        return f'Claude response is not a message whose content[0].text is the stub reply: {body[:160]}'
+            not isinstance(content[0], dict) or content[0].get('text') != nonce:
+        return f'Claude response is not a message whose content[0].text echoes its own request nonce: {body[:160]}'
     return None
 
 
@@ -288,10 +311,11 @@ def main():
             try:
                 for name, path, doc, headers in replays:
                     Stub.seen.clear()
-                    Stub.reply = f'replayed-{case}-{name}-{os.urandom(6).hex()}'
-                    status, body = gateway.call('POST', path, doc, headers)
+                    nonce = 'replay-nonce-' + os.urandom(12).hex()  # inside this request's user turn
+                    sent = json.loads(json.dumps(doc).replace('"continue"', f'"continue {nonce}"'))
+                    status, body = gateway.call('POST', path, sent, headers)
                     problem = (f'HTTP {status}  {body[:240]}' if status != 200
-                               else response_problem(name, body) or upstream_problem(case, name))
+                               else response_problem(name, body, nonce) or upstream_problem(case, name))
                     results.append(f'{case:12} {name:7} HTTP {status}' + (f'  FAIL: {problem}' if problem else '  body and upstream ok'))
                     if problem:
                         failures.append(f'{case}/{name}')
@@ -306,7 +330,7 @@ def main():
         print(f'FAIL: {len(failures)} of 4 replays failed: {", ".join(failures)} (logs in {work})')
         return 1
     shutil.rmtree(work, ignore_errors=True)
-    print('PASS: 4 of 4 replays answered 200 with a well-formed body carrying the stub reply and the intended upstream content')
+    print('PASS: 4 of 4 replays answered 200 with a well-formed body echoing its own request nonce and the intended upstream content')
     return 0
 
 
