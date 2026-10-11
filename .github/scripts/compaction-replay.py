@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""Old-build compacted-session replay (smarty-dev#4273, #8742).
+
+The BASE build compacts one Codex session (POST /v1/responses/compact) and one Claude session (POST /v1/messages with
+a compaction request) against a local stub upstream that returns canned compaction blocks. BASE is stopped, then the
+HEAD build is cold-started twice: (i) on a copy of BASE's state dir, (ii) on an empty state dir. Each start replays
+both compacted sessions. All four replays must answer 200 with a well-formed success body for their route that
+carries the stub's reply (a fresh nonce per replay); a 409, a compaction_* 4xx, or an empty, malformed or error body
+fails. Each replay's
+upstream request (what the stub received) must also carry the intended content:
+- base-state (HEAD knows the signer): the compaction block itself, unchanged, still reaches the upstream;
+- empty-state (signer unknown): no compaction block reaches the upstream, the Claude block's plain summary is
+  kept as a text block, and the user's turn is kept.
+
+No real accounts and no network: scratch HOME, config and auth dir; only loopback; HTTP(S)_PROXY points at a closed
+loopback port, so any request meant for a real provider fails instead of leaving the host.
+
+usage: compaction-replay.py BASE_BINARY HEAD_BINARY
+"""
+import errno, http.server, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time
+import urllib.error, urllib.request
+from pathlib import Path
+
+KEY = 'replay-client-key'
+CODEX_BLOCK, CLAUDE_BLOCK = 'REPLAY-STUB-CODEX-BLOCK', 'REPLAY-STUB-CLAUDE-BLOCK'
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+
+NONCE = re.compile(r'replay-nonce-[0-9a-f]{24}')
+
+
+class Stub(http.server.BaseHTTPRequestHandler):
+    """Canned upstream: Codex /responses/compact and /responses, Anthropic /messages. Each replay request carries its
+    own nonce in its user turn; the stub answers THAT request with the nonce it found in it (or 'no-nonce'), so a
+    response can be matched to its own request end to end."""
+    protocol_version = 'HTTP/1.1'
+    seen = []
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length', 0) or 0))
+        Stub.seen.append((self.path, body.decode(errors='replace')))
+        found = NONCE.search(body.decode(errors='replace'))
+        reply = found.group(0) if found else 'no-nonce'
+        if 'compact' in self.path:
+            return self.json({'id': 'resp_stub', 'object': 'response.compaction', 'created_at': 1,
+                              'output': [{'type': 'compaction', 'id': 'cmp_1', 'encrypted_content': CODEX_BLOCK}],
+                              'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}})
+        if '/messages' in self.path:
+            req = json.loads(body or b'{}')
+            content = ([{'type': 'compaction', 'content': CLAUDE_BLOCK}] if req.get('compaction')
+                       else [{'type': 'text', 'text': reply}])
+            return self.json({'id': 'msg_stub', 'type': 'message', 'role': 'assistant', 'model': req.get('model', 'm'),
+                              'content': content, 'stop_reason': 'end_turn', 'stop_sequence': None,
+                              'usage': {'input_tokens': 1, 'output_tokens': 1}})
+        if '/responses' in self.path:
+            sse = ('event: response.completed\ndata: ' + json.dumps({'type': 'response.completed', 'response': {
+                'id': 'resp_2', 'object': 'response', 'status': 'completed',
+                'model': json.loads(body or b'{}').get('model', 'gpt-6-luna'), 'output': [
+                    {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': reply}]}],
+                'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}}) + '\n\n').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Content-Length', str(len(sse)))
+            self.end_headers()
+            return self.wfile.write(sse)
+        self.json({'error': 'stub: unknown path ' + self.path}, 404)
+
+    def do_GET(self):
+        self.json({'data': []})
+
+    def json(self, doc, code=200):
+        data = json.dumps(doc).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def config(root, port, stub_port):
+    (root / 'auth').mkdir(mode=0o700)
+    path = root / 'config.yaml'
+    path.write_text(f'''host: 127.0.0.1
+port: {port}
+auth-dir: "{root / 'auth'}"
+api-keys:
+- {KEY}
+usage-statistics-enabled: false
+routing:
+  strategy: round-robin
+  session-affinity: true
+  session-affinity-state-dir: "{root / 'state'}"
+codex-api-key:
+- api-key: stub-codex-key
+  base-url: http://127.0.0.1:{stub_port}
+  models:
+  - name: gpt-6-luna
+    alias: gpt-6-luna
+claude-api-key:
+- api-key: stub-claude-key
+  base-url: http://127.0.0.1:{stub_port}
+  models:
+  - name: claude-opus-5-5
+    alias: claude-opus-5-5
+''')
+    return path
+
+
+LIVE = []  # started gateways; main() reaps every one on any exit
+
+
+class Gateway:
+    def __init__(self, binary, root, stub_port, name):
+        self.root, self.port, self.name = root, free_port(), name
+        cfg = config(root, self.port, stub_port)
+        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(root / 'home'),
+               'XDG_STATE_HOME': str(root / 'xdg-state'), 'HTTP_PROXY': 'http://127.0.0.1:9',
+               'HTTPS_PROXY': 'http://127.0.0.1:9', 'NO_PROXY': '127.0.0.1,localhost'}
+        (root / 'home').mkdir()
+        self.log = open(root / f'{name}.log', 'wb')
+        self.proc = subprocess.Popen([binary, '-config', str(cfg)], cwd=root, env=env, stdout=self.log,
+                                     stderr=subprocess.STDOUT, start_new_session=True)
+        self.pgid = self.proc.pid  # start_new_session: the leader's pid is the group id, recorded at spawn
+        LIVE.append(self)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if self.exited():
+                self.stop()
+                raise SystemExit(f'{name}: exited at start; see {root}/{name}.log')
+            try:
+                status, _ = self.call('GET', '/v1/models')
+                if status == 200:
+                    return
+            except OSError:
+                pass
+            time.sleep(0.25)
+        self.stop()  # alive but not ready: never leave its process group running
+        raise SystemExit(f'{name}: not ready in 60 s')
+
+    def call(self, method, path, doc=None, headers=None):
+        req = urllib.request.Request(f'http://127.0.0.1:{self.port}{path}', None if doc is None else json.dumps(doc).encode(),
+                                     {'Authorization': f'Bearer {KEY}', 'Content-Type': 'application/json',
+                                      **(headers or {})}, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.status, resp.read().decode(errors='replace')
+        except urllib.error.HTTPError as error:
+            return error.code, error.read().decode(errors='replace')
+
+    def exited(self):
+        """Whether the leader has exited, WITHOUT reaping it: an unreaped (zombie) leader keeps its pid, so the
+        recorded process-group id cannot be reused while the group is signalled."""
+        try:
+            return os.waitid(os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return True
+
+    def members(self):
+        """Live (non-zombie) processes in this gateway's process group, from /proc."""
+        count = 0
+        for entry in os.listdir('/proc'):
+            if entry.isdigit():
+                try:
+                    fields = open(f'/proc/{entry}/stat').read().rsplit(')', 1)[1].split()
+                except OSError:
+                    continue
+                if fields[0] != 'Z' and int(fields[2]) == self.pgid:
+                    count += 1
+        return count
+
+    def stop(self):
+        """Signal this gateway's whole process group BEFORE reaping its leader: SIGTERM, SIGKILL after 5 s, then wait
+        (at most 10 s in all) until no live member is left; only then reap the leader. Idempotent."""
+        if self not in LIVE:
+            return
+        LIVE.remove(self)
+        deadline = time.time() + 10
+        for sig, until in ((signal.SIGTERM, time.time() + 5), (signal.SIGKILL, deadline)):
+            try:
+                os.killpg(self.pgid, sig)  # the leader is not reaped yet, so the group id is still ours
+            except ProcessLookupError:
+                break
+            while self.members() and time.time() < until:
+                time.sleep(0.05)
+            if not self.members():
+                break
+        self.proc.wait()  # reap the leader last
+        self.log.close()
+
+
+CLAUDE_HEADERS = {'anthropic-version': '2023-06-01'}
+
+
+def compact(gateway):
+    """BASE: compact one Codex and one Claude session; return the two replay requests."""
+    status, body = gateway.call('POST', '/v1/responses/compact', {
+        'model': 'gpt-6-luna', 'prompt_cache_key': 'replay-codex-session',
+        'input': [{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'remember PLUM-42'}]}]})
+    if status != 200:
+        raise SystemExit(f'BASE codex compact: HTTP {status} {body[:300]}')
+    codex = [item for item in json.loads(body).get('output', []) if item.get('type') == 'compaction']
+    status, body = gateway.call('POST', '/v1/messages', {
+        'model': 'claude-opus-5-5', 'max_tokens': 32, 'compaction': {'type': 'summarize'},
+        'messages': [{'role': 'user', 'content': 'remember PLUM-42'}]},
+        {**CLAUDE_HEADERS, 'X-Claude-Code-Session-Id': 'replay-claude-session'})
+    if status != 200:
+        raise SystemExit(f'BASE claude compact: HTTP {status} {body[:300]}')
+    claude = [item for item in json.loads(body).get('content', []) if item.get('type') == 'compaction']
+    if not codex or not claude:
+        raise SystemExit(f'BASE returned no compaction block (codex {codex}, claude {claude})')
+    return [
+        ('codex', '/v1/responses', {'model': 'gpt-6-luna', 'prompt_cache_key': 'replay-codex-session', 'stream': False,
+                                    'input': codex + [{'type': 'message', 'role': 'user',
+                                                       'content': [{'type': 'input_text', 'text': 'continue'}]}]}, {}),
+        ('claude', '/v1/messages', {'model': 'claude-opus-5-5', 'max_tokens': 32, 'messages': [
+            {'role': 'user', 'content': 'remember PLUM-42'}, {'role': 'assistant', 'content': claude},
+            {'role': 'user', 'content': 'continue'}]},
+         {**CLAUDE_HEADERS, 'X-Claude-Code-Session-Id': 'replay-claude-session'}),
+    ]
+
+
+def items(doc):
+    """Every JSON object nested anywhere in DOC."""
+    if isinstance(doc, dict):
+        yield doc
+        for value in doc.values():
+            yield from items(value)
+    elif isinstance(doc, list):
+        for value in doc:
+            yield from items(value)
+
+
+def response_problem(name, body, nonce):
+    """None when BODY is a well-formed success for the route and echoes NONCE, the nonce of its own request."""
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return f'response body is not JSON: {body[:120]!r}'
+    if not isinstance(doc, dict) or 'error' in doc:
+        return f'response body is not a success: {body[:160]}'
+    if name == 'codex':
+        texts = [part.get('text') for item in doc.get('output') or [] if isinstance(item, dict)
+                 for part in item.get('content') or [] if isinstance(part, dict)]
+        if not isinstance(doc.get('output'), list) or nonce not in texts:
+            return f'Codex response does not echo its own request nonce: {body[:160]}'
+        return None
+    content = doc.get('content')
+    if doc.get('type') != 'message' or not isinstance(content, list) or not content or \
+            not isinstance(content[0], dict) or content[0].get('text') != nonce:
+        return f'Claude response is not a message whose content[0].text echoes its own request nonce: {body[:160]}'
+    return None
+
+
+def upstream_problem(case, name):
+    """None when the replay's upstream request carries the intended content, else what is wrong."""
+    sent = [body for path, body in Stub.seen if ('/messages' if name == 'claude' else '/responses') in path]
+    if not sent:
+        return 'no upstream request reached the stub'
+    try:
+        doc = json.loads(sent[-1])
+    except ValueError:
+        return 'upstream request is not JSON'
+    blocks = [item for item in items(doc) if item.get('type') == 'compaction']
+    texts = [str(item.get('text', '')) for item in items(doc) if item.get('type') in ('text', 'input_text')]
+    texts += [item['content'] for item in items(doc) if isinstance(item.get('content'), str)]
+    if not any('continue' in text for text in texts):
+        return "the user's turn is missing upstream"
+    if case == 'base-state':
+        want = ({'encrypted_content': CODEX_BLOCK} if name == 'codex' else {'content': CLAUDE_BLOCK})
+        if not any(all(block.get(key) == value for key, value in want.items()) for block in blocks):
+            return f'the compacted block did not reach the upstream (signer known): {sent[-1][:200]}'
+        return None
+    if blocks:
+        return f'a compaction block with an unknown signer reached the upstream: {sent[-1][:200]}'
+    if name == 'claude' and not any(text == CLAUDE_BLOCK for text in texts):
+        return "the Claude block's summary was not kept as text"
+    return None
+
+
+def main():
+    base, head = (str(Path(arg).resolve()) for arg in sys.argv[1:3])
+    work = Path(tempfile.mkdtemp(prefix='cpa-replay-'))
+    stub = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Stub)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    stub_port = stub.server_address[1]
+    failures, results = [], []
+    try:
+        root = work / 'base'
+        root.mkdir()
+        gateway = Gateway(base, root, stub_port, 'base')
+        try:
+            replays = compact(gateway)
+        finally:
+            gateway.stop()
+        state = root / 'state'
+        print(f'BASE state dir: {sorted(p.name for p in state.iterdir()) if state.is_dir() else "absent"}')
+        for case in ('base-state', 'empty-state'):
+            root = work / case
+            root.mkdir()
+            if case == 'base-state' and state.is_dir():
+                shutil.copytree(state, root / 'state')
+            gateway = Gateway(head, root, stub_port, 'head-' + case)
+            try:
+                for name, path, doc, headers in replays:
+                    Stub.seen.clear()
+                    nonce = 'replay-nonce-' + os.urandom(12).hex()  # inside this request's user turn
+                    sent = json.loads(json.dumps(doc).replace('"continue"', f'"continue {nonce}"'))
+                    status, body = gateway.call('POST', path, sent, headers)
+                    problem = (f'HTTP {status}  {body[:240]}' if status != 200
+                               else response_problem(name, body, nonce) or upstream_problem(case, name))
+                    results.append(f'{case:12} {name:7} HTTP {status}' + (f'  FAIL: {problem}' if problem else '  body and upstream ok'))
+                    if problem:
+                        failures.append(f'{case}/{name}')
+            finally:
+                gateway.stop()
+    finally:
+        for gateway in list(LIVE):  # any exit, including an exception or SystemExit
+            gateway.stop()
+        stub.shutdown()
+    print('\n'.join(results))
+    if failures:
+        print(f'FAIL: {len(failures)} of 4 replays failed: {", ".join(failures)} (logs in {work})')
+        return 1
+    shutil.rmtree(work, ignore_errors=True)
+    print('PASS: 4 of 4 replays answered 200 with a well-formed body echoing its own request nonce and the intended upstream content')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

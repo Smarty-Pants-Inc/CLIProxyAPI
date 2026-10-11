@@ -29,8 +29,11 @@ queue_rules:
           - -head ~= ^sync/upstream-
           - check-success = review/security
       - check-success = build
+      # smarty-dev#4273: sessions compacted on the base build must still be served by the head build.
+      - check-success = compaction-replay
     merge_conditions:
       - check-success = build
+      - check-success = compaction-replay
 
 # The fleet's write App bot may queue (smarty-dev#735, #736): GitHub reports App bots as permission
 # none, so the default `sender-permission >= write` restriction refused its queue commands.
