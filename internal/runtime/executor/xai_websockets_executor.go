@@ -1860,10 +1860,7 @@ func xaiWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 			}
 		}
 	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	raw, ok := auth.Metadata["websockets"]
+	raw, ok := auth.MetadataValue("websockets")
 	if !ok || raw == nil {
 		return false
 	}

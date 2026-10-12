@@ -22,12 +22,9 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
-	var refreshToken string
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
-			refreshToken = v
-		}
-	}
+	// Refresh builds an unpublished candidate rather than mutating a shared credential.
+	auth = auth.Clone()
+	refreshToken := auth.MetadataString("refresh_token")
 	if refreshToken == "" {
 		return auth, nil
 	}
@@ -87,10 +84,8 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		apiKey = a.Attributes["api_key"]
 		baseURL = a.Attributes["base_url"]
 	}
-	if apiKey == "" && a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok {
-			apiKey = v
-		}
+	if apiKey == "" {
+		apiKey = a.MetadataString("access_token")
 	}
 	return
 }

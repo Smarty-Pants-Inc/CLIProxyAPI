@@ -477,26 +477,20 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 		if parsed, err := strconv.Atoi(p); err == nil {
 			entry.Priority = parsed
 		}
-	} else if auth.Metadata != nil {
-		if rawPriority, ok := auth.Metadata["priority"]; ok {
-			if priority, okPriority := parsePriorityValue(rawPriority); okPriority {
-				entry.Priority = priority
-			}
+	} else if rawPriority, ok := auth.MetadataValue("priority"); ok {
+		if priority, okPriority := parsePriorityValue(rawPriority); okPriority {
+			entry.Priority = priority
 		}
 	}
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {
 		entry.Note = note
-	} else if auth.Metadata != nil {
-		if rawNote, ok := auth.Metadata["note"].(string); ok {
-			entry.Note = strings.TrimSpace(rawNote)
-		}
+	} else {
+		entry.Note = strings.TrimSpace(auth.MetadataString("note"))
 	}
 	if baseURL := strings.TrimSpace(authAttribute(auth, "base_url")); baseURL != "" {
 		entry.BaseURL = baseURL
-	} else if auth.Metadata != nil {
-		if rawBaseURL, ok := auth.Metadata["base_url"].(string); ok {
-			entry.BaseURL = strings.TrimSpace(rawBaseURL)
-		}
+	} else {
+		entry.BaseURL = strings.TrimSpace(auth.MetadataString("base_url"))
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry.Websockets = websockets
@@ -553,8 +547,8 @@ func authEmail(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["email"].(string); ok {
+	if raw, exists := auth.MetadataValue("email"); exists {
+		if v, ok := raw.(string); ok {
 			return strings.TrimSpace(v)
 		}
 	}
@@ -573,12 +567,8 @@ func authProjectID(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["project_id"].(string); ok {
-			if projectID := strings.TrimSpace(v); projectID != "" {
-				return projectID
-			}
-		}
+	if projectID := strings.TrimSpace(auth.MetadataString("project_id")); projectID != "" {
+		return projectID
 	}
 	if auth.Attributes != nil {
 		if projectID := strings.TrimSpace(auth.Attributes["project_id"]); projectID != "" {
@@ -614,10 +604,8 @@ func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
 			}
 		}
 	}
-	if auth.Metadata == nil {
-		return false, false
-	}
-	return parseWebsocketsValue(auth.Metadata["websockets"])
+	raw, _ := auth.MetadataValue("websockets")
+	return parseWebsocketsValue(raw)
 }
 
 func parsePriorityValue(raw any) (int, bool) {

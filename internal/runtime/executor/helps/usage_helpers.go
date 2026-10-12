@@ -109,10 +109,8 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		if auth.Attributes != nil {
 			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		}
-		if baseURL == "" && auth.Metadata != nil {
-			if v, ok := auth.Metadata["base_url"].(string); ok {
-				baseURL = strings.TrimSpace(v)
-			}
+		if baseURL == "" {
+			baseURL = strings.TrimSpace(auth.MetadataString("base_url"))
 		}
 	}
 	traceID := usage.TraceIDFromContext(ctx)
@@ -799,28 +797,17 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 	if auth != nil {
 		provider := strings.TrimSpace(auth.Provider)
 		if strings.EqualFold(provider, "vertex") {
-			if auth.Metadata != nil {
-				if projectID, ok := auth.Metadata["project_id"].(string); ok {
-					if trimmed := strings.TrimSpace(projectID); trimmed != "" {
-						return trimmed
-					}
-				}
-				if project, ok := auth.Metadata["project"].(string); ok {
-					if trimmed := strings.TrimSpace(project); trimmed != "" {
-						return trimmed
-					}
+			for _, key := range []string{"project_id", "project"} {
+				if trimmed := strings.TrimSpace(auth.MetadataString(key)); trimmed != "" {
+					return trimmed
 				}
 			}
 		}
 		if _, value := auth.AccountInfo(); value != "" {
 			return strings.TrimSpace(value)
 		}
-		if auth.Metadata != nil {
-			if email, ok := auth.Metadata["email"].(string); ok {
-				if trimmed := strings.TrimSpace(email); trimmed != "" {
-					return trimmed
-				}
-			}
+		if trimmed := strings.TrimSpace(auth.MetadataString("email")); trimmed != "" {
+			return trimmed
 		}
 		if auth.Attributes != nil {
 			if key := strings.TrimSpace(auth.Attributes["api_key"]); key != "" {

@@ -122,8 +122,8 @@ func TestHomeCompatCredentialOptionsExecutionPaths(t *testing.T) {
 						{Name: "upstream", Alias: "other", IsCompat: !enabled},
 						{Name: "upstream", Alias: "alias", IsCompat: enabled},
 					}}}
-					payload, errMarshal := json.Marshal(homeAuthDispatchResponse{
-						Model: "upstream(high)", Auth: *auth, ModelInfo: &homeDispatchModelInfo{ID: "upstream"},
+					payload, errMarshal := json.Marshal(map[string]any{
+						"model": "upstream(high)", "auth": auth.Clone(), "model_info": &homeDispatchModelInfo{ID: "upstream"},
 					})
 					if errMarshal != nil {
 						t.Fatal(errMarshal)
@@ -187,8 +187,8 @@ func TestHomeCompatDoesNotInheritLocalModelExecutionPaths(t *testing.T) {
 				if tc.options != "" {
 					auth.Metadata = map[string]any{"credential_options": json.RawMessage(tc.options)}
 				}
-				payload, errMarshal := json.Marshal(homeAuthDispatchResponse{
-					Model: "upstream(high)", Auth: *auth, ModelInfo: &homeDispatchModelInfo{ID: "upstream"},
+				payload, errMarshal := json.Marshal(map[string]any{
+					"model": "upstream(high)", "auth": auth.Clone(), "model_info": &homeDispatchModelInfo{ID: "upstream"},
 				})
 				if errMarshal != nil {
 					t.Fatal(errMarshal)

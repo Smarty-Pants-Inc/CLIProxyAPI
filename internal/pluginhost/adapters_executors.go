@@ -933,7 +933,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		data.ProxyURL = auth.ProxyURL
 	}
 	if len(data.Metadata) == 0 && auth != nil {
-		data.Metadata = cloneAnyMap(auth.Metadata)
+		data.Metadata = auth.CloneMetadata()
 	}
 	if len(data.Attributes) == 0 {
 		if auth != nil {
@@ -1075,10 +1075,11 @@ func storageJSONFromAuth(auth *coreauth.Auth) []byte {
 	if rawProvider, okRaw := auth.Storage.(interface{ RawJSON() []byte }); okRaw {
 		return bytes.Clone(rawProvider.RawJSON())
 	}
-	if len(auth.Metadata) == 0 {
+	metadata := auth.CloneMetadata()
+	if len(metadata) == 0 {
 		return nil
 	}
-	data, errMarshal := json.Marshal(auth.Metadata)
+	data, errMarshal := json.Marshal(metadata)
 	if errMarshal != nil {
 		return nil
 	}

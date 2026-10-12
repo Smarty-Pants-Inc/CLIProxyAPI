@@ -874,7 +874,7 @@ func setAccountHeader(headers http.Header, selected *auth.Auth) {
 	if selected == nil {
 		return
 	}
-	if accountID, ok := selected.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+	if accountID := selected.MetadataString("account_id"); strings.TrimSpace(accountID) != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
 }

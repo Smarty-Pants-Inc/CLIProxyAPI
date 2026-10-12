@@ -800,13 +800,13 @@ func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.A
 }
 
 func openAICompatAuthHasRefreshToken(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
+	if auth == nil {
 		return false
 	}
-	if token, _ := auth.Metadata["refresh_token"].(string); strings.TrimSpace(token) != "" {
+	if token := auth.MetadataString("refresh_token"); strings.TrimSpace(token) != "" {
 		return true
 	}
-	if token, _ := auth.Metadata["refreshToken"].(string); strings.TrimSpace(token) != "" {
+	if token := auth.MetadataString("refreshToken"); strings.TrimSpace(token) != "" {
 		return true
 	}
 	return false
@@ -998,7 +998,7 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth, req 
 			Models                []config.OpenAICompatibilityModel `json:"models"`
 		}
 		present := false
-		if rawOptions, exists := auth.Metadata["credential_options"]; exists {
+		if rawOptions, exists := auth.MetadataValue("credential_options"); exists {
 			if data, errMarshal := json.Marshal(rawOptions); errMarshal == nil {
 				present = json.Unmarshal(data, &options) == nil
 			}

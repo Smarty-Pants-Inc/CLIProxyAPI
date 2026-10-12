@@ -822,7 +822,7 @@ func (d *homePerSelectionDispatcher) RPopAuth(context.Context, string, string, h
 	if int(call) > len(d.auths) {
 		return nil, home.ErrAuthNotFound
 	}
-	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[call-1]})
+	return json.Marshal(map[string]any{"auth": d.auths[call-1].Clone()})
 }
 func (*homePerSelectionDispatcher) AbortAmbiguousDispatch() {}
 
@@ -960,12 +960,12 @@ func (d *accountedHomeExecutionDispatcher) RPopAuth(_ context.Context, model str
 	if index >= len(d.auths) {
 		return nil, home.ErrAuthNotFound
 	}
-	auth := d.auths[index]
+	auth := d.auths[index].Clone()
 	return json.Marshal(struct {
 		Concurrency homeConcurrencyTuple `json:"concurrency"`
 		Model       string               `json:"model"`
 		AuthIndex   string               `json:"auth_index"`
-		Auth        Auth                 `json:"auth"`
+		Auth        *Auth                `json:"auth"`
 	}{
 		Concurrency: homeConcurrencyTuple{Accounted: true, CredentialID: auth.ID, Model: model},
 		Model:       model,

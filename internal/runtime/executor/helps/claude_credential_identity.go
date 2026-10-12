@@ -131,7 +131,7 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 	if auth == nil {
 		return nil, fmt.Errorf("ensure Claude credential device pool: auth is nil")
 	}
-	rawCredentialDeviceIDs := claudeauth.ReadDeviceIDPool(&auth.Metadata)
+	rawCredentialDeviceIDs := claudeauth.ReadDeviceIDPool(auth)
 	if claudeauth.HasCanonicalDeviceIDPool(rawCredentialDeviceIDs) {
 		return claudeauth.NormalizeDeviceIDPool(rawCredentialDeviceIDs), nil
 	}
@@ -139,7 +139,7 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 
 	client, homeMode, errClient := currentClaudeCredentialDevicePoolKVClient()
 	if !homeMode {
-		deviceIDs, _, errEnsure := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata)
+		deviceIDs, _, errEnsure := claudeauth.EnsureDeviceIDPoolFor(auth)
 		return deviceIDs, errEnsure
 	}
 	if errClient != nil {
@@ -172,7 +172,7 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 						return nil, fmt.Errorf("ensure Claude credential device pool: canonical Home KV value was not written")
 					}
 				}
-				claudeauth.StoreDeviceIDPool(&auth.Metadata, deviceIDs)
+				claudeauth.StoreDeviceIDPool(auth, deviceIDs)
 				return deviceIDs, nil
 			}
 		}
@@ -208,7 +208,7 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 	if len(deviceIDs) != claudeauth.ClaudeDevicePoolSize {
 		return nil, fmt.Errorf("ensure Claude credential device pool: Home KV pool has %d entries, want %d", len(deviceIDs), claudeauth.ClaudeDevicePoolSize)
 	}
-	claudeauth.StoreDeviceIDPool(&auth.Metadata, deviceIDs)
+	claudeauth.StoreDeviceIDPool(auth, deviceIDs)
 	return deviceIDs, nil
 }
 
@@ -218,7 +218,7 @@ func ClaudeCredentialAccountUUID(auth *cliproxyauth.Auth) string {
 		return ""
 	}
 	for _, key := range []string{"account_uuid", "accountUuid"} {
-		value := strings.TrimSpace(claudeauth.ReadMetadataString(&auth.Metadata, key))
+		value := strings.TrimSpace(claudeauth.ReadMetadataString(auth, key))
 		if value != "" {
 			return value
 		}
@@ -285,7 +285,7 @@ func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sess
 		}
 	}
 
-	deviceIDs, _, errDeviceIDs := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata)
+	deviceIDs, _, errDeviceIDs := claudeauth.EnsureDeviceIDPoolFor(auth)
 	if errDeviceIDs != nil {
 		return nil, "", errDeviceIDs
 	}

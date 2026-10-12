@@ -419,10 +419,10 @@ func authDataWithDefaults(data pluginapi.AuthData, auth *coreauth.Auth) pluginap
 		data.ProxyURL = auth.ProxyURL
 	}
 	if len(data.Metadata) == 0 {
-		data.Metadata = cloneAnyMap(auth.Metadata)
+		data.Metadata = auth.CloneMetadata()
 	} else {
 		metadata := cloneAnyMap(data.Metadata)
-		for key, value := range auth.Metadata {
+		for key, value := range auth.CloneMetadata() {
 			if _, exists := metadata[key]; !exists {
 				metadata[key] = value
 			}
@@ -502,7 +502,7 @@ func (h *Host) callModelsForAuth(ctx context.Context, record capabilityRecord, p
 		AuthID:       auth.ID,
 		AuthProvider: auth.Provider,
 		StorageJSON:  storageJSONFromAuth(auth),
-		Metadata:     cloneAnyMap(auth.Metadata),
+		Metadata:     auth.CloneMetadata(),
 		Attributes:   cloneStringMap(auth.Attributes),
 		Host:         h.hostConfigSummary(),
 		HTTPClient:   h.newHTTPClient(auth),

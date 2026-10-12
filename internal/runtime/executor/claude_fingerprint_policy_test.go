@@ -214,7 +214,7 @@ func TestClaudeFingerprintProfileFromAuthConcurrentMetadata(t *testing.T) {
 		defer wg.Done()
 		for range 1_000 {
 			claudeauth.StoreMetadataString(
-				&auth.Metadata,
+				auth,
 				"account_uuid",
 				"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 			)

@@ -108,10 +108,10 @@ func (s *Service) antigravityCapabilityKey(auth *coreauth.Auth) string {
 }
 
 func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy string) string {
-	project, _ := auth.Metadata["project_id"].(string)
+	project := auth.MetadataString("project_id")
 	identity := auth.ID
 	if identity == "" {
-		token, _ := auth.Metadata["access_token"].(string)
+		token := auth.MetadataString("access_token")
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
 	return fmt.Sprintf("%q/%d/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy)
@@ -125,13 +125,13 @@ func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCa
 }
 
 func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Context, auth *coreauth.Auth) antigravityModelCapabilityHints {
-	if auth == nil || auth.Metadata == nil || s.antigravityHomeEnabled() {
+	if auth == nil || s.antigravityHomeEnabled() {
 		return antigravityModelCapabilityHints{}
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	accessToken, _ := auth.Metadata["access_token"].(string)
+	accessToken := auth.MetadataString("access_token")
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" || ctx.Err() != nil {
 		return s.cachedAntigravityHints(auth)
@@ -246,7 +246,7 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 		client.Transport = transport
 		defer transport.CloseIdleConnections()
 	}
-	project, _ := auth.Metadata["project_id"].(string)
+	project := auth.MetadataString("project_id")
 	body, errMarshal := json.Marshal(map[string]string{"project": project})
 	if errMarshal != nil {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
@@ -333,13 +333,8 @@ func resolveAntigravityModelBaseURL(auth *coreauth.Auth) string {
 			return strings.TrimRight(value, "/")
 		}
 	}
-	if auth.Metadata != nil {
-		if value, ok := auth.Metadata["base_url"].(string); ok {
-			value = strings.TrimSpace(value)
-			if value != "" {
-				return strings.TrimRight(value, "/")
-			}
-		}
+	if value := strings.TrimSpace(auth.MetadataString("base_url")); value != "" {
+		return strings.TrimRight(value, "/")
 	}
 	return ""
 }
@@ -545,7 +540,7 @@ func (s *Service) refreshAntigravityModels(ctx context.Context) {
 		}
 		snapshot := auth.Clone()
 		key := s.antigravityCapabilityKey(snapshot)
-		token, _ := snapshot.Metadata["access_token"].(string)
+		token := snapshot.MetadataString("access_token")
 		failureKey := key + fmt.Sprintf("/%x", sha256.Sum256([]byte(strings.TrimSpace(token))))
 		epoch := GlobalModelRegistry().ClientRegistrationEpoch(snapshot.ID)
 		antigravityCapabilityMu.RLock()
@@ -578,7 +573,7 @@ func (s *Service) nextAntigravityModelRefreshDelay() time.Duration {
 			continue
 		}
 		key := s.antigravityCapabilityKey(auth)
-		token, _ := auth.Metadata["access_token"].(string)
+		token := auth.MetadataString("access_token")
 		failureKey := key + fmt.Sprintf("/%x", sha256.Sum256([]byte(strings.TrimSpace(token))))
 		antigravityCapabilityMu.RLock()
 		retry := antigravityAuthFailureCache[failureKey].nextRetry
