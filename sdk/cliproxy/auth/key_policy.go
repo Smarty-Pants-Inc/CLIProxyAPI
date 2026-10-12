@@ -300,7 +300,7 @@ func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*
 		if exec := m.executors["codex"]; exec != nil {
 			op.selected = a.Clone()
 			// Auth.Clone only copies the top-level metadata map. Fence nested secrets too.
-			b, err := json.Marshal(a.Metadata)
+			b, err := json.Marshal(op.selected.Metadata)
 			if err != nil {
 				return nil, nil, policyError("api_key_policy_unavailable", 503)
 			}
@@ -337,15 +337,15 @@ func CheckKeyPolicySend(req *http.Request) error {
 		return policyError("api_key_policy_unavailable", 503)
 	}
 	currentMetadata, err := json.Marshal(current.Metadata)
-	selectedMetadata, snapshotErr := json.Marshal(selected.Metadata)
+	selectedMetadata, snapshotErr := json.Marshal(selected.CloneMetadata())
 	if err != nil || snapshotErr != nil || !bytes.Equal(currentMetadata, selectedMetadata) || !reflect.DeepEqual(current.Attributes, selected.Attributes) {
 		return policyError("api_key_policy_unavailable", 503)
 	}
 	token := selected.Attributes["api_key"]
 	if token == "" {
-		token, _ = selected.Metadata["access_token"].(string)
+		token = selected.MetadataString("access_token")
 	}
-	account, _ := selected.Metadata["account_id"].(string)
+	account := selected.MetadataString("account_id")
 	if token == "" || req.Header.Get("Authorization") != "Bearer "+token || (selected.Attributes["api_key"] == "" && req.Header.Get("Chatgpt-Account-Id") != account) {
 		return policyError("api_key_policy_unavailable", 503)
 	}

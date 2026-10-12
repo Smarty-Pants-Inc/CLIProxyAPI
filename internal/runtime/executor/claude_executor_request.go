@@ -1540,7 +1540,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		baseURL = a.Attributes["base_url"]
 	}
 	if apiKey == "" {
-		apiKey = claudeauth.ReadMetadataString(&a.Metadata, "access_token")
+		apiKey = claudeauth.ReadMetadataString(a, "access_token")
 	}
 	return
 }

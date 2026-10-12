@@ -128,12 +128,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		headers.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
-		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-				}
-			}
+		if trimmed := strings.TrimSpace(auth.MetadataString("account_id")); trimmed != "" {
+			setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
 		}
 	}
 

@@ -25,7 +25,7 @@ type terminalCodexHomeDispatcher struct {
 func (*terminalCodexHomeDispatcher) HeartbeatOK() bool { return true }
 func (d *terminalCodexHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
 	d.calls.Add(1)
-	return json.Marshal(d.auth)
+	return json.Marshal(d.auth.Clone())
 }
 func (*terminalCodexHomeDispatcher) AbortAmbiguousDispatch() {}
 

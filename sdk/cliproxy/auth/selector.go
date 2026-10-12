@@ -388,7 +388,7 @@ func authWeight(auth *Auth) int64 {
 		}
 		return weight
 	}
-	if rawWeight, ok := auth.Metadata[AttributeWeight]; ok {
+	if rawWeight, ok := auth.MetadataValue(AttributeWeight); ok {
 		weight, errParse := credentialweight.ParseValue(rawWeight)
 		if errParse != nil {
 			return 0
@@ -423,10 +423,7 @@ func authWebsocketsEnabled(auth *Auth) bool {
 			}
 		}
 	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	raw, ok := auth.Metadata["websockets"]
+	raw, ok := auth.MetadataValue("websockets")
 	if !ok || raw == nil {
 		return false
 	}

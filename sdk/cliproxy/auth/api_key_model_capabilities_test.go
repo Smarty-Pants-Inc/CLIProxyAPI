@@ -334,9 +334,9 @@ func TestSelectedCodexConfigurationUpdateCapability(t *testing.T) {
 		if info, ok := ResolvedModelInfo(freeReq); ok || info != nil {
 			t.Fatalf("free OAuth pro-only model info = (%+v, %t), want fallback", info, ok)
 		}
-		pro := *oauth
+		pro := oauth.Clone()
 		pro.Attributes = map[string]string{"plan_type": "pro"}
-		assertSelected(t, &pro, "tenant/gpt-6-astra", "gpt-6-astra", true)
+		assertSelected(t, pro, "tenant/gpt-6-astra", "gpt-6-astra", true)
 		if info, ok := ResolvedAPIKeyModelInfo(manager.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, oauth, "tenant/"+upstream, upstream)); ok || info != nil {
 			t.Fatalf("OAuth API-key info = (%+v, %t), want none", info, ok)
 		}
@@ -565,9 +565,9 @@ type selectedCapabilityHomeDispatcher struct {
 func (selectedCapabilityHomeDispatcher) HeartbeatOK() bool { return true }
 
 func (d selectedCapabilityHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
-	return json.Marshal(homeAuthDispatchResponse{
-		Model: "gpt-6-luna", Auth: *d.auth,
-		ModelInfo: &homeDispatchModelInfo{ID: "home-selected-model"},
+	return json.Marshal(map[string]any{
+		"model": "gpt-6-luna", "auth": d.auth.Clone(),
+		"model_info": &homeDispatchModelInfo{ID: "home-selected-model"},
 	})
 }
 

@@ -71,7 +71,7 @@ func claudeFingerprintProfileFromAuth(auth *cliproxyauth.Auth) string {
 		}
 	}
 	for _, key := range []string{claudeFingerprintProfileAttr, "fingerprint-profile"} {
-		raw := claudeauth.ReadMetadataString(&auth.Metadata, key)
+		raw := claudeauth.ReadMetadataString(auth, key)
 		if strings.TrimSpace(raw) != "" {
 			return normalizeClaudeFingerprintProfile(raw)
 		}

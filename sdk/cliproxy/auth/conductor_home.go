@@ -1120,10 +1120,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		endScope()
 		return nil, &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 	}
-	auth := dispatch.Auth
+	auth := dispatch.Auth.Clone()
 	if strings.TrimSpace(auth.ID) == "" {
 		// Backward compatibility: older Home instances returned the auth directly.
-		if errUnmarshal := json.Unmarshal(raw, &auth); errUnmarshal != nil {
+		if errUnmarshal := json.Unmarshal(raw, auth); errUnmarshal != nil {
 			endScope()
 			return nil, &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 		}
@@ -1163,12 +1163,12 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		endScope()
 		return nil, &Error{Code: "auth_not_found", Message: "home returned an auth that does not match the pinned credential", HTTPStatus: http.StatusServiceUnavailable}
 	}
-	if errIdentity := verifyAccountedHomeConcurrencyIdentity(envelope.Tuple, &auth, dispatch.AuthIndex); errIdentity != nil {
+	if errIdentity := verifyAccountedHomeConcurrencyIdentity(envelope.Tuple, auth, dispatch.AuthIndex); errIdentity != nil {
 		endScope()
 		return nil, errIdentity
 	}
 	logicalProvider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	executorKey := executorKeyFromAuth(&auth)
+	executorKey := executorKeyFromAuth(auth)
 	if logicalProvider == "" || executorKey == "" {
 		endScope()
 		return nil, &Error{Code: "invalid_auth", Message: "home returned auth without provider", HTTPStatus: http.StatusBadGateway}

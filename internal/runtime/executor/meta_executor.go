@@ -121,35 +121,34 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if mintedURL := strings.TrimSpace(minted.BaseURL); mintedURL != "" {
 		baseURL = mintedURL
 	}
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-	auth.Metadata["base_url"] = baseURL
-	auth.Metadata["api_key"] = minted.APIKey
-	auth.Metadata["access_token"] = minted.APIKey
-	auth.Metadata["dca_token"] = dcaToken
-	delete(auth.Metadata, "expired")
-	if minted.UserEmail != "" {
-		auth.Metadata["email"] = minted.UserEmail
-	}
-	if minted.UserFullName != "" {
-		auth.Metadata["name"] = minted.UserFullName
-	}
-	if minted.SubsTierName != "" {
-		auth.Metadata["subs_tier_name"] = minted.SubsTierName
-	} else {
-		delete(auth.Metadata, "subs_tier_name")
-	}
-	if minted.SubsTierID != "" {
-		auth.Metadata["subs_tier_id"] = minted.SubsTierID
-	} else {
-		delete(auth.Metadata, "subs_tier_id")
-	}
-	auth.Metadata["is_subs_active"] = minted.IsSubsActive
-	auth.Metadata["has_payment_method"] = minted.HasPaymentMethod
-	auth.Metadata["type"] = "meta"
 	nowStr := time.Now().Format(time.RFC3339)
-	auth.Metadata["last_refresh"] = nowStr
+	auth.WithMetadata(func(metadata map[string]any) {
+		metadata["base_url"] = baseURL
+		metadata["api_key"] = minted.APIKey
+		metadata["access_token"] = minted.APIKey
+		metadata["dca_token"] = dcaToken
+		delete(metadata, "expired")
+		if minted.UserEmail != "" {
+			metadata["email"] = minted.UserEmail
+		}
+		if minted.UserFullName != "" {
+			metadata["name"] = minted.UserFullName
+		}
+		if minted.SubsTierName != "" {
+			metadata["subs_tier_name"] = minted.SubsTierName
+		} else {
+			delete(metadata, "subs_tier_name")
+		}
+		if minted.SubsTierID != "" {
+			metadata["subs_tier_id"] = minted.SubsTierID
+		} else {
+			delete(metadata, "subs_tier_id")
+		}
+		metadata["is_subs_active"] = minted.IsSubsActive
+		metadata["has_payment_method"] = minted.HasPaymentMethod
+		metadata["type"] = "meta"
+		metadata["last_refresh"] = nowStr
+	})
 
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
@@ -168,7 +167,7 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		storage.Expired = ""
 		storage.BaseURL = baseURL
 		storage.LastRefresh = nowStr
-		storage.Metadata = auth.Metadata
+		storage.Metadata = auth.CloneMetadata()
 		if minted.UserEmail != "" {
 			storage.Email = minted.UserEmail
 		}
@@ -274,13 +273,11 @@ func extractDCAToken(a *cliproxyauth.Auth) string {
 			return t
 		}
 	}
-	if a.Metadata != nil {
-		if d, ok := a.Metadata["dca_token"].(string); ok && strings.TrimSpace(d) != "" {
-			return strings.TrimSpace(d)
-		}
-		if t, ok := a.Metadata["access_token"].(string); ok && strings.HasPrefix(strings.TrimSpace(t), "dca:") {
-			return strings.TrimSpace(t)
-		}
+	if d := strings.TrimSpace(a.MetadataString("dca_token")); d != "" {
+		return d
+	}
+	if t := strings.TrimSpace(a.MetadataString("access_token")); strings.HasPrefix(t, "dca:") {
+		return t
 	}
 	if a.Storage != nil {
 		if ms, ok := a.Storage.(*metaauth.MetaTokenStorage); ok && ms != nil {
@@ -311,20 +308,18 @@ func metaCreds(a *cliproxyauth.Auth) (baseURL, token string) {
 			token = t
 		}
 	}
-	if a.Metadata != nil {
-		if baseURL == metaauth.DefaultAPIBaseURL {
-			if b, ok := a.Metadata["base_url"].(string); ok && strings.TrimSpace(b) != "" {
-				baseURL = strings.TrimSpace(b)
-			} else if b, ok := a.Metadata["api_base_url"].(string); ok && strings.TrimSpace(b) != "" {
-				baseURL = strings.TrimSpace(b)
-			}
+	if baseURL == metaauth.DefaultAPIBaseURL {
+		if b := strings.TrimSpace(a.MetadataString("base_url")); b != "" {
+			baseURL = b
+		} else if b := strings.TrimSpace(a.MetadataString("api_base_url")); b != "" {
+			baseURL = b
 		}
-		if token == "" {
-			if k, ok := a.Metadata["api_key"].(string); ok && strings.TrimSpace(k) != "" && !strings.HasPrefix(strings.TrimSpace(k), "dca:") {
-				token = strings.TrimSpace(k)
-			} else if t, ok := a.Metadata["access_token"].(string); ok && strings.TrimSpace(t) != "" && !strings.HasPrefix(strings.TrimSpace(t), "dca:") {
-				token = strings.TrimSpace(t)
-			}
+	}
+	if token == "" {
+		if k := strings.TrimSpace(a.MetadataString("api_key")); k != "" && !strings.HasPrefix(k, "dca:") {
+			token = k
+		} else if t := strings.TrimSpace(a.MetadataString("access_token")); t != "" && !strings.HasPrefix(t, "dca:") {
+			token = t
 		}
 	}
 	if token == "" && a.Storage != nil {

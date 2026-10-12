@@ -73,7 +73,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 	if auth == nil {
 		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
-	accessToken := metaStringValue(auth.Metadata, "access_token")
+	accessToken := metaStringValue(auth.CloneMetadata(), "access_token")
 	expiry, _ := auth.ExpirationTime()
 	if accessToken != "" && expiry.After(time.Now().Add(antigravityRequestTokenSafetyWindow)) {
 		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)
@@ -89,7 +89,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		if err != nil {
 			return "", nil, err
 		}
-		token := metaStringValue(refreshed.Metadata, "access_token")
+		token := metaStringValue(refreshed.CloneMetadata(), "access_token")
 		if strings.TrimSpace(token) == "" {
 			return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 		}
@@ -227,7 +227,7 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (string, error) {
 	token := strings.TrimSpace(accessToken)
 	if token == "" {
-		token = metaStringValue(auth.Metadata, "access_token")
+		token = metaStringValue(auth.CloneMetadata(), "access_token")
 	}
 	if token == "" {
 		return "", nil
@@ -256,13 +256,7 @@ func (e *AntigravityExecutor) projectIDForRequest(_ context.Context, auth *clipr
 }
 
 func antigravityProjectIDFromAuth(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Metadata == nil {
-		return ""
-	}
-	if pid, ok := auth.Metadata["project_id"].(string); ok {
-		return strings.TrimSpace(pid)
-	}
-	return ""
+	return strings.TrimSpace(auth.MetadataString("project_id"))
 }
 
 func missingAntigravityProjectIDError(cause error) statusErr {

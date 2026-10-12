@@ -429,10 +429,8 @@ func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {
 				raw = ua
 			}
 		}
-		if raw == "" && auth.Metadata != nil {
-			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
-				raw = strings.TrimSpace(ua)
-			}
+		if raw == "" {
+			raw = strings.TrimSpace(auth.MetadataString("user_agent"))
 		}
 	}
 	return raw
@@ -447,13 +445,8 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 			return strings.TrimSuffix(v, "/")
 		}
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["base_url"].(string); ok {
-			v = strings.TrimSpace(v)
-			if v != "" {
-				return strings.TrimSuffix(v, "/")
-			}
-		}
+	if v := strings.TrimSpace(auth.MetadataString("base_url")); v != "" {
+		return strings.TrimSuffix(v, "/")
 	}
 	return ""
 }

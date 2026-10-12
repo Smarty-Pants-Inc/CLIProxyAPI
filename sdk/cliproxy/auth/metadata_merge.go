@@ -25,30 +25,29 @@ func MergeExistingAuthMetadata(target *Auth, existingMap map[string]any) {
 	if target == nil || len(existingMap) == 0 {
 		return
 	}
-	if target.Metadata == nil {
-		target.Metadata = make(map[string]any)
-	}
-	if _, explicitlySet := target.Metadata["disabled"]; !explicitlySet {
-		if disabled, ok := existingMap["disabled"].(bool); ok {
-			target.Disabled = disabled
-		}
-	}
-	for k, v := range existingMap {
-		if IsAuthTokenPayloadKey(k) {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(target.Provider), "meta") {
-			switch CanonicalCredentialMetadataKey(k) {
-			case "api_key", "dca_token", "dca_expired", "dca_expires_at":
-				continue
+	target.WithMetadata(func(metadata map[string]any) {
+		if _, explicitlySet := metadata["disabled"]; !explicitlySet {
+			if disabled, ok := existingMap["disabled"].(bool); ok {
+				target.Disabled = disabled
 			}
 		}
-		if _, exists := target.Metadata[k]; !exists {
-			target.Metadata[k] = v
+		for k, v := range existingMap {
+			if IsAuthTokenPayloadKey(k) {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(target.Provider), "meta") {
+				switch CanonicalCredentialMetadataKey(k) {
+				case "api_key", "dca_token", "dca_expired", "dca_expires_at":
+					continue
+				}
+			}
+			if _, exists := metadata[k]; !exists {
+				metadata[k] = v
+			}
 		}
-	}
+	})
 	if setter, ok := target.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-		setter.SetMetadata(target.Metadata)
+		setter.SetMetadata(target.CloneMetadata())
 	}
 }
 
@@ -200,17 +199,19 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 
 	var baseMeta map[string]any
 	if base != nil {
-		baseMeta = base.Metadata
+		baseMeta = base.CloneMetadata()
 	}
+	currentMeta := current.CloneMetadata()
+	updatedMeta := updated.CloneMetadata()
 
 	// 1. Three-way merge for Metadata (excluding proxy_url which has dedicated canonical merge)
-	if updated.Metadata != nil {
-		for k, v := range updated.Metadata {
+	if updatedMeta != nil {
+		for k, v := range updatedMeta {
 			if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
 				continue
 			}
 			baseVal, hadInBase := baseMeta[k]
-			currentVal, hadInCurrent := current.Metadata[k]
+			currentVal, hadInCurrent := currentMeta[k]
 
 			changedByExecutor := !hadInBase || !reflect.DeepEqual(baseVal, v)
 			changedByUser := hadInBase != hadInCurrent || (hadInBase && !reflect.DeepEqual(baseVal, currentVal))
@@ -228,8 +229,8 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 				if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
 					continue
 				}
-				if _, inUpdated := updated.Metadata[k]; !inUpdated {
-					if currentVal, ok := current.Metadata[k]; ok {
+				if _, inUpdated := updatedMeta[k]; !inUpdated {
+					if currentVal, ok := currentMeta[k]; ok {
 						if reflect.DeepEqual(baseVal, currentVal) {
 							delete(merged.Metadata, k)
 						}
@@ -255,24 +256,12 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 	currentStruct := strings.TrimSpace(current.ProxyURL)
 	updatedStruct := strings.TrimSpace(updated.ProxyURL)
 
-	baseMetaProxy := ""
-	if base != nil && base.Metadata != nil {
-		if s, ok := base.Metadata["proxy_url"].(string); ok {
-			baseMetaProxy = strings.TrimSpace(s)
-		}
-	}
-	currentMetaProxy := ""
-	if current.Metadata != nil {
-		if s, ok := current.Metadata["proxy_url"].(string); ok {
-			currentMetaProxy = strings.TrimSpace(s)
-		}
-	}
-	updatedMetaProxy := ""
-	if updated.Metadata != nil {
-		if s, ok := updated.Metadata["proxy_url"].(string); ok {
-			updatedMetaProxy = strings.TrimSpace(s)
-		}
-	}
+	baseMetaProxy, _ := baseMeta["proxy_url"].(string)
+	baseMetaProxy = strings.TrimSpace(baseMetaProxy)
+	currentMetaProxy, _ := currentMeta["proxy_url"].(string)
+	currentMetaProxy = strings.TrimSpace(currentMetaProxy)
+	updatedMetaProxy, _ := updatedMeta["proxy_url"].(string)
+	updatedMetaProxy = strings.TrimSpace(updatedMetaProxy)
 
 	userChangedStruct := currentStruct != baseStruct
 	userChangedMeta := currentMetaProxy != baseMetaProxy
