@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -78,8 +80,17 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	if !homeEnabled {
-		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
+		if errEnsureAuthDir := s.prepareAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
+		}
+		if errCheck := checkAuthFilesOwnerOnly(s.cfg.AuthDir, true); errCheck != nil {
+			return fmt.Errorf("cliproxy: pre-check auth files before restricting directory: %w", errCheck)
+		}
+		if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
+			return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
+		}
+		if errCheck := checkAuthFilesOwnerOnly(s.cfg.AuthDir, false); errCheck != nil {
+			return fmt.Errorf("cliproxy: check auth files before loading: %w", errCheck)
 		}
 	}
 
@@ -381,6 +392,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 }
 
 func (s *Service) ensureAuthDir() error {
+	if errPrepare := s.prepareAuthDir(); errPrepare != nil {
+		return errPrepare
+	}
+	if errRestrict := restrictAuthDir(s.cfg.AuthDir); errRestrict != nil {
+		return fmt.Errorf("cliproxy: failed to restrict auth directory %s to owner-only access: %w", s.cfg.AuthDir, errRestrict)
+	}
+	return nil
+}
+
+func (s *Service) prepareAuthDir() error {
 	info, err := os.Stat(s.cfg.AuthDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -410,6 +431,12 @@ func (s *Service) ensureAuthDir() error {
 
 // chmodAuthDir is os.Chmod; tests replace it to simulate a failure.
 var chmodAuthDir = os.Chmod
+
+// restrictAuthDir applies platform-specific protections; tests replace it to simulate a failure.
+var restrictAuthDir = misc.RestrictAuthDir
+
+// checkAuthFilesOwnerOnly is read-only; tests replace it to verify the load barrier.
+var checkAuthFilesOwnerOnly = internalconfig.CheckAuthFilesOwnerOnly
 
 // startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
 func (s *Service) startModelCatalogUpdaters(ctx context.Context) {

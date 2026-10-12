@@ -58,7 +58,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, err
 	}
 
-	finalizePayload := helps.NewPayloadFinalizer(e.cfg, "codex-websockets", baseModel, to.String(), "", originalTranslated, req, opts)
+	finalizePayload := helps.NewTrackedPayloadFinalizer(e.cfg, "codex-websockets", baseModel, to.String(), "", originalTranslated, req, opts, "prompt_cache_key")
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
@@ -92,8 +92,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	// rules stay the final barrier; the client view restores the originals.
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 	beforeRulesKey := codexPromptCacheKey(upstreamBody)
-	upstreamBody = finalizePayload(upstreamBody)
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, upstreamBody)
+	upstreamBody, touched := finalizePayload(upstreamBody)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, upstreamBody, touched["prompt_cache_key"])
 	clientBody := applyCodexIdentityExposeResponsePayload(upstreamBody, identityState)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, nativeRequest, opts.Headers)

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -600,10 +602,10 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context,
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
-	rawJSON, err := handlers.ReadRequestBody(c)
-	// If data retrieval fails, return a 400 Bad Request error.
+	rawJSON, err := handlers.ReadRequestBodyLimit(c, coreauth.MaxCompactionInputBytes)
+	// If data retrieval fails, return a 400 Bad Request error (413 above the input bound).
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(requestBodyErrorStatus(err), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -628,10 +630,19 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 
 }
 
+// requestBodyErrorStatus answers 413 for a body over the hard input bound,
+// read with at most bound+1 bytes buffered (smarty-dev#8742 security r1).
+func requestBodyErrorStatus(err error) int {
+	if errors.Is(err, handlers.ErrRequestBodyTooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
 func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
-	rawJSON, err := handlers.ReadRequestBody(c)
+	rawJSON, err := handlers.ReadRequestBodyLimit(c, coreauth.MaxCompactionInputBytes)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(requestBodyErrorStatus(err), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",

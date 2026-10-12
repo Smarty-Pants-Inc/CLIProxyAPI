@@ -885,7 +885,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 		return nil, err
 	}
 
-	finalizePayload := helps.NewPayloadFinalizer(e.cfg, "codex-websockets", baseModel, to.String(), "", originalTranslated, req, opts)
+	finalizePayload := helps.NewTrackedPayloadFinalizer(e.cfg, "codex-websockets", baseModel, to.String(), "", originalTranslated, req, opts, "prompt_cache_key")
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = normalizeCodexInstructions(body, preserveNativeOutput)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
@@ -916,8 +916,8 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	// rules stay the final barrier; the client view restores the originals.
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 	beforeRulesKey := codexPromptCacheKey(upstreamBody)
-	upstreamBody = finalizePayload(upstreamBody)
-	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, upstreamBody)
+	upstreamBody, touched := finalizePayload(upstreamBody)
+	bindCodexIdentityToFinalBody(&identityState, beforeRulesKey, upstreamBody, touched["prompt_cache_key"])
 	clientBody := applyCodexIdentityExposeResponsePayload(upstreamBody, identityState)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, preserveNativeOutput, opts.Headers)
 	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, upstreamBody, opts.Headers)

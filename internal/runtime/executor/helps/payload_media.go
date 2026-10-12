@@ -18,9 +18,16 @@ import (
 // ApplyMediaPayloadConfig exposes multipart fields as JSON business values. File
 // parts use {filename, content_type, data} with base64 data; framing stays opaque.
 func ApplyMediaPayloadConfig(cfg *config.Config, executor, model, protocol string, body []byte, contentType string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, string, error) {
+	out, outType, _, err := ApplyMediaPayloadConfigTracked(cfg, executor, model, protocol, body, contentType, req, opts)
+	return out, outType, err
+}
+
+// ApplyMediaPayloadConfigTracked also reports which trackedPaths an applied user rule targeted, as
+// FinalizePayloadTracked does for JSON routes (CLIProxyAPI#116: a rule that removes prompt_cache_key).
+func ApplyMediaPayloadConfigTracked(cfg *config.Config, executor, model, protocol string, body []byte, contentType string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, trackedPaths ...string) ([]byte, string, map[string]bool, error) {
 	view, multipartBody, errDecode := mediaPayloadJSON(body, contentType)
 	if errDecode != nil {
-		return nil, "", errDecode
+		return nil, "", nil, errDecode
 	}
 	original := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -28,11 +35,11 @@ func ApplyMediaPayloadConfig(cfg *config.Config, executor, model, protocol strin
 	}
 	originalView, _, errOriginal := mediaPayloadJSON(original, opts.Headers.Get("Content-Type"))
 	if errOriginal != nil {
-		return nil, "", errOriginal
+		return nil, "", nil, errOriginal
 	}
-	out := NewPayloadFinalizer(cfg, executor, model, protocol, "", originalView, req, opts)(view)
+	out, touched := NewTrackedPayloadFinalizer(cfg, executor, model, protocol, "", originalView, req, opts, trackedPaths...)(view)
 	if !multipartBody || bytes.Equal(out, view) {
-		return outOrBody(out, body, multipartBody), contentType, nil
+		return outOrBody(out, body, multipartBody), contentType, touched, nil
 	}
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
@@ -45,27 +52,27 @@ func ApplyMediaPayloadConfig(cfg *config.Config, executor, model, protocol strin
 			if item.IsObject() && item.Get("filename").Exists() {
 				data, errData := base64.StdEncoding.DecodeString(item.Get("data").String())
 				if errData != nil {
-					return nil, "", fmt.Errorf("multipart payload %s: %w", key, errData)
+					return nil, "", nil, fmt.Errorf("multipart payload %s: %w", key, errData)
 				}
 				header := make(textproto.MIMEHeader)
 				header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": key, "filename": item.Get("filename").String()}))
 				header.Set("Content-Type", item.Get("content_type").String())
 				part, errPart := writer.CreatePart(header)
 				if errPart != nil {
-					return nil, "", errPart
+					return nil, "", nil, errPart
 				}
 				if _, errWrite := part.Write(data); errWrite != nil {
-					return nil, "", errWrite
+					return nil, "", nil, errWrite
 				}
 			} else if errWrite := writer.WriteField(key, item.String()); errWrite != nil {
-				return nil, "", errWrite
+				return nil, "", nil, errWrite
 			}
 		}
 	}
 	if errClose := writer.Close(); errClose != nil {
-		return nil, "", errClose
+		return nil, "", nil, errClose
 	}
-	return buffer.Bytes(), writer.FormDataContentType(), nil
+	return buffer.Bytes(), writer.FormDataContentType(), touched, nil
 }
 
 func outOrBody(out, body []byte, multipartBody bool) []byte {

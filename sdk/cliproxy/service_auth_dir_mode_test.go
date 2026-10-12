@@ -11,6 +11,77 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func TestEnsureAuthDirAppliesPlatformRestriction(t *testing.T) {
+	denied := errors.New("platform restriction denied")
+	for _, tc := range []struct {
+		name     string
+		existing bool
+		cause    error
+	}{
+		{name: "new_denied", cause: denied},
+		{name: "existing_denied", existing: true, cause: denied},
+		{name: "new_allowed"},
+		{name: "existing_allowed", existing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "auths")
+			if tc.existing {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			}
+			original := restrictAuthDir
+			t.Cleanup(func() { restrictAuthDir = original })
+			calls := 0
+			restrictAuthDir = func(path string) error {
+				calls++
+				if path != dir {
+					t.Fatalf("restriction path = %q, want %q", path, dir)
+				}
+				info, err := os.Stat(path)
+				if err != nil || !info.IsDir() {
+					t.Fatalf("restriction requires an existing directory: %v", err)
+				}
+				return tc.cause
+			}
+			s := &Service{cfg: &config.Config{AuthDir: dir}}
+			err := s.ensureAuthDir()
+			if calls != 1 {
+				t.Fatalf("restriction calls = %d, want 1", calls)
+			}
+			if tc.cause == nil {
+				if err != nil {
+					t.Fatalf("ensureAuthDir rejected a successful restriction: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("ensureAuthDir succeeded despite a failed platform restriction")
+			}
+			if err == tc.cause || !errors.Is(err, tc.cause) || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "owner-only") {
+				t.Fatalf("error %q does not wrap the cause with directory and owner-only context", err)
+			}
+		})
+	}
+}
+
+func TestEnsureAuthDirRejectsNonDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "auths")
+	if err := os.WriteFile(dir, nil, 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	original := restrictAuthDir
+	t.Cleanup(func() { restrictAuthDir = original })
+	restrictAuthDir = func(string) error {
+		t.Fatal("platform restriction must not run on a non-directory")
+		return nil
+	}
+	s := &Service{cfg: &config.Config{AuthDir: dir}}
+	if err := s.ensureAuthDir(); err == nil || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("ensureAuthDir error = %v, want non-directory diagnostic naming path", err)
+	}
+}
+
 func TestEnsureAuthDirCreatesOwnerOnlyDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits")

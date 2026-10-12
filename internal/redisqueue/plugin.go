@@ -79,6 +79,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 	responseModel := strings.TrimSpace(record.ResponseModel)
 	clientRequestMetadata := internallogging.GetClientRequestMetadata(ctx)
+	isCompaction := clientRequestMetadata.IsCompaction
+	if clientRequestMetadata.HasExplicitCompaction {
+		isCompaction = clientRequestMetadata.ExplicitCompaction
+	}
 	sessionID := strings.TrimSpace(record.SessionID)
 	parentSessionID := strings.TrimSpace(record.ParentSessionID)
 	if sessionID == "" {
@@ -152,9 +156,11 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		TraceID:             traceID,
 		SessionID:           sessionID,
 		ParentSessionID:     parentSessionID,
+		Role:                strings.TrimSpace(clientRequestMetadata.Role),
+		CallerSession:       strings.TrimSpace(clientRequestMetadata.CallerSession),
 		NodeKind:            strings.TrimSpace(clientRequestMetadata.NodeKind),
 		IsFork:              clientRequestMetadata.IsFork,
-		IsCompaction:        clientRequestMetadata.IsCompaction,
+		IsCompaction:        isCompaction,
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
@@ -183,9 +189,11 @@ type queuedUsageDetail struct {
 	TraceID             string                   `json:"trace_id,omitempty"`
 	SessionID           string                   `json:"session_id,omitempty"`
 	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
+	Role                string                   `json:"role,omitempty"`
+	CallerSession       string                   `json:"caller_session,omitempty"`
 	NodeKind            string                   `json:"node_kind,omitempty"`
 	IsFork              bool                     `json:"is_fork,omitempty"`
-	IsCompaction        bool                     `json:"is_compaction,omitempty"`
+	IsCompaction        bool                     `json:"is_compaction"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`

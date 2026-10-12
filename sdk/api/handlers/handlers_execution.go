@@ -103,7 +103,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	if h.AuthManager == nil {
 		errOrigin = fmt.Errorf("auth manager is unavailable")
 	} else {
-		opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+		req, opts, errOrigin = h.AuthManager.PrepareCompactionPayload(ctx, req, opts)
 	}
 	if errOrigin != nil {
 		errMsg := executionErrorMessage(errOrigin)
@@ -117,7 +117,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		lifecycle.completeError(ctx, interceptErr)
 		return nil, nil, interceptErr
 	}
-	opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = h.AuthManager.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		errMsg := executionErrorMessage(errOrigin)
 		lifecycle.completeError(ctx, errMsg)
@@ -194,7 +194,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if h.AuthManager == nil {
 		errOrigin = fmt.Errorf("auth manager is unavailable")
 	} else {
-		opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+		req, opts, errOrigin = h.AuthManager.PrepareCompactionPayload(ctx, req, opts)
 	}
 	if errOrigin != nil {
 		errMsg := executionErrorMessage(errOrigin)
@@ -208,7 +208,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		lifecycle.completeError(ctx, interceptErr)
 		return nil, nil, interceptErr
 	}
-	opts, errOrigin = h.AuthManager.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = h.AuthManager.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		errMsg := executionErrorMessage(errOrigin)
 		lifecycle.completeError(ctx, errMsg)

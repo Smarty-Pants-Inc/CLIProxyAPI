@@ -254,6 +254,61 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
+const (
+	maxSmartyRoleBytes          = 128
+	maxSmartyCallerSessionBytes = 64
+	smartyRoleHeader            = "X-Smarty-Role"
+	smartyCallerSessionHeader   = "X-Smarty-Session"
+	smartyCompactionHeader      = "X-Smarty-Compaction"
+)
+
+func validSmartyHeaderValue(headers http.Header, name string, maxBytes int) string {
+	values := headers.Values(name)
+	if len(values) != 1 || values[0] == "" || len(values[0]) > maxBytes {
+		return ""
+	}
+	for i := 0; i < len(values[0]); i++ {
+		if values[0][i] < 0x20 || values[0][i] > 0x7e {
+			return ""
+		}
+	}
+	return values[0]
+}
+
+func validSmartyCallerSession(headers http.Header) string {
+	value := validSmartyHeaderValue(headers, smartyCallerSessionHeader, maxSmartyCallerSessionBytes)
+	if len(value) != 36 {
+		return ""
+	}
+	for i := 0; i < len(value); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if value[i] != '-' {
+				return ""
+			}
+			continue
+		}
+		if !((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f') || (value[i] >= 'A' && value[i] <= 'F')) {
+			return ""
+		}
+	}
+	return value
+}
+
+func explicitSmartyCompaction(headers http.Header) (bool, bool) {
+	values := headers.Values(smartyCompactionHeader)
+	if len(values) != 1 {
+		return false, false
+	}
+	switch values[0] {
+	case "0":
+		return true, false
+	case "1":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 func requestClientIP(request *http.Request) string {
 	if request == nil {
 		return ""
@@ -524,13 +579,18 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	if c != nil && c.Request != nil {
 		sessionID, parentSessionID := extractSessionIDsFromRequest(c.Request)
+		hasExplicitCompaction, explicitCompaction := explicitSmartyCompaction(c.Request.Header)
 		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
-			ClientIP:         requestClientIP(c.Request),
-			ResolvedClientIP: strings.TrimSpace(c.ClientIP()),
-			XForwardedFor:    strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
-			UserAgent:        strings.TrimSpace(c.Request.UserAgent()),
-			SessionID:        sessionID,
-			ParentSessionID:  parentSessionID,
+			ClientIP:              requestClientIP(c.Request),
+			ResolvedClientIP:      strings.TrimSpace(c.ClientIP()),
+			XForwardedFor:         strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:             strings.TrimSpace(c.Request.UserAgent()),
+			SessionID:             sessionID,
+			ParentSessionID:       parentSessionID,
+			Role:                  validSmartyHeaderValue(c.Request.Header, smartyRoleHeader, maxSmartyRoleBytes),
+			CallerSession:         validSmartyCallerSession(c.Request.Header),
+			HasExplicitCompaction: hasExplicitCompaction,
+			ExplicitCompaction:    explicitCompaction,
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)

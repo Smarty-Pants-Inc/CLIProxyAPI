@@ -382,3 +382,42 @@ func TestCodexDirectImageExecuteStreamSplitReadRestoration(t *testing.T) {
 		}
 	}
 }
+
+// CLIProxyAPI#116 r2 CODE P2: with no key in the body but a header-only session, a media rule that
+// removes or empties prompt_cache_key must still clear the session headers on both image handlers.
+func TestCodexDirectImageHeaderOnlySessionClearedByRemovalRule(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, rule := range []string{"remove", "empty", "null"} {
+			t.Run(fmt.Sprintf("stream=%t/%s", stream, rule), func(t *testing.T) {
+				var finalHeaders http.Header
+				transport := imageIdentityRoundTripper(func(req *http.Request) (*http.Response, error) {
+					_, _ = io.ReadAll(req.Body)
+					finalHeaders = req.Header.Clone()
+					response := `{"created":1,"data":[{"b64_json":"AA=="}]}`
+					if stream {
+						response = "event: image_generation.completed\ndata: " + response + "\n\n"
+					}
+					return imageIdentityResponse(req, io.NopCloser(strings.NewReader(response)), stream), nil
+				})
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
+				exec := NewCodexExecutor(imageIdentityRuleConfig(true, rule))
+				request := cliproxyexecutor.Request{Model: "gpt-image-2", Payload: []byte(`{"model":"gpt-image-2","prompt":"A cute baby sea otter"}`)}
+				if stream {
+					result, err := exec.ExecuteStream(ctx, imageIdentityHeaderAuth(), request, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+					if err != nil {
+						t.Fatalf("ExecuteStream: %v", err)
+					}
+					for range result.Chunks {
+					}
+				} else if _, err := exec.Execute(ctx, imageIdentityHeaderAuth(), request, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false)); err != nil {
+					t.Fatalf("Execute: %v", err)
+				}
+				for _, name := range []string{"Session-Id", "Session_id", "Conversation_id"} {
+					if got := headerValueCaseInsensitive(finalHeaders, name); got != "" {
+						t.Errorf("%s = %q survives a %s rule on prompt_cache_key", name, got, rule)
+					}
+				}
+			})
+		}
+	}
+}

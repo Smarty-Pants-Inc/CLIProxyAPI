@@ -17,12 +17,20 @@ import (
 // Numeric Unix modes cannot protect Windows files. Create lock and staging
 // handles with a protected owner-only DACL before writing any secret bytes.
 func privateConfigSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	return privateConfigSecurityDescriptorForType(false)
+}
+
+func privateAuthDirSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	return privateConfigSecurityDescriptorForType(true)
+}
+
+func privateConfigSecurityDescriptorForType(directory bool) (*windows.SECURITY_DESCRIPTOR, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return nil, err
 	}
 	sid := user.User.Sid.String()
-	return windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")")
+	return windows.SecurityDescriptorFromString("O:" + sid + privateConfigDACLTemplate(sid, directory))
 }
 
 func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
@@ -37,14 +45,40 @@ func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
 	// No FILE_SHARE_DELETE: an open stable lock cannot be replaced underneath
 	// another cooperating publisher. Existing locks must already have our owner.
-	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, &sa, disposition, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	access := uint32(windows.GENERIC_READ | windows.GENERIC_WRITE | windows.WRITE_DAC)
+	if disposition == windows.CREATE_NEW {
+		// A refused, newly allocated stage is removed through its own handle,
+		// never by a pathname that could have been replaced after closing it.
+		access |= windows.DELETE
+	}
+	handle, err := windows.CreateFile(name, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, &sa, disposition, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	runtime.KeepAlive(sd)
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(handle), path)
-	// Creation establishes ownership through the security attributes. Never
-	// repair a pre-existing file's incompatible owner, even if its DACL matches.
+	return securePrivateConfigFile(os.NewFile(uintptr(handle), path), disposition, sd)
+}
+
+func securePrivateConfigFile(file *os.File, disposition uint32, sd *windows.SECURITY_DESCRIPTOR) (*os.File, error) {
+	handle := windows.Handle(file.Fd())
+	if err := restrictPrivateConfigHandle(handle, sd); err != nil {
+		if disposition == windows.CREATE_NEW {
+			deleteFile := byte(1)
+			if errDelete := windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &deleteFile, 1); errDelete != nil {
+				err = fmt.Errorf("%w (remove refused staging file: %v)", err, errDelete)
+			}
+		}
+		if errClose := file.Close(); errClose != nil {
+			return nil, fmt.Errorf("secure config file: %w (close: %v)", err, errClose)
+		}
+		return nil, fmt.Errorf("secure config file: %w", err)
+	}
+	return file, nil
+}
+
+// restrictPrivateConfigHandle is shared by config files and auth directories.
+// Never repair an incompatible owner, even if its DACL matches.
+func restrictPrivateConfigHandle(handle windows.Handle, sd *windows.SECURITY_DESCRIPTOR) error {
 	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err == nil && !hasPrivateConfigOwner(actual, sd) {
 		err = fmt.Errorf("config file owner is not the current user")
@@ -63,19 +97,14 @@ func openPrivateConfigFile(path string, disposition uint32) (*os.File, error) {
 		}
 	}
 	runtime.KeepAlive(sd)
-	if err != nil {
-		if errClose := file.Close(); errClose != nil {
-			return nil, fmt.Errorf("secure config file: %w (close: %v)", err, errClose)
-		}
-		return nil, fmt.Errorf("secure config file: %w", err)
-	}
-	return file, nil
+	return err
 }
 
 // hasPrivateConfigDACL validates the actual access policy, not the whole SDDL
 // representation. GetSecurityInfo can return auto-inheritance bookkeeping that
 // differs from the input template. The owner must still match the current user;
-// group and auto-inheritance bookkeeping are not additional DACL grants.
+// files require an explicit non-inheritable ACE and auth directories require an
+// explicit OI/CI ACE. Group and auto-inheritance bookkeeping are not grants.
 func hasPrivateConfigDACL(actual, expected *windows.SECURITY_DESCRIPTOR) bool {
 	if actual == nil || expected == nil || !actual.IsValid() || !expected.IsValid() {
 		return false
@@ -148,18 +177,22 @@ func openConfigPublicationLock(path string) (*os.File, error) {
 }
 
 func createConfigPublicationStage(dir string) (*os.File, error) {
+	return createPrivateConfigTemp(dir, "config")
+}
+
+func createPrivateConfigTemp(dir, prefix string) (*os.File, error) {
 	for i := 0; i < 10; i++ {
 		var random [16]byte
 		if _, err := rand.Read(random[:]); err != nil {
 			return nil, err
 		}
-		file, err := openPrivateConfigFile(filepath.Join(dir, ".config-"+hex.EncodeToString(random[:])+".tmp"), windows.CREATE_NEW)
+		file, err := openPrivateConfigFile(filepath.Join(dir, "."+prefix+"-"+hex.EncodeToString(random[:])+".tmp"), windows.CREATE_NEW)
 		if err == windows.ERROR_FILE_EXISTS || err == windows.ERROR_ALREADY_EXISTS {
 			continue
 		}
 		return file, err
 	}
-	return nil, fmt.Errorf("unable to allocate private config staging file")
+	return nil, fmt.Errorf("unable to allocate private %s staging file", prefix)
 }
 
 func lockConfigPublication(file *os.File) error {

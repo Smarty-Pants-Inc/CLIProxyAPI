@@ -46,6 +46,7 @@ type compactionAffinityExecutor struct {
 	streamOutput   [][]byte
 	onExecute      func()
 	attempts       []compactionAffinityCall
+	payloads       []string // opts.OriginalRequest of each attempt (smarty-dev#8742)
 }
 
 func (e *compactionAffinityExecutor) Identifier() string { return e.provider }
@@ -54,6 +55,7 @@ func (e *compactionAffinityExecutor) attempt(ctx context.Context, auth *Auth, op
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	pinned, _ := opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey].(string)
 	e.attempts = append(e.attempts, compactionAffinityCall{authID: auth.ID, pinned: pinned})
+	e.payloads = append(e.payloads, string(opts.OriginalRequest))
 	if auth.ID == e.firstID {
 		return e.failure
 	}

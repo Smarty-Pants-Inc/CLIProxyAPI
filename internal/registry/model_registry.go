@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	misc "github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -489,7 +488,7 @@ func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, mo
 		delete(r.clientModelInfos, clientID)
 		delete(r.clientProviders, clientID)
 		r.invalidateAvailableModelsCacheLocked()
-		misc.LogCredentialSeparator()
+		log.Debug(strings.Repeat("-", 67))
 		return
 	}
 
@@ -527,7 +526,7 @@ func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, mo
 		r.invalidateAvailableModelsCacheLocked()
 		r.triggerModelsRegistered(provider, clientID, models)
 		log.Debugf("Registered client %s from provider %s with %d models", clientID, clientProvider, len(rawModelIDs))
-		misc.LogCredentialSeparator()
+		log.Debug(strings.Repeat("-", 67))
 		return
 	}
 
@@ -686,7 +685,7 @@ func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, mo
 	}
 
 	log.Debugf("Reconciled client %s (provider %s) models: +%d, -%d", clientID, provider, len(added), len(removed))
-	misc.LogCredentialSeparator()
+	log.Debug(strings.Repeat("-", 67))
 }
 
 func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *ModelInfo, now time.Time, excludeClientID string) {
@@ -919,7 +918,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	}
 	log.Debugf("Unregistered client %s", clientID)
 	// Separator line after completing client unregistration (after the summary line)
-	misc.LogCredentialSeparator()
+	log.Debug(strings.Repeat("-", 67))
 	r.triggerModelsUnregistered(provider, clientID)
 }
 
