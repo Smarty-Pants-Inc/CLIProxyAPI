@@ -30,8 +30,10 @@ func fakeClaudeUpstream(t *testing.T, status int, calls *atomic.Int32, last *[]b
 		mu.Lock()
 		*last = body
 		mu.Unlock()
-		if got := gjson.GetBytes(body, "model").String(); got != policyClaudeModel {
-			t.Errorf("wire model=%q", got)
+		// CheckKeyPolicySend already binds the wire model to the admitted one.
+		model := gjson.GetBytes(body, "model").String()
+		if !strings.HasPrefix(model, "claude-") {
+			t.Errorf("wire model=%q", model)
 		}
 		if r.URL.Path != "/v1/messages" {
 			t.Errorf("path=%s", r.URL.Path)
@@ -46,7 +48,7 @@ func fakeClaudeUpstream(t *testing.T, status int, calls *atomic.Int32, last *[]b
 		}
 		if gjson.GetBytes(body, "stream").Bool() {
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n", policyClaudeModel)
+			fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n", model)
 			fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
 			fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
 			fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
@@ -55,15 +57,19 @@ func fakeClaudeUpstream(t *testing.T, status int, calls *atomic.Int32, last *[]b
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id":"m","type":"message","role":"assistant","model":%q,"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":3}}`, policyClaudeModel)
+		fmt.Fprintf(w, `{"id":"m","type":"message","role":"assistant","model":%q,"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":3}}`, model)
 	}))
 }
 
 func registerPolicyClaudeAuths(t *testing.T, server *Server, baseURL string, oauth, disableA bool) {
 	t.Helper()
-	info := registry.LookupStaticModelInfoByChannel(policyClaudeModel, "claude")
-	if info == nil {
-		info = &registry.ModelInfo{ID: policyClaudeModel}
+	infos := []*registry.ModelInfo{{ID: "claude-other"}}
+	for _, id := range []string{policyClaudeModel, "claude-sonnet-5-5", "claude-sonnet-4-5-20250929"} {
+		info := registry.LookupStaticModelInfoByChannel(id, "claude")
+		if info == nil {
+			t.Fatalf("no static model %s", id)
+		}
+		infos = append(infos, info)
 	}
 	for _, id := range []string{"A", "B"} {
 		a := &auth.Auth{ID: id, Provider: "claude", Status: auth.StatusActive, Disabled: disableA && id == "A", Attributes: map[string]string{"api_key": "verified-" + id, "base_url": baseURL}}
@@ -74,7 +80,7 @@ func registerPolicyClaudeAuths(t *testing.T, server *Server, baseURL string, oau
 		if _, err := server.handlers.AuthManager.Register(context.Background(), a); err != nil {
 			t.Fatal(err)
 		}
-		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{info, {ID: "claude-other"}})
+		registry.GetGlobalRegistry().RegisterClient(id, "claude", infos)
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 	}
 }
@@ -170,29 +176,116 @@ func TestKeyPolicyClaude(t *testing.T) {
 	}
 }
 
-// TriStar's gateway shape: reasoning.effort xhigh with max_output_tokens 40960.
+// TriStar's gateway shape: /v1/responses with reasoning.effort and
+// max_output_tokens 40960. Policy admission must not change the thinking
+// translation, so each case also compares against an unrestricted key.
+// Models with catalog thinking levels (claude-opus-5-5) get adaptive thinking
+// with output_config.effort; models without levels get budget_tokens.
 func TestKeyPolicyClaudeResponsesReasoning(t *testing.T) {
-	var calls atomic.Int32
-	var mu sync.Mutex
-	var last []byte
-	upstream := fakeClaudeUpstream(t, 200, &calls, &last, &mu, "verified-A")
-	defer upstream.Close()
-	tokenCap, requestCap := int64(100), int64(10)
-	cfg := policyClaudeConfig([]string{policyClaudeModel}, []string{"A"}, &tokenCap, &requestCap)
-	server := newTestServerWithConfig(t, cfg)
-	server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
-	registerPolicyClaudeAuths(t, server, upstream.URL, false, false)
-	rr := sendPolicied(server, "/v1/responses", fmt.Sprintf(`{"model":%q,"input":"hello","reasoning":{"effort":"xhigh"},"max_output_tokens":40960}`, policyClaudeModel))
-	if rr.Code != 200 {
-		t.Fatalf("status=%d: %s", rr.Code, rr.Body.String())
+	for _, tc := range []struct {
+		model, effort, wantType, wantEffort string
+		wantBudget                          int64
+	}{
+		// Observed on this base: xhigh reaches the upstream as effort "max".
+		{model: policyClaudeModel, effort: "xhigh", wantType: "adaptive", wantEffort: "max"},
+		{model: policyClaudeModel, effort: "medium", wantType: "adaptive", wantEffort: "medium"},
+		{model: "claude-sonnet-4-5-20250929", effort: "xhigh", wantType: "enabled", wantBudget: 32768},
+	} {
+		t.Run(tc.model+"/"+tc.effort, func(t *testing.T) {
+			got := map[bool]string{}
+			for _, policied := range []bool{true, false} {
+				var calls atomic.Int32
+				var mu sync.Mutex
+				var last []byte
+				upstream := fakeClaudeUpstream(t, 200, &calls, &last, &mu, "verified-A")
+				defer upstream.Close()
+				tokenCap, requestCap := int64(100), int64(10)
+				cfg := policyClaudeConfig([]string{tc.model}, []string{"A"}, &tokenCap, &requestCap)
+				if !policied {
+					cfg.APIKeyPolicies = nil
+				}
+				server := newTestServerWithConfig(t, cfg)
+				server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
+				registerPolicyClaudeAuths(t, server, upstream.URL, false, false)
+				rr := sendPolicied(server, "/v1/responses", fmt.Sprintf(`{"model":%q,"input":"hello","reasoning":{"effort":%q},"max_output_tokens":40960}`, tc.model, tc.effort))
+				if rr.Code != 200 {
+					t.Fatalf("policied=%v status=%d: %s", policied, rr.Code, rr.Body.String())
+				}
+				mu.Lock()
+				body := last
+				mu.Unlock()
+				if n := gjson.GetBytes(body, "max_tokens").Int(); n != 40960 {
+					t.Fatalf("policied=%v max_tokens=%d", policied, n)
+				}
+				if v := gjson.GetBytes(body, "thinking.type").String(); v != tc.wantType {
+					t.Fatalf("policied=%v thinking.type=%q: %s", policied, v, body)
+				}
+				if v := gjson.GetBytes(body, "output_config.effort").String(); v != tc.wantEffort {
+					t.Fatalf("policied=%v output_config.effort=%q", policied, v)
+				}
+				budget := gjson.GetBytes(body, "thinking.budget_tokens")
+				if tc.wantBudget == 0 && budget.Exists() || tc.wantBudget != 0 && budget.Int() != tc.wantBudget {
+					t.Fatalf("policied=%v thinking.budget_tokens=%s", policied, budget.Raw)
+				}
+				got[policied] = gjson.GetBytes(body, "max_tokens").Raw + gjson.GetBytes(body, "thinking").Raw + gjson.GetBytes(body, "output_config").Raw
+			}
+			if got[true] != got[false] {
+				t.Fatalf("policied upstream %s differs from unrestricted %s", got[true], got[false])
+			}
+			t.Logf("upstream max_tokens+thinking+output_config: %s", got[true])
+		})
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if got := gjson.GetBytes(last, "max_tokens").Int(); got != 40960 {
-		t.Fatalf("max_tokens=%d body=%s", got, last)
-	}
-	if got := gjson.GetBytes(last, "thinking.budget_tokens").Int(); got != 32768 {
-		t.Fatalf("thinking.budget_tokens=%d thinking=%s output_config=%s", got, gjson.GetBytes(last, "thinking").Raw, gjson.GetBytes(last, "output_config").Raw)
+}
+
+// net-lead's policy shape: only two Claude models and one Claude auth. A second
+// Claude auth and a Codex auth that both claim the model stay unused, and a
+// Codex model is forbidden.
+func TestKeyPolicyClaudeSingleAuthPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, model string
+		disableA    bool
+		want        int
+		wantCalls   int32
+	}{
+		{name: "opus on A", model: policyClaudeModel, want: 200, wantCalls: 1},
+		{name: "sonnet on A", model: "claude-sonnet-5-5", want: 200, wantCalls: 1},
+		{name: "A unavailable", model: policyClaudeModel, disableA: true, want: 503},
+		{name: "codex model", model: "gpt-6-luna", want: 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls, codexCalls atomic.Int32
+			var mu sync.Mutex
+			var last []byte
+			upstream := fakeClaudeUpstream(t, 200, &calls, &last, &mu, "verified-A")
+			defer upstream.Close()
+			codexUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				codexCalls.Add(1)
+				w.WriteHeader(500)
+			}))
+			defer codexUp.Close()
+			tokenCap, requestCap := int64(100), int64(10)
+			cfg := policyClaudeConfig([]string{policyClaudeModel, "claude-sonnet-5-5"}, []string{"A"}, &tokenCap, &requestCap)
+			server := newTestServerWithConfig(t, cfg)
+			server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
+			server.handlers.AuthManager.RegisterExecutor(executor.NewCodexExecutor(cfg))
+			registerPolicyClaudeAuths(t, server, upstream.URL, false, tc.disableA)
+			c := &auth.Auth{ID: "C", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "verified-C", "base_url": codexUp.URL}}
+			if _, err := server.handlers.AuthManager.Register(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			registry.GetGlobalRegistry().RegisterClient("C", "codex", []*registry.ModelInfo{{ID: "gpt-6-luna"}, {ID: policyClaudeModel}, {ID: "claude-sonnet-5-5"}})
+			defer registry.GetGlobalRegistry().UnregisterClient("C")
+			rr := sendPolicied(server, "/v1/responses", fmt.Sprintf(`{"model":%q,"input":"hello"}`, tc.model))
+			if rr.Code != tc.want {
+				t.Fatalf("status=%d want=%d: %s", rr.Code, tc.want, rr.Body.String())
+			}
+			if tc.want == 403 && !strings.Contains(rr.Body.String(), "api_key_model_forbidden") {
+				t.Fatalf("want api_key_model_forbidden: %s", rr.Body.String())
+			}
+			if calls.Load() != tc.wantCalls || codexCalls.Load() != 0 {
+				t.Fatalf("claude calls=%d want=%d codex calls=%d", calls.Load(), tc.wantCalls, codexCalls.Load())
+			}
+		})
 	}
 }
 
