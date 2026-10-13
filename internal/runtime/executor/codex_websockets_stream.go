@@ -255,11 +255,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
 
-	buffering := true
+	// Default on: hold the handshake until the first output or terminal frame so an overload or
+	// quota refusal can fail over. An explicit stream-bootstrap-buffering: false releases right
+	// after the exact-model identity is verified; the pre-identity hold always runs (fail-closed).
+	buffering := e.cfg == nil || e.cfg.Codex.StreamBootstrapBufferingEnabled()
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
 	var exhaustionLogged bool
-	if buffering && e.cfg != nil {
+	if e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
 	}
@@ -270,7 +273,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var outputItemsFallback [][]byte
 
 	var bufferedChunks [][]byte
-	var unverifiedObserverEvents [][]byte
+	var unverifiedObserverEvents codexUnverifiedObserverEvents
 	// bufferedFrames counts every websocket message read during bootstrap, including the ones the
 	// loop skips, so a peer that only sends frames the loop ignores cannot keep the window open.
 	bufferedFrames := 0
@@ -296,7 +299,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, modelErr
 	}
 
-	if buffering {
+	if buffering || !modelGuard.Authoritative() {
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				if sess != nil {
@@ -390,13 +393,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return failModelGuard(modelErr)
 			}
 			if modelGuard.Authoritative() {
-				for _, event := range unverifiedObserverEvents {
+				for _, event := range unverifiedObserverEvents.take() {
 					helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
 				}
-				unverifiedObserverEvents = nil
 				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
-			} else {
-				unverifiedObserverEvents = append(unverifiedObserverEvents, bytes.Clone(payload))
+			} else if !unverifiedObserverEvents.retain(opts.WebSocketResponseObserver != nil, payload) {
+				// Same fail-closed outcome as the bootstrap bound: unverified events never escape.
+				return failModelGuard(modelGuard.Missing())
 			}
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
@@ -531,7 +534,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if !modelGuard.Authoritative() && (!windowOpen || isTerminalEvent) {
 				return failModelGuard(modelGuard.Missing())
 			}
-			if windowOpen && (bufferableEvent || !modelGuard.Authoritative()) && !isTerminalEvent {
+			if windowOpen && (buffering && bufferableEvent || !modelGuard.Authoritative()) && !isTerminalEvent {
 				frameBytes := len(payload)
 				for i := range currentChunks {
 					frameBytes += len(currentChunks[i])
@@ -721,6 +724,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: modelErr})
 				return
 			}
+			// The bootstrap loop observed every frame up to and including the one that released
+			// the stream; later frames arrive here. Observe them at the same point (after the
+			// model guard), in wire order, in both modes.
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
@@ -958,4 +965,35 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 		optimizeMultiAgentV2: optimizeMultiAgentV2,
 		multiAgentV2Conflict: multiAgentV2Conflict,
 	}, nil
+}
+
+// codexUnverifiedObserverEvents holds frames read before the exact model is verified, for
+// delivery to the WebSocketResponseObserver once it is. The frame and byte bounds of the
+// bootstrap apply to every unverified frame and are checked before anything is retained; a
+// frame is copied only when an observer is configured.
+type codexUnverifiedObserverEvents struct {
+	events [][]byte
+	frames int
+	bytes  int
+}
+
+// retain accounts for one unverified frame and keeps a copy only when observed. It returns false,
+// retaining nothing, when the frame would exceed the bootstrap bound; the caller fails closed.
+func (u *codexUnverifiedObserverEvents) retain(observed bool, payload []byte) bool {
+	if u.frames >= codexBootstrapMaxBufferedFrames || u.bytes+len(payload) > codexBootstrapMaxBufferedBytes {
+		return false
+	}
+	u.frames++
+	u.bytes += len(payload)
+	if observed {
+		u.events = append(u.events, bytes.Clone(payload))
+	}
+	return true
+}
+
+// take returns the retained frames in arrival order and resets the bound.
+func (u *codexUnverifiedObserverEvents) take() [][]byte {
+	events := u.events
+	*u = codexUnverifiedObserverEvents{}
+	return events
 }

@@ -160,10 +160,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
-	buffering := true
+	// Default on: hold the handshake until the first output or terminal frame so an overload or
+	// quota refusal can fail over. An explicit stream-bootstrap-buffering: false releases right
+	// after the exact-model identity is verified; the pre-identity hold always runs (fail-closed).
+	buffering := e.cfg == nil || e.cfg.Codex.StreamBootstrapBufferingEnabled()
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
-	if buffering && e.cfg != nil {
+	if e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
 	}
@@ -204,7 +207,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	sawOutputDelta := false
-	if buffering {
+	if buffering || !modelGuard.Authoritative() {
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -315,7 +318,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
-			if (!modelGuard.Authoritative() || isHandshake) && !terminalSuccess {
+			if (!modelGuard.Authoritative() || (buffering && isHandshake)) && !terminalSuccess {
 				frameBytes := len(line)
 				for i := range chunks {
 					frameBytes += len(chunks[i])
