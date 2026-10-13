@@ -47,7 +47,7 @@ jobs:
           rm -f test-output
 
   artifact:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release/cliproxyapi-6efd8189')
     runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
     timeout-minutes: 15
     permissions:
