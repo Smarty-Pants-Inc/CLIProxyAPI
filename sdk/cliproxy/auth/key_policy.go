@@ -348,8 +348,12 @@ func CheckKeyPolicySend(req *http.Request) error {
 	account := selected.MetadataString("account_id")
 	bearer, apiKey := req.Header.Get("Authorization"), req.Header.Get("X-Api-Key")
 	if selected.Provider == "claude" {
-		// Claude sends exactly one credential header: x-api-key or a bearer token.
-		if token == "" || !((bearer == "Bearer "+token && apiKey == "") || (apiKey == token && bearer == "")) {
+		// Claude sends exactly one credential header with exactly one value:
+		// x-api-key or a bearer token, never both and never repeated.
+		bearers, apiKeys := req.Header.Values("Authorization"), req.Header.Values("X-Api-Key")
+		viaBearer := len(bearers) == 1 && bearer == "Bearer "+token && len(apiKeys) == 0
+		viaAPIKey := len(apiKeys) == 1 && apiKey == token && len(bearers) == 0
+		if token == "" || !(viaBearer || viaAPIKey) {
 			return policyError("api_key_policy_unavailable", 503)
 		}
 	} else if token == "" || bearer != "Bearer "+token || (selected.Attributes["api_key"] == "" && req.Header.Get("Chatgpt-Account-Id") != account) {
