@@ -17,7 +17,7 @@ func TestHomeExecutionTrustsDispatchedAvailability(t *testing.T) {
 	retryAt := time.Now().UTC().Add(time.Hour)
 	cases := []struct {
 		name  string
-		auth  Auth
+		auth  func(*Auth)
 		state *ModelState
 	}{
 		{
@@ -47,17 +47,22 @@ func TestHomeExecutionTrustsDispatchedAvailability(t *testing.T) {
 		},
 		{
 			name: "disabled credential",
-			auth: Auth{Disabled: true, Status: StatusDisabled},
+			auth: func(a *Auth) { a.Disabled, a.Status = true, StatusDisabled },
 		},
 		{
 			name: "credential cooldown without model states",
-			auth: Auth{Status: StatusError, Unavailable: true, NextRetryAfter: retryAt},
+			auth: func(a *Auth) { a.Status, a.Unavailable, a.NextRetryAfter = StatusError, true, retryAt },
 		},
 	}
 	for _, tc := range cases {
 		for _, path := range []string{"execute", "count_tokens", "stream", "websocket"} {
 			t.Run(tc.name+"/"+path, func(t *testing.T) {
-				auth := tc.auth
+				// Auth holds a lock: build it in place in the dispatcher slice, never copy it.
+				dispatcher := &accountedHomeExecutionDispatcher{auths: make([]Auth, 1)}
+				auth := &dispatcher.auths[0]
+				if tc.auth != nil {
+					tc.auth(auth)
+				}
 				auth.ID = "home-availability-auth"
 				auth.Provider = "home-execution"
 				auth.Attributes = map[string]string{"api_key": "test-key", "websockets": "true"}
@@ -70,7 +75,6 @@ func TestHomeExecutionTrustsDispatchedAvailability(t *testing.T) {
 				executionRegistry := executionregistry.New()
 				releases := make(chan executionregistry.ReleaseGroup, 2)
 				executionRegistry.SetReleaseSink(func(group executionregistry.ReleaseGroup, _ int64) { releases <- group })
-				dispatcher := &accountedHomeExecutionDispatcher{auths: []Auth{auth}}
 				manager.PublishHomeDispatch(dispatcher, executionRegistry, 1)
 				executor := &openAICompatPoolExecutor{id: auth.Provider}
 				manager.RegisterExecutor(executor)
@@ -184,17 +188,18 @@ func TestStandaloneExecutionStillFiltersUnavailableModels(t *testing.T) {
 
 func TestHomeRetainedWebsocketSelectionPreservesAvailabilityState(t *testing.T) {
 	const model = "grok-4.7-build-fast"
-	auth := Auth{
+	// Auth holds a lock: build it in place in the dispatcher slice, never copy it.
+	dispatcher := &accountedHomeExecutionDispatcher{auths: []Auth{{
 		ID: "home-retained-availability-auth", Provider: "home-execution",
 		Attributes: map[string]string{"websockets": "true"},
 		ModelStates: map[string]*ModelState{model: {
 			Status: StatusError, Unavailable: true,
 			LastError: &Error{HTTPStatus: 499, Message: "context canceled"},
 		}},
-	}
+	}}}
+	auth := &dispatcher.auths[0]
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
-	dispatcher := &accountedHomeExecutionDispatcher{auths: []Auth{auth}}
 	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
 	executor := &retainingHomeExecutionExecutor{}
 	manager.RegisterExecutor(executor)
