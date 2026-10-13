@@ -452,7 +452,7 @@ func authMetadata(auth *coreauth.Auth) map[string]any {
 	if auth == nil {
 		return nil
 	}
-	return auth.Metadata
+	return auth.CloneMetadata()
 }
 
 func cloneHeader(in http.Header) http.Header {

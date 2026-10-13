@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 const (
@@ -14,12 +16,8 @@ const (
 	claudeDeviceIDByteSize     = 32
 )
 
-// claudeDevicePoolMu guards every concurrent access to a Claude credential's
-// Auth.Metadata map, not just the device pool. A single Auth is shared by all
-// in-flight requests using that credential, and Go maps are not safe for
-// concurrent read/write, so the account-profile and refresh paths have to take
-// the same lock as the pool paths. Reaching into Auth.Metadata directly from a
-// request path is a data race even when the keys differ.
+// claudeDevicePoolMu only protects the legacy standalone-map helper. Shared
+// credentials must use EnsureDeviceIDPoolFor and the Auth-owned metadata lock.
 var claudeDevicePoolMu sync.Mutex
 
 // GenerateDeviceIDPool creates the fixed-size device pool stored with a Claude credential.
@@ -114,42 +112,21 @@ func EnsureDeviceIDPool(metadata map[string]any) ([]string, bool, error) {
 	return ensureDeviceIDPoolLocked(metadata)
 }
 
-// EnsureDeviceIDPoolFor lazily initializes the metadata map and then ensures the
-// pool, both under the device pool lock.
-//
-// A single *Auth is shared by every concurrent request that selects the same
-// credential, so initializing the map field outside this lock races with the
-// writes below and can abort the process with "concurrent map writes". Callers
-// holding a shared credential must reach the pool through this package rather
-// than touching the map directly.
-func EnsureDeviceIDPoolFor(metadata *map[string]any) ([]string, bool, error) {
-	if metadata == nil {
-		return nil, false, fmt.Errorf("ensure Claude device pool: metadata pointer is nil")
+// EnsureDeviceIDPoolFor initializes and repairs the pool under the Auth-owned lock.
+func EnsureDeviceIDPoolFor(auth *coreauth.Auth) (deviceIDs []string, changed bool, err error) {
+	if auth == nil {
+		return nil, false, fmt.Errorf("ensure Claude device pool: auth is nil")
 	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		*metadata = make(map[string]any)
-	}
-	return ensureDeviceIDPoolLocked(*metadata)
+	auth.WithMetadata(func(metadata map[string]any) {
+		deviceIDs, changed, err = ensureDeviceIDPoolLocked(metadata)
+	})
+	return
 }
 
-// ReadDeviceIDPool returns the stored pool value, initializing the map when
-// needed, under the device pool lock. Slice values are copied so a caller can
-// never mutate the stored credential identity after the lock is released.
-func ReadDeviceIDPool(metadata *map[string]any) any {
-	if metadata == nil {
-		return nil
-	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		*metadata = make(map[string]any)
-		return nil
-	}
-	switch stored := (*metadata)[ClaudeDeviceIDsMetadataKey].(type) {
+// ReadDeviceIDPool returns a defensive copy of the stored immutable pool value.
+func ReadDeviceIDPool(auth *coreauth.Auth) any {
+	raw, _ := auth.MetadataValue(ClaudeDeviceIDsMetadataKey)
+	switch stored := raw.(type) {
 	case []string:
 		return append([]string(nil), stored...)
 	case []any:
@@ -159,96 +136,39 @@ func ReadDeviceIDPool(metadata *map[string]any) any {
 	}
 }
 
-// StoreDeviceIDPool writes a defensive copy of deviceIDs under the device pool lock.
-func StoreDeviceIDPool(metadata *map[string]any, deviceIDs []string) {
-	if metadata == nil {
-		return
-	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		*metadata = make(map[string]any)
-	}
-	(*metadata)[ClaudeDeviceIDsMetadataKey] = append([]string(nil), deviceIDs...)
+// StoreDeviceIDPool replaces the pool with a defensive copy under the Auth-owned lock.
+func StoreDeviceIDPool(auth *coreauth.Auth, deviceIDs []string) {
+	auth.SetMetadata(ClaudeDeviceIDsMetadataKey, append([]string(nil), deviceIDs...))
 }
 
-// ReadMetadataString reads a string-valued metadata entry under the metadata
-// lock, so it cannot observe a map being concurrently written by another path.
-func ReadMetadataString(metadata *map[string]any, key string) string {
-	if metadata == nil {
-		return ""
-	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		return ""
-	}
-	value, _ := (*metadata)[key].(string)
-	return value
+// ReadMetadataString reads an entry under the Auth-owned metadata lock.
+func ReadMetadataString(auth *coreauth.Auth, key string) string {
+	return auth.MetadataString(key)
 }
 
-// ReadMetadataBool reads a bool-valued metadata entry under the metadata lock (smarty-dev#7671).
-func ReadMetadataBool(metadata *map[string]any, key string) bool {
-	if metadata == nil {
-		return false
-	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		return false
-	}
-	value, _ := (*metadata)[key].(bool)
-	return value
+// ReadMetadataBool reads an entry under the Auth-owned metadata lock.
+func ReadMetadataBool(auth *coreauth.Auth, key string) bool {
+	return auth.MetadataBool(key)
 }
 
-// StoreMetadataString writes a string-valued metadata entry under the metadata
-// lock, initializing the map when needed. Empty values are skipped so callers can
-// forward optional fields without erasing a previously resolved value.
-func StoreMetadataString(metadata *map[string]any, key, value string) {
-	if metadata == nil || strings.TrimSpace(value) == "" {
-		return
-	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		*metadata = make(map[string]any)
-	}
-	(*metadata)[key] = value
-}
-
-// StoreMetadataValue writes an arbitrary metadata entry under the metadata lock,
-// initializing the map when needed.
-func StoreMetadataValue(metadata *map[string]any, key string, value any) {
-	if metadata == nil {
-		return
-	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		*metadata = make(map[string]any)
-	}
-	(*metadata)[key] = value
-}
-
-// EnsureMetadataMap initializes the metadata map under the metadata lock.
-func EnsureMetadataMap(metadata *map[string]any) {
-	if metadata == nil {
-		return
-	}
-	claudeDevicePoolMu.Lock()
-	defer claudeDevicePoolMu.Unlock()
-
-	if *metadata == nil {
-		*metadata = make(map[string]any)
+// StoreMetadataString skips empty optional fields, preserving previously resolved values.
+func StoreMetadataString(auth *coreauth.Auth, key, value string) {
+	if strings.TrimSpace(value) != "" {
+		auth.SetMetadata(key, value)
 	}
 }
 
-// ensureDeviceIDPoolLocked requires claudeDevicePoolMu to be held.
+// StoreMetadataValue replaces an entry under the Auth-owned metadata lock.
+func StoreMetadataValue(auth *coreauth.Auth, key string, value any) {
+	auth.SetMetadata(key, value)
+}
+
+// EnsureMetadataMap initializes the map under the Auth-owned metadata lock.
+func EnsureMetadataMap(auth *coreauth.Auth) {
+	auth.WithMetadata(func(map[string]any) {})
+}
+
+// ensureDeviceIDPoolLocked requires the owning lock or an unshared standalone map.
 func ensureDeviceIDPoolLocked(metadata map[string]any) ([]string, bool, error) {
 	if metadata == nil {
 		return nil, false, fmt.Errorf("ensure Claude device pool: metadata is nil")

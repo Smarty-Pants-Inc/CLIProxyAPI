@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/testwait"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
@@ -88,7 +88,9 @@ func TestResponsesHandlerRegistersScannerMultilineBeforeClientDelivery(t *testin
 	h := openai.NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
 	router.POST("/v1/responses", h.Responses)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// onSigned cancels at the client write; the test-deadline bound only ends a
+	// hang, never a slow persisted publication on a loaded CI runner.
+	ctx, cancel := context.WithCancel(testwait.Context(t))
 	defer cancel()
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"`+model+`","input":[],"stream":true}`)).WithContext(ctx)
 	request.Header.Set("Content-Type", "application/json")

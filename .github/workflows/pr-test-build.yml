@@ -90,6 +90,36 @@ jobs:
         timeout-minutes: 5
         run: go test -race -count=3 ./internal/api/middleware/
 
+  # smarty-dev#4273 / #8742: a gateway swap must not break sessions compacted on the build it replaces. Build the
+  # PR's BASE and HEAD, have BASE compact a Codex and a Claude session against a local stub upstream, then
+  # cold-start HEAD on (i) a copy of BASE's state dir and (ii) an empty one and replay both sessions: all four must
+  # answer 200. Loopback only, scratch config and auth, no real accounts.
+  compaction-replay:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build BASE and HEAD
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/cpa-head" ./cmd/server
+          git worktree add --detach "$RUNNER_TEMP/base-src" "$BASE_SHA"
+          (cd "$RUNNER_TEMP/base-src" && go build -o "$RUNNER_TEMP/cpa-base" ./cmd/server)
+      - name: Replay BASE-compacted sessions on HEAD
+        timeout-minutes: 10
+        run: python3 .github/scripts/compaction-replay.py "$RUNNER_TEMP/cpa-base" "$RUNNER_TEMP/cpa-head"
+
   artifact:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)

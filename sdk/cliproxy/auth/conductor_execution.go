@@ -151,7 +151,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		opts.OriginalRequest = req.Payload
 	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = m.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		return cliproxyexecutor.Response{}, errOrigin
 	}
@@ -222,7 +222,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		opts.OriginalRequest = req.Payload
 	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = m.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		return cliproxyexecutor.Response{}, errOrigin
 	}
@@ -361,7 +361,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		opts.OriginalRequest = req.Payload
 	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = m.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		return nil, errOrigin
 	}

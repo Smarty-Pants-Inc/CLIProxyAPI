@@ -86,9 +86,11 @@ func TestCodexDuplexAmbiguousJSONRealManagerBeforeWrite(t *testing.T) {
 		{"known-a", `{"type":"response.steer","previous_response_id":"first","input":[` + knownA + `],"unknown_field":{"keep":"raw"}}`, "", 0},
 		// Every entry is known on A: the finite block limit must count blocks,
 		// not just distinct digests, and cannot silently truncate constraints.
-		{"257-blocks", `{"type":"response.steer","previous_response_id":"first","input":[` + strings.Repeat(knownA+",", 256) + knownA + `]}`, "compaction_json_rejected", http.StatusBadRequest},
-		{"mixed-signers", `{"type":"response.steer","previous_response_id":"first","input":[` + knownA + `,{"type":"compaction","encrypted_content":"known-b"}]}`, "compaction_affinity_conflict", http.StatusConflict},
-		{"unknown-signer", `{"type":"response.steer","previous_response_id":"first","input":[{"type":"compaction","encrypted_content":"unknown"}]}`, "compaction_affinity_missing", http.StatusConflict},
+		// smarty-dev#8742: these degrade (code "degrade"): the blocks socket A
+		// did not sign, or all blocks over the limit, are removed, the rest is sent.
+		{"257-blocks", `{"type":"response.steer","previous_response_id":"first","input":[` + strings.Repeat(knownA+",", 256) + knownA + `]}`, "degrade", 0},
+		{"mixed-signers", `{"type":"response.steer","previous_response_id":"first","input":[` + knownA + `,{"type":"compaction","encrypted_content":"known-b"}]}`, "degrade", 0},
+		{"unknown-signer", `{"type":"response.steer","previous_response_id":"first","input":[{"type":"compaction","encrypted_content":"unknown"}]}`, "degrade", 0},
 	}
 	for _, last := range []string{"known-b", "unknown"} {
 		block := fmt.Sprintf(`{"type":"compaction","encrypted_content":%q}`, last)
@@ -113,7 +115,8 @@ func TestCodexDuplexAmbiguousJSONRealManagerBeforeWrite(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			allowed := tc.code == ""
+			degrade := tc.code == "degrade"
+			allowed := tc.code == "" || degrade
 			submitted := []byte(tc.payload)
 			original := bytes.Clone(submitted)
 			var connections, initialWrites, followupWrites atomic.Int32
@@ -275,7 +278,16 @@ func TestCodexDuplexAmbiguousJSONRealManagerBeforeWrite(t *testing.T) {
 				if streamErr != nil || !completedSecond || followupWrites.Load() != 1 || len(receipts) != 1 {
 					t.Fatalf("valid steer: err=%v completed=%v writes=%d receipts=%d", streamErr, completedSecond, followupWrites.Load(), len(receipts))
 				}
-				if receipt := <-receipts; !bytes.Equal(receipt, original) {
+				receipt := <-receipts
+				if degrade {
+					if bytes.Contains(receipt, []byte("known-b")) || bytes.Contains(receipt, []byte(`"unknown"`)) ||
+						(tc.name == "257-blocks" && bytes.Contains(receipt, []byte(`"compaction"`))) ||
+						(tc.name == "mixed-signers" && !bytes.Contains(receipt, []byte("known-a"))) {
+						t.Fatalf("degraded steer sent a block socket A did not sign: %.300s", receipt)
+					}
+					return
+				}
+				if !bytes.Equal(receipt, original) {
 					t.Fatalf("valid raw steer changed on actual wire: %q", receipt)
 				}
 				return

@@ -148,13 +148,13 @@ func (e *pluginRefreshCompatExecutor) Refresh(ctx context.Context, auth *coreaut
 }
 
 func authHasRefreshToken(auth *coreauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
+	if auth == nil {
 		return false
 	}
-	if token, _ := auth.Metadata["refresh_token"].(string); strings.TrimSpace(token) != "" {
+	if token := auth.MetadataString("refresh_token"); strings.TrimSpace(token) != "" {
 		return true
 	}
-	if token, _ := auth.Metadata["refreshToken"].(string); strings.TrimSpace(token) != "" {
+	if token := auth.MetadataString("refreshToken"); strings.TrimSpace(token) != "" {
 		return true
 	}
 	return false

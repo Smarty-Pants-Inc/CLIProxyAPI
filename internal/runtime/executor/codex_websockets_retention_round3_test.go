@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/testwait"
 	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -54,6 +55,10 @@ func TestCodexDuplexRetentionRound3ActualSocket(t *testing.T) {
 		t.Run(action, func(t *testing.T) {
 			id, model := t.Name()+"-A", "retention-socket-model"
 			var connections, followups atomic.Int32
+			// Hang bound for both peers, from the test deadline rather than a
+			// fixed budget a loaded CI runner can exceed.
+			hangCtx := testwait.Context(t)
+			hangDeadline, _ := hangCtx.Deadline()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 				if err != nil {
@@ -62,7 +67,7 @@ func TestCodexDuplexRetentionRound3ActualSocket(t *testing.T) {
 				}
 				defer conn.Close()
 				n := connections.Add(1)
-				_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+				_ = conn.SetReadDeadline(hangDeadline)
 				if _, _, err := conn.ReadMessage(); err != nil {
 					return
 				}
@@ -121,7 +126,7 @@ func TestCodexDuplexRetentionRound3ActualSocket(t *testing.T) {
 			registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
 			defer registry.GetGlobalRegistry().UnregisterClient(id)
 			run := func(m *auth.Manager, session, capsule string, produce bool) {
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				ctx, cancel := context.WithCancel(hangCtx)
 				defer cancel()
 				input := make(chan core.WebsocketInput, 1)
 				ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)

@@ -82,7 +82,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
 		return nil, nil
 	}
-	NormalizeCredentialMetadata(auth.Metadata)
+	NormalizeAuthMetadata(auth)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("register auth: %w", errWeight)
 	}
@@ -190,7 +190,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
-	NormalizeCredentialMetadata(auth.Metadata)
+	NormalizeAuthMetadata(auth)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("update auth: %w", errWeight)
 	}
@@ -229,13 +229,13 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		merged := MergeRefreshedAuth(base, existing, auth)
 		if merged != nil {
 			auth = merged
-			NormalizeCredentialMetadata(auth.Metadata)
+			NormalizeAuthMetadata(auth)
 		}
 	} else if mode == updateModePrepare {
 		merged := MergePreparedAuth(base, existing, auth)
 		if merged != nil {
 			auth = merged
-			NormalizeCredentialMetadata(auth.Metadata)
+			NormalizeAuthMetadata(auth)
 		}
 	}
 	if auth.RegistrationEpoch != 0 && auth.RegistrationEpoch < m.authEpochs[auth.ID] {
@@ -460,7 +460,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
-		NormalizeCredentialMetadata(auth.Metadata)
+		NormalizeAuthMetadata(auth)
 		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 			continue
 		}
@@ -543,7 +543,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		return nil
 	}
 	// Skip persistence when metadata is absent (e.g., runtime-only auths).
-	if auth.Metadata == nil {
+	if auth.CloneMetadata() == nil {
 		return nil
 	}
 
