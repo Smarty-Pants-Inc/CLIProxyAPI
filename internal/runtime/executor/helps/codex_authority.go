@@ -9,7 +9,8 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-// The selected credential snapshot fixes both the Responses URL and the wire
+// The selected credential snapshot fixes both the generation URL (Codex
+// Responses or Claude Messages) and the wire
 // authority. CheckKeyPolicySend separately fences publication and credentials.
 // Keep this check at the transport boundary, after custom-header expansion.
 type codexAuthorityRoundTripper struct {
@@ -23,14 +24,24 @@ func restrictCodexAuthority(ctx context.Context, auth *cliproxyauth.Auth, base h
 		return base
 	}
 	bound := &codexAuthorityRoundTripper{base: base}
-	if auth == nil || auth.Provider != "codex" {
+	if auth == nil || (auth.Provider != "codex" && auth.Provider != "claude") {
 		return bound
 	}
 	baseURL := auth.Attributes["base_url"]
-	if baseURL == "" {
-		baseURL = "https://chatgpt.com/backend-api/codex"
+	var endpoint *url.URL
+	var errParse error
+	if auth.Provider == "claude" {
+		// Must match the Claude executor's Messages URL byte for byte.
+		if baseURL == "" {
+			baseURL = "https://api.anthropic.com"
+		}
+		endpoint, errParse = url.Parse(baseURL + "/v1/messages?beta=true")
+	} else {
+		if baseURL == "" {
+			baseURL = "https://chatgpt.com/backend-api/codex"
+		}
+		endpoint, errParse = url.Parse(strings.TrimSuffix(baseURL, "/") + "/responses")
 	}
-	endpoint, errParse := url.Parse(strings.TrimSuffix(baseURL, "/") + "/responses")
 	if errParse != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" || endpoint.Opaque != "" {
 		return bound
 	}
