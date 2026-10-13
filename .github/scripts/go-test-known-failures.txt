@@ -2,8 +2,3 @@
 # Run all packages and all other tests. No package skips, prefixes, wildcards, or network credentials.
 # Remove entries as their fixtures/assertions are repaired; model-integrity enforcement stays fail-closed.
 
-# smarty-dev#3555: Real bug: both Codex executors force bootstrap buffering even after exact identity with the option disabled. Honor the opt-in after verification; retain mandatory pre-identity buffering.
-TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped
-TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped
-TestCodexExecutor_BootstrapBuffering_DefaultDisabledPassthrough
-TestCodexWebsocketsExecutor_BootstrapBuffering_DefaultDisabledPassthrough

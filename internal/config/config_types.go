@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -202,8 +203,16 @@ type CodexConfig struct {
 	// reasoning phase instead of ending at the first keepalive: a clean end with no terminal event
 	// is request-scoped on SSE and stops there, while a websocket close or a transport error on
 	// either transport is not, so the request may be retried on another credential.
-	// Default is false.
+	//
+	// Default is ON: when the key is absent, the hold runs (see StreamBootstrapBufferingEnabled).
+	// An explicit `stream-bootstrap-buffering: false` opts out: the stream is released right after
+	// the exact-model identity is verified (frames before that stay withheld, fail-closed).
+	// Trade-off of opting out: an overload or quota refusal that arrives after the release is
+	// delivered in-stream to the client and is NOT failed over to another credential.
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
+	// StreamBootstrapBufferingSet records that the loaded YAML named stream-bootstrap-buffering,
+	// so an absent key keeps the default (on) and only an explicit false opts out.
+	StreamBootstrapBufferingSet bool `yaml:"-" json:"-"`
 	// StreamBootstrapTimeout specifies an optional maximum duration to hold back uncommitted response
 	// headers during bootstrap buffering before releasing the stream to the client.
 	// Defaults to "0" (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
@@ -220,6 +229,79 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
+}
+
+// StreamBootstrapBufferingEnabled reports whether the bootstrap hold runs past identity
+// verification. It is on unless the config explicitly sets stream-bootstrap-buffering: false.
+func (c *CodexConfig) StreamBootstrapBufferingEnabled() bool {
+	return c == nil || c.StreamBootstrapBuffering || !c.StreamBootstrapBufferingSet
+}
+
+// UnmarshalYAML decodes CodexConfig and records whether stream-bootstrap-buffering was present.
+func (c *CodexConfig) UnmarshalYAML(value *yaml.Node) error {
+	type plain CodexConfig
+	if err := value.Decode((*plain)(c)); err != nil {
+		return err
+	}
+	c.StreamBootstrapBufferingSet = false
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			if value.Content[i].Value == "stream-bootstrap-buffering" && value.Content[i+1].Tag != "!!null" {
+				c.StreamBootstrapBufferingSet = true
+			}
+		}
+	}
+	return nil
+}
+
+// MarshalYAML omits stream-bootstrap-buffering while it is unset and false, so a YAML snapshot
+// or save of a default config does not turn the default (on) into an explicit opt-out.
+func (c CodexConfig) MarshalYAML() (any, error) {
+	type plain CodexConfig
+	var node yaml.Node
+	if err := node.Encode(plain(c)); err != nil {
+		return nil, err
+	}
+	if !c.StreamBootstrapBufferingSet && !c.StreamBootstrapBuffering && node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == "stream-bootstrap-buffering" {
+				node.Content = append(node.Content[:i], node.Content[i+2:]...)
+				break
+			}
+		}
+	}
+	return &node, nil
+}
+
+// UnmarshalJSON decodes CodexConfig and records whether stream-bootstrap-buffering was present
+// and non-null, as UnmarshalYAML does.
+func (c *CodexConfig) UnmarshalJSON(data []byte) error {
+	type plain CodexConfig
+	if err := json.Unmarshal(data, (*plain)(c)); err != nil {
+		return err
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	raw, ok := keys["stream-bootstrap-buffering"]
+	c.StreamBootstrapBufferingSet = ok && string(raw) != "null"
+	return nil
+}
+
+// MarshalJSON omits stream-bootstrap-buffering while it is unset and false, as MarshalYAML does.
+func (c CodexConfig) MarshalJSON() ([]byte, error) {
+	type plain CodexConfig
+	data, err := json.Marshal(plain(c))
+	if err != nil || c.StreamBootstrapBufferingSet || c.StreamBootstrapBuffering {
+		return data, err
+	}
+	var fields map[string]json.RawMessage
+	if err = json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "stream-bootstrap-buffering")
+	return json.Marshal(fields)
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
