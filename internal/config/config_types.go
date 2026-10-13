@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -245,7 +246,7 @@ func (c *CodexConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.StreamBootstrapBufferingSet = false
 	if value.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(value.Content); i += 2 {
-			if value.Content[i].Value == "stream-bootstrap-buffering" {
+			if value.Content[i].Value == "stream-bootstrap-buffering" && value.Content[i+1].Tag != "!!null" {
 				c.StreamBootstrapBufferingSet = true
 			}
 		}
@@ -270,6 +271,37 @@ func (c CodexConfig) MarshalYAML() (any, error) {
 		}
 	}
 	return &node, nil
+}
+
+// UnmarshalJSON decodes CodexConfig and records whether stream-bootstrap-buffering was present
+// and non-null, as UnmarshalYAML does.
+func (c *CodexConfig) UnmarshalJSON(data []byte) error {
+	type plain CodexConfig
+	if err := json.Unmarshal(data, (*plain)(c)); err != nil {
+		return err
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	raw, ok := keys["stream-bootstrap-buffering"]
+	c.StreamBootstrapBufferingSet = ok && string(raw) != "null"
+	return nil
+}
+
+// MarshalJSON omits stream-bootstrap-buffering while it is unset and false, as MarshalYAML does.
+func (c CodexConfig) MarshalJSON() ([]byte, error) {
+	type plain CodexConfig
+	data, err := json.Marshal(plain(c))
+	if err != nil || c.StreamBootstrapBufferingSet || c.StreamBootstrapBuffering {
+		return data, err
+	}
+	var fields map[string]json.RawMessage
+	if err = json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "stream-bootstrap-buffering")
+	return json.Marshal(fields)
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
