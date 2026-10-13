@@ -1803,3 +1803,63 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_StatusBearingErrorAfterTimeo
 		t.Fatal("expected status-bearing error to be delivered in-stream")
 	}
 }
+
+// Upstream issue 6503 requires that a disconnect cannot discard a quota error.
+// The fork goes further: the request owns terminal delivery, so no out-of-band
+// disconnect may race its final write, even after delivery to the conductor.
+func TestCodexWebsocketsExecutor_UnbufferedUpstreamErrorIsDeliveredBeforeDisconnectNotify(t *testing.T) {
+	frames := map[string]string{
+		"error frame":     `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}`,
+		"response.failed": `{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","status_code":429,"message":"The usage limit has been reached","resets_in_seconds":600}}}`,
+	}
+	for name, frame := range frames {
+		t.Run(name, func(t *testing.T) {
+			// Verify the served model and release the fork's bootstrap hold before
+			// the refusal, so this exercises the asynchronous stream path.
+			server := codexWebsocketServerHoldingConnection(t, codexCreatedEvent, codexOutputDeltaEvent, frame)
+			defer server.Close()
+
+			exec := NewCodexWebsocketsExecutor(codexBufferingConfig(false))
+			exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+			defer exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+
+			const sessionID = "issue-6503-session"
+			disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+			if disconnectCh == nil {
+				t.Fatal("expected a disconnect channel")
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			req, opts := codexWebsocketRequest()
+			opts.Metadata = map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: sessionID}
+			result, err := exec.ExecuteStream(ctx, codexTestAuth(server.URL), req, opts)
+			if err != nil {
+				t.Fatalf("ExecuteStream() error = %v", err)
+			}
+
+			var streamErr error
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if streamErr == nil {
+				t.Fatal("the upstream usage-limit error was dropped by the disconnect-triggered cancellation")
+			}
+			if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
+				t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+			}
+			// Join finishStream through its session lock before checking absence.
+			sess := exec.getOrCreateSession(sessionID)
+			sess.reqMu.Lock()
+			sess.reqMu.Unlock()
+			select {
+			case <-disconnectCh:
+				t.Fatal("out-of-band disconnect raced the request-owned final refusal")
+			default:
+			}
+		})
+	}
+}

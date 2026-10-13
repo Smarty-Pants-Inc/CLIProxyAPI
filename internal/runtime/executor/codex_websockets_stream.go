@@ -725,6 +725,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
+				// The handler owns terminal delivery and closure. Delivery to the conductor
+				// is not a downstream write acknowledgement, so do not notify disconnect
+				// here and race its typed final refusal.
 				if sess != nil {
 					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
 				}
@@ -743,6 +746,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
+				// Keep session ownership until finishStream; the handler closes after
+				// writing the refusal, as in the upstream error branch above.
 				if sess != nil {
 					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "terminal_failure", streamErr)
 				}

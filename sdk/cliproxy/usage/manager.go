@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,7 +39,11 @@ type Record struct {
 	APIKey       string
 	// APIKeySHA256 preserves the authenticated client identity for native accounting
 	// when APIKey is redacted. Native consumers must not hash this digest again.
-	APIKeySHA256    string
+	APIKeySHA256 string
+	// IsNativeKey reports whether the client API key was authenticated by CPA's native config provider.
+	IsNativeKey bool
+	// AccessProvider identifies the client request authentication provider (e.g. "config-inline" or plugin ID).
+	AccessProvider  string
 	SessionID       string
 	ParentSessionID string
 	AuthID          string
@@ -102,6 +107,9 @@ type generateContextKey struct{}
 type streamContextKey struct{}
 type executionRequestIDContextKey struct{}
 type executionTraceIDContextKey struct{}
+type apiKeyContextKey struct{}
+type accessProviderContextKey struct{}
+type isNativeKeyContextKey struct{}
 
 // WithExecutionRequestID attaches a specific execution instance request ID to the context.
 func WithExecutionRequestID(ctx context.Context, requestID string) context.Context {
@@ -280,6 +288,108 @@ func StreamFromContext(ctx context.Context) bool {
 	}
 }
 
+// WithAccessProvider stores the client authentication provider identifier for usage sinks.
+func WithAccessProvider(ctx context.Context, provider string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, accessProviderContextKey{}, provider)
+}
+
+// WithAPIKey stores the client API key for usage sinks.
+func WithAPIKey(ctx context.Context, apiKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, apiKeyContextKey{}, apiKey)
+}
+
+// APIKeyFromContext returns the client API key stored in ctx or gin.Context.
+func APIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(apiKeyContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	}
+	if ginCtx, ok := ctx.Value("gin").(interface{ Get(string) (any, bool) }); ok && ginCtx != nil {
+		if v, exists := ginCtx.Get("userApiKey"); exists {
+			switch value := v.(type) {
+			case string:
+				return strings.TrimSpace(value)
+			case fmt.Stringer:
+				return strings.TrimSpace(value.String())
+			default:
+				return strings.TrimSpace(fmt.Sprintf("%v", value))
+			}
+		}
+	}
+	return ""
+}
+
+// AccessProviderFromContext returns the client authentication provider stored in ctx.
+func AccessProviderFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(accessProviderContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	}
+	if ginCtx, ok := ctx.Value("gin").(interface{ Get(string) (any, bool) }); ok && ginCtx != nil {
+		if v, exists := ginCtx.Get("accessProvider"); exists {
+			switch value := v.(type) {
+			case string:
+				return strings.TrimSpace(value)
+			case []byte:
+				return strings.TrimSpace(string(value))
+			}
+		}
+	}
+	return ""
+}
+
+// WithIsNativeKey stores whether the client API key is native to CPA for usage sinks.
+func WithIsNativeKey(ctx context.Context, isNative bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, isNativeKeyContextKey{}, isNative)
+}
+
+// IsNativeKeyFromContext returns whether the client API key is native to CPA if explicitly set in ctx.
+func IsNativeKeyFromContext(ctx context.Context) (bool, bool) {
+	if ctx == nil {
+		return false, false
+	}
+	raw := ctx.Value(isNativeKeyContextKey{})
+	if value, ok := raw.(bool); ok {
+		return value, true
+	}
+	return false, false
+}
+
+// IsNativeAccessProvider reports whether provider represents CPA's built-in inline key provider.
+func IsNativeAccessProvider(provider string) bool {
+	p := strings.TrimSpace(provider)
+	return strings.EqualFold(p, "config-inline") || strings.EqualFold(p, "config-api-key")
+}
+
 // GenerateFlag returns a pointer suitable for Record.Generate.
 func GenerateFlag(generate bool) *bool {
 	return &generate
@@ -413,6 +523,25 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.TraceID = trID
 		}
 	}
+	if strings.TrimSpace(record.APIKey) == "" {
+		if key := APIKeyFromContext(ctx); key != "" {
+			record.APIKey = key
+		}
+	}
+	if strings.TrimSpace(record.AccessProvider) == "" {
+		if provider := AccessProviderFromContext(ctx); provider != "" {
+			record.AccessProvider = provider
+		}
+	}
+	if !record.IsNativeKey {
+		if nativeExplicit, ok := IsNativeKeyFromContext(ctx); ok {
+			record.IsNativeKey = nativeExplicit
+		} else if record.AccessProvider != "" {
+			record.IsNativeKey = IsNativeAccessProvider(record.AccessProvider)
+		}
+	}
+	// Enrich before redaction so native accounting sees the client digest, but
+	// neither observers nor restricted queue records can see the raw key.
 	withoutPlugins := ctx != nil && ctx.Value(withoutPluginsKey{}) == true
 	if withoutPlugins {
 		if record.APIKeySHA256 == "" {
