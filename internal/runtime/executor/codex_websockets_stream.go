@@ -721,6 +721,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: modelErr})
 				return
 			}
+			// With bootstrap buffering disabled, the bootstrap loop above stops right after the
+			// frame that verifies identity (normally response.created), so every later frame
+			// arrives here. Observe it at the same point as the bootstrap loop does, in wire
+			// order, so observers do not lose events. The buffering-enabled path is unchanged.
+			if !buffering {
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			}
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
