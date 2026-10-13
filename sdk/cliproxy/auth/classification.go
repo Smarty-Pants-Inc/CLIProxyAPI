@@ -123,7 +123,8 @@ func authHasOAuthMetadata(auth *Auth) bool {
 	if token, ok := raw.(map[string]any); ok && len(token) > 0 {
 		return true
 	}
-	if siwc, ok := auth.Metadata["siwc"].(map[string]any); ok && len(siwc) > 0 {
+	raw, _ = auth.MetadataValue("siwc")
+	if siwc, ok := raw.(map[string]any); ok && len(siwc) > 0 {
 		return true
 	}
 	return false

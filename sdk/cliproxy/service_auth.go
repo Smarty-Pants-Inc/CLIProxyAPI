@@ -367,7 +367,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		}
 		auth.CreatedAt = existing.CreatedAt
 		if existing.Metadata != nil {
-			if persistedHints, hasHints := existing.Metadata[antigravityPersistedHintsMetaKey]; hasHints {
+			if persistedHints, hasHints := existing.MetadataValue(antigravityPersistedHintsMetaKey); hasHints {
 				if auth.Metadata == nil {
 					auth.Metadata = make(map[string]any)
 				}

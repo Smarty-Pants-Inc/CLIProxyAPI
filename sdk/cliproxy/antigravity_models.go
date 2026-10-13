@@ -168,12 +168,12 @@ func (s *Service) persistedAntigravityHintsForAuth(auth *coreauth.Auth, endpoint
 			return antigravityModelCapabilityHints{}, false
 		}
 	}
-	project, _ := auth.Metadata["project_id"].(string)
-	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint); ok {
+	project := auth.MetadataString("project_id")
+	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.CloneMetadata(), project, endpoint); ok {
 		return hints, true
 	}
 	if current != nil {
-		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint)
+		return parsePersistedAntigravityCapabilityHints(current.CloneMetadata(), project, endpoint)
 	}
 	return antigravityModelCapabilityHints{}, false
 }
@@ -195,7 +195,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 	if stale {
 		return false
 	}
-	project, _ := auth.Metadata["project_id"].(string)
+	project := auth.MetadataString("project_id")
 	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, hints)
 	persisted, preempted := s.coreManager.PersistMetadataEntry(ctx, auth.ID, auth.RegistrationEpoch, antigravityPersistedHintsMetaKey, value, func(existing *coreauth.Auth) bool {
 		if existing == nil || existing.Disabled || existing.Provider != auth.Provider || existing.RegistrationEpoch != auth.RegistrationEpoch || s.antigravityCapabilityKey(existing) != expectedKey {
