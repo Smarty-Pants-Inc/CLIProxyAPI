@@ -273,7 +273,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var outputItemsFallback [][]byte
 
 	var bufferedChunks [][]byte
-	var unverifiedObserverEvents [][]byte
+	var unverifiedObserverEvents codexUnverifiedObserverEvents
 	// bufferedFrames counts every websocket message read during bootstrap, including the ones the
 	// loop skips, so a peer that only sends frames the loop ignores cannot keep the window open.
 	bufferedFrames := 0
@@ -393,13 +393,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return failModelGuard(modelErr)
 			}
 			if modelGuard.Authoritative() {
-				for _, event := range unverifiedObserverEvents {
+				for _, event := range unverifiedObserverEvents.take() {
 					helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
 				}
-				unverifiedObserverEvents = nil
 				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
-			} else {
-				unverifiedObserverEvents = append(unverifiedObserverEvents, bytes.Clone(payload))
+			} else if !unverifiedObserverEvents.retain(opts.WebSocketResponseObserver != nil, payload) {
+				// Same fail-closed outcome as the bootstrap bound: unverified events never escape.
+				return failModelGuard(modelGuard.Missing())
 			}
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
@@ -946,4 +946,35 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 		optimizeMultiAgentV2: optimizeMultiAgentV2,
 		multiAgentV2Conflict: multiAgentV2Conflict,
 	}, nil
+}
+
+// codexUnverifiedObserverEvents holds frames read before the exact model is verified, for
+// delivery to the WebSocketResponseObserver once it is. The frame and byte bounds of the
+// bootstrap apply to every unverified frame and are checked before anything is retained; a
+// frame is copied only when an observer is configured.
+type codexUnverifiedObserverEvents struct {
+	events [][]byte
+	frames int
+	bytes  int
+}
+
+// retain accounts for one unverified frame and keeps a copy only when observed. It returns false,
+// retaining nothing, when the frame would exceed the bootstrap bound; the caller fails closed.
+func (u *codexUnverifiedObserverEvents) retain(observed bool, payload []byte) bool {
+	if u.frames >= codexBootstrapMaxBufferedFrames || u.bytes+len(payload) > codexBootstrapMaxBufferedBytes {
+		return false
+	}
+	u.frames++
+	u.bytes += len(payload)
+	if observed {
+		u.events = append(u.events, bytes.Clone(payload))
+	}
+	return true
+}
+
+// take returns the retained frames in arrival order and resets the bound.
+func (u *codexUnverifiedObserverEvents) take() [][]byte {
+	events := u.events
+	*u = codexUnverifiedObserverEvents{}
+	return events
 }
