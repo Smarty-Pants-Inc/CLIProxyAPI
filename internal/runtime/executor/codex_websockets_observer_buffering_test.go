@@ -7,13 +7,14 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 const codexObserverCompletedEvent = `{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6-terra","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 
 // codexObserverFrames is a full turn. Every frame after response.created must reach the
-// WebSocketResponseObserver in wire order when bootstrap buffering is disabled.
+// WebSocketResponseObserver in wire order, whatever the bootstrap buffering mode.
 var codexObserverFrames = []string{
 	codexCreatedEvent,
 	codexInProgressEvent,
@@ -26,7 +27,7 @@ var codexObserverFrames = []string{
 
 // observeCodexWebsocketStream drives one streamed turn and returns the observed event types
 // and payloads in the order the observer received them.
-func observeCodexWebsocketStream(t *testing.T, buffering bool) ([]string, []string) {
+func observeCodexWebsocketStream(t *testing.T, cfg *config.Config) ([]string, []string) {
 	t.Helper()
 	server := codexWebsocketServer(t, codexObserverFrames...)
 	defer server.Close()
@@ -41,7 +42,7 @@ func observeCodexWebsocketStream(t *testing.T, buffering bool) ([]string, []stri
 		payloads = append(payloads, string(ev.Payload))
 	}
 
-	result, err := NewCodexWebsocketsExecutor(codexBufferingConfig(buffering)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	result, err := NewCodexWebsocketsExecutor(cfg).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
 	if err != nil {
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
@@ -57,11 +58,26 @@ func observeCodexWebsocketStream(t *testing.T, buffering bool) ([]string, []stri
 	return append([]string(nil), types...), append([]string(nil), payloads...)
 }
 
-// Regression (CLIProxyAPI#68 P2): with buffering disabled the bootstrap loop releases the
-// stream right after response.created, and the streaming goroutine used to drop every later
-// observer event. Each frame must be observed once, in wire order.
+// Regression (CLIProxyAPI#68 P2): the bootstrap loop observes frames only until it releases the
+// stream (right after response.created when buffering is explicitly off, at the first output
+// otherwise), and the streaming goroutine used to drop every later observer event. Each frame
+// must be observed once, in wire order, in every mode.
 func TestCodexWebsocketsExecutor_BootstrapBufferingDisabled_ObservesEveryEventInOrder(t *testing.T) {
-	types, payloads := observeCodexWebsocketStream(t, false)
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{"explicit_off", codexBufferingExplicitlyOffConfig()},
+		{"default", &config.Config{}},
+		{"explicit_on", codexBufferingConfig(true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertObservesEveryEventInOrder(t, tc.cfg) })
+	}
+}
+
+func assertObservesEveryEventInOrder(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	types, payloads := observeCodexWebsocketStream(t, cfg)
 	want := []string{
 		"response.created",
 		"response.in_progress",
@@ -79,21 +95,5 @@ func TestCodexWebsocketsExecutor_BootstrapBufferingDisabled_ObservesEveryEventIn
 	}
 	if !strings.Contains(payloads[4], `"delta":"hi"`) || !strings.Contains(payloads[5], `"delta":" there"`) {
 		t.Fatalf("delta payloads out of order: %s | %s", payloads[4], payloads[5])
-	}
-}
-
-// The buffering-enabled path is unchanged by the fix: the bootstrap loop observes frames up to
-// and including the first releasing frame, and the streaming goroutine adds none.
-func TestCodexWebsocketsExecutor_BootstrapBufferingEnabled_ObserverUnchanged(t *testing.T) {
-	types, _ := observeCodexWebsocketStream(t, true)
-	want := []string{
-		"response.created",
-		"response.in_progress",
-		"codex.rate_limits",
-		"response.output_item.added",
-		"response.output_text.delta",
-	}
-	if !reflect.DeepEqual(types, want) {
-		t.Fatalf("observed event types = %v, want %v", types, want)
 	}
 }

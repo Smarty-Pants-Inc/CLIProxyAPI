@@ -19,12 +19,13 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-// With stream-bootstrap-buffering off, the pre-output hold still runs: a quota refusal right
-// after response.created fails over to the next credential before any byte reaches the client.
+// With the default config (stream-bootstrap-buffering absent), the pre-output hold runs: a quota
+// refusal right after response.created fails over to the next credential before any byte reaches
+// the client.
 // Once the next credential produces its first output frame, the stream is released, and every
 // later output frame reaches the client at once (before the upstream sends the next frame).
 // The observer sees every frame of the successful attempt, in wire order.
-func TestCodexWebsocketsExecutor_BootstrapBufferingOff_RefusalFailsOverThenStreamsAtOnce(t *testing.T) {
+func TestCodexWebsocketsExecutor_BootstrapBufferingDefault_RefusalFailsOverThenStreamsAtOnce(t *testing.T) {
 	const model = "gpt-5.6-terra"
 	created := `{"type":"response.created","response":{"id":"resp_off","model":"gpt-5.6-terra","output":[]}}`
 	refusal := `{"type":"response.failed","response":{"id":"resp_off","model":"gpt-5.6-terra","status":"failed","error":` + codexBootstrapQuotaError + `}}`
@@ -77,7 +78,7 @@ func TestCodexWebsocketsExecutor_BootstrapBufferingOff_RefusalFailsOverThenStrea
 	defer openSecond()
 	defer openFirst()
 
-	cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: false}}
+	cfg := &config.Config{}
 	exec := NewCodexWebsocketsExecutor(cfg)
 	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 	defer exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)

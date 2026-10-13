@@ -1031,10 +1031,10 @@ func TestCodexExecutor_BootstrapBuffering_FlushesInOrderOnFirstOutput(t *testing
 	}
 }
 
-// With buffering disabled, the pre-output hold still keeps response.created back (so a refusal
-// right after it can fail over), and the first output frame releases both at once, while the
-// upstream is still streaming.
-func TestCodexExecutor_BootstrapBuffering_DisabledReleasesAtFirstOutput(t *testing.T) {
+// With the default config the hold keeps response.created back (so a refusal right after it can
+// fail over), and the first output frame releases both at once, while the upstream is still
+// streaming.
+func TestCodexExecutor_BootstrapBuffering_DefaultReleasesAtFirstOutput(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1086,7 +1086,7 @@ func TestCodexExecutor_BootstrapBuffering_DisabledReleasesAtFirstOutput(t *testi
 	}
 }
 
-// With buffering disabled, identity verification still gates the first downstream chunk.
+// With buffering explicitly off, identity verification still gates the first downstream chunk.
 func TestCodexExecutor_BootstrapBuffering_DisabledWithholdsBeforeIdentity(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1109,7 +1109,7 @@ func TestCodexExecutor_BootstrapBuffering_DisabledWithholdsBeforeIdentity(t *tes
 		err    error
 	}, 1)
 	go func() {
-		result, err := NewCodexExecutor(&config.Config{}).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+		result, err := NewCodexExecutor(codexBufferingExplicitlyOffConfig()).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
 		resultCh <- struct {
 			result *cliproxyexecutor.StreamResult
 			err    error
