@@ -35,7 +35,7 @@ func (w *cancelOnWrite) WriteString(s string) (int, error) { return w.Write([]by
 // metered: the operation takes the fail-safe path and the key's daily token
 // budget closes, so the next request is 429 even under a generous cap.
 func TestKeyPolicyClaudeAbortedStreamFailsClosed(t *testing.T) {
-	for _, path := range []string{"/v1/responses", "/v1/messages"} {
+	for _, path := range []string{"/v1/responses", "/v1/messages", "/v1/chat/completions"} {
 		for _, abort := range []string{"no message_stop", "client disconnect"} {
 			t.Run(path+"/"+abort, func(t *testing.T) {
 				release := make(chan struct{})
@@ -61,18 +61,18 @@ func TestKeyPolicyClaudeAbortedStreamFailsClosed(t *testing.T) {
 				server := newTestServerWithConfig(t, cfg)
 				server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
 				registerPolicyClaudeAuths(t, server, upstream.URL, false, false)
-				body := fmt.Sprintf(`{"model":%q,"input":"hello","stream":true}`, policyClaudeModel)
-				if path == "/v1/messages" {
-					body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":true}`, policyClaudeModel)
-				}
+				body := policyBody(path, policyClaudeModel, true)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				w := &cancelOnWrite{ResponseRecorder: httptest.NewRecorder()}
 				if abort == "client disconnect" {
 					// Disconnect only after the client has the partial usage frame.
 					w.marker, w.cancel = "message_delta", cancel
-					if path == "/v1/responses" {
+					switch path {
+					case "/v1/responses":
 						w.marker = "output_text.delta"
+					case "/v1/chat/completions":
+						w.marker = `"content":"hi"`
 					}
 				}
 				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)).WithContext(ctx)

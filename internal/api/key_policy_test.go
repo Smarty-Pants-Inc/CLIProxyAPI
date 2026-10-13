@@ -63,7 +63,7 @@ func TestKeyPolicyHTTP(t *testing.T) {
 		{name: "redirect", model: "gpt-6.1-sol", allowed: "A", upstream: 307, want: 503, cap: 10},
 		{name: "zero cap", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 429},
 		{name: "legacy", model: "gpt-6.1-sol", allowed: "a", legacy: true, upstream: 200, want: 200, cap: 10},
-		{name: "unsupported", model: "gpt-6.1-sol", allowed: "A", path: "/v1/chat/completions", upstream: 200, want: 503, cap: 10},
+		{name: "unsupported", model: "gpt-6.1-sol", allowed: "A", path: "/v1/completions", upstream: 200, want: 503, cap: 10},
 		{name: "socket Responses", allowed: "A", want: 503, cap: 10},
 		{name: "socket Realtime", allowed: "A", path: "/v1/realtime", want: 503, cap: 10},
 		{name: "socket sideband", allowed: "A", path: "/v1/live/call", want: 503, cap: 10},
