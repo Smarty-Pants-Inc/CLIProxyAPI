@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -172,6 +173,10 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core .
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
+				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
+				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
+				c.Request = c.Request.WithContext(reqCtx)
 			}
 			done, allowed := admitKeyPolicy(c, core)
 			if !allowed {
@@ -232,6 +237,10 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		}
 		c.Set("userApiKey", principal)
 		c.Set("accessProvider", provider)
+		reqCtx := coreusage.WithAPIKey(c.Request.Context(), principal)
+		reqCtx = coreusage.WithAccessProvider(reqCtx, provider)
+		reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(provider))
+		c.Request = c.Request.WithContext(reqCtx)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
 		done, allowed := admitKeyPolicy(c, core)
