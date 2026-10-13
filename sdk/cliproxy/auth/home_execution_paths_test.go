@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 )
@@ -147,7 +147,8 @@ func TestHomeNonStreamingExecutionLogsSelectedOAuthAuth(t *testing.T) {
 				t.Fatalf("execution error = %v", errRun)
 			}
 
-			const expected = "Use OAuth provider=home-execution auth_file=home-auth for model model-a via socks5 proxy"
+			// smarty-dev#5423: the line carries a keyed auth_ref, never the auth file/id.
+			expected := "Use OAuth provider=home-execution auth_ref=" + authLogRef(&Auth{ID: "home-auth"}) + " for model model-a via socks5 proxy"
 			for _, entry := range hook.AllEntries() {
 				if entry.Level == log.DebugLevel && entry.Message == expected {
 					if got := entry.Data["request_id"]; got != "req-home-log" {
@@ -821,7 +822,7 @@ func (d *homePerSelectionDispatcher) RPopAuth(context.Context, string, string, h
 	if int(call) > len(d.auths) {
 		return nil, home.ErrAuthNotFound
 	}
-	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[call-1]})
+	return json.Marshal(map[string]any{"auth": d.auths[call-1].Clone()})
 }
 func (*homePerSelectionDispatcher) AbortAmbiguousDispatch() {}
 
@@ -959,12 +960,12 @@ func (d *accountedHomeExecutionDispatcher) RPopAuth(_ context.Context, model str
 	if index >= len(d.auths) {
 		return nil, home.ErrAuthNotFound
 	}
-	auth := d.auths[index]
+	auth := d.auths[index].Clone()
 	return json.Marshal(struct {
 		Concurrency homeConcurrencyTuple `json:"concurrency"`
 		Model       string               `json:"model"`
 		AuthIndex   string               `json:"auth_index"`
-		Auth        Auth                 `json:"auth"`
+		Auth        *Auth                `json:"auth"`
 	}{
 		Concurrency: homeConcurrencyTuple{Accounted: true, CredentialID: auth.ID, Model: model},
 		Model:       model,

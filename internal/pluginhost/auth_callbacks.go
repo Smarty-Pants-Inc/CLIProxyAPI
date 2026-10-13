@@ -12,8 +12,9 @@ import (
 	"strings"
 	"time"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type rpcHostAuthGetRequest struct {
@@ -205,6 +206,12 @@ func (h *Host) listAuthFilesFromDisk() ([]pluginapi.HostAuthFileEntry, error) {
 				if websockets, okWebsockets := parseWebsocketsValue(metadata["websockets"]); okWebsockets {
 					fileEntry.Websockets = websockets
 				}
+				if disabled, okDisabled := parseBoolValue(metadata["disabled"]); okDisabled && disabled {
+					fileEntry.Disabled = true
+					fileEntry.Status = string(coreauth.StatusDisabled)
+				} else {
+					fileEntry.Status = string(coreauth.StatusActive)
+				}
 			}
 		}
 		files = append(files, fileEntry)
@@ -296,7 +303,7 @@ func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (stri
 	if errBuild != nil {
 		return "", errBuild
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	if errWrite := misc.WriteAuthFileAtomic(dst, data); errWrite != nil {
 		return "", fmt.Errorf("failed to write auth file: %w", errWrite)
 	}
 	if errUpsert := h.upsertAuthRecord(ctx, auth); errUpsert != nil {
@@ -333,12 +340,19 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 	if authID == "" {
 		authID = path
 	}
+	status := coreauth.StatusActive
+	disabled := false
+	if d, okDisabled := parseBoolValue(metadata["disabled"]); okDisabled && d {
+		disabled = true
+		status = coreauth.StatusDisabled
+	}
 	auth := &coreauth.Auth{
 		ID:       authID,
 		Provider: provider,
 		FileName: filepath.Base(path),
 		Label:    label,
-		Status:   coreauth.StatusActive,
+		Status:   status,
+		Disabled: disabled,
 		Attributes: map[string]string{
 			"path":   path,
 			"source": path,
@@ -463,26 +477,20 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 		if parsed, err := strconv.Atoi(p); err == nil {
 			entry.Priority = parsed
 		}
-	} else if auth.Metadata != nil {
-		if rawPriority, ok := auth.Metadata["priority"]; ok {
-			if priority, okPriority := parsePriorityValue(rawPriority); okPriority {
-				entry.Priority = priority
-			}
+	} else if rawPriority, ok := auth.MetadataValue("priority"); ok {
+		if priority, okPriority := parsePriorityValue(rawPriority); okPriority {
+			entry.Priority = priority
 		}
 	}
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {
 		entry.Note = note
-	} else if auth.Metadata != nil {
-		if rawNote, ok := auth.Metadata["note"].(string); ok {
-			entry.Note = strings.TrimSpace(rawNote)
-		}
+	} else {
+		entry.Note = strings.TrimSpace(auth.MetadataString("note"))
 	}
 	if baseURL := strings.TrimSpace(authAttribute(auth, "base_url")); baseURL != "" {
 		entry.BaseURL = baseURL
-	} else if auth.Metadata != nil {
-		if rawBaseURL, ok := auth.Metadata["base_url"].(string); ok {
-			entry.BaseURL = strings.TrimSpace(rawBaseURL)
-		}
+	} else {
+		entry.BaseURL = strings.TrimSpace(auth.MetadataString("base_url"))
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry.Websockets = websockets
@@ -539,8 +547,8 @@ func authEmail(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["email"].(string); ok {
+	if raw, exists := auth.MetadataValue("email"); exists {
+		if v, ok := raw.(string); ok {
 			return strings.TrimSpace(v)
 		}
 	}
@@ -559,12 +567,8 @@ func authProjectID(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["project_id"].(string); ok {
-			if projectID := strings.TrimSpace(v); projectID != "" {
-				return projectID
-			}
-		}
+	if projectID := strings.TrimSpace(auth.MetadataString("project_id")); projectID != "" {
+		return projectID
 	}
 	if auth.Attributes != nil {
 		if projectID := strings.TrimSpace(auth.Attributes["project_id"]); projectID != "" {
@@ -600,10 +604,8 @@ func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
 			}
 		}
 	}
-	if auth.Metadata == nil {
-		return false, false
-	}
-	return parseWebsocketsValue(auth.Metadata["websockets"])
+	raw, _ := auth.MetadataValue("websockets")
+	return parseWebsocketsValue(raw)
 }
 
 func parsePriorityValue(raw any) (int, bool) {
@@ -625,7 +627,7 @@ func parsePriorityValue(raw any) (int, bool) {
 	return 0, false
 }
 
-func parseWebsocketsValue(raw any) (bool, bool) {
+func parseBoolValue(raw any) (bool, bool) {
 	switch v := raw.(type) {
 	case bool:
 		return v, true
@@ -636,6 +638,10 @@ func parseWebsocketsValue(raw any) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func parseWebsocketsValue(raw any) (bool, bool) {
+	return parseBoolValue(raw)
 }
 
 func bytesTrimSpace(raw []byte) []byte {

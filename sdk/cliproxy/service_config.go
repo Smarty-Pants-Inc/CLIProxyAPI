@@ -3,16 +3,16 @@ package cliproxy
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -20,8 +20,8 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
 }
 
-func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
-	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
+func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) bool {
+	return s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
 }
 
 type configCommit struct {
@@ -34,6 +34,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	statePath                string
+	legacyStatePath          string
 	statePathUnavailable     bool
 	sessionAffinitySubagents bool
 }
@@ -56,19 +57,20 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if state.sessionAffinity && !cfg.Home.Enabled && strings.TrimSpace(cfg.AuthDir) != "" {
-		authDir, errResolve := util.ResolveAuthDir(cfg.AuthDir)
-		if errResolve == nil {
-			authDir, errResolve = filepath.Abs(authDir)
-		}
-		if errResolve == nil {
-			authDir, errResolve = resolveAffinityStateDir(authDir)
-		}
+		stateDir, errResolve := cfg.ResolveSessionAffinityStateDir()
 		if errResolve != nil {
 			// Do not write runtime state to an unresolved or unintended directory.
 			log.WithError(errResolve).Error("failed to resolve session affinity state directory; routing will fail closed")
 			state.statePathUnavailable = true
 		} else {
-			state.statePath = filepath.Join(authDir, "session-affinity.state")
+			state.statePath = filepath.Join(stateDir, "session-affinity.state")
+			// smarty-dev#8742: builds before 34efa7bb kept the file in auth-dir.
+			// It is read once (never written) when the new file is missing.
+			if authDir, errAuth := util.ResolveAuthDir(cfg.AuthDir); errAuth == nil {
+				if legacy := filepath.Join(authDir, "session-affinity.state"); legacy != state.statePath {
+					state.legacyStatePath = legacy
+				}
+			}
 		}
 	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -85,26 +87,11 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	return state
 }
 
-// resolveAffinityStateDir receives an absolute path. Resolve its longest existing
-// ancestor so creating missing directories cannot change the cache ownership key.
-func resolveAffinityStateDir(path string) (string, error) {
-	ancestor := path
-	missing := ""
-	for {
-		realDir, errReal := filepath.EvalSymlinks(ancestor)
-		if errReal == nil {
-			return filepath.Join(realDir, missing), nil
-		}
-		if !errors.Is(errReal, os.ErrNotExist) {
-			return "", errReal
-		}
-		parent := filepath.Dir(ancestor)
-		if parent == ancestor {
-			return "", errReal
-		}
-		missing = filepath.Join(filepath.Base(ancestor), missing)
-		ancestor = parent
-	}
+// sameRouting ignores legacyStatePath: it is read only when a state file is
+// first created, so an auth-dir change alone must not rebuild the selector.
+func (s routingRuntimeState) sameRouting(other routingRuntimeState) bool {
+	s.legacyStatePath, other.legacyStatePath = "", ""
+	return s == other
 }
 
 func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCache) coreauth.Selector {
@@ -131,6 +118,7 @@ func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCac
 			Fallback:            selector,
 			TTL:                 state.sessionAffinityTTL,
 			StatePath:           state.statePath,
+			LegacyStatePath:     state.legacyStatePath,
 			InitializationError: initializationError,
 			SubagentAffinity:    &subagents,
 			Cache:               sharedCache,
@@ -148,7 +136,8 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg
 }
 
 // commitConfigUpdate applies only in-memory configuration state. Runtime work that
-// may block on plugins, models, storage, or networking is deliberately deferred.
+// may block on plugins, storage, or networking is deliberately deferred. Catalog
+// source generations change here so an older commit cannot restart stale readers.
 func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if s == nil {
 		return configCommit{}
@@ -165,6 +154,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if newCfg == nil {
 		return configCommit{}
 	}
+	if errResolve := newCfg.ValidateSessionAffinityStateDir(); errResolve != nil {
+		log.WithError(errResolve).Warn("rejected config update with invalid session affinity state directory")
+		return configCommit{}
+	}
 	if errValidate := newCfg.ValidateAPIKeyPolicies(); errValidate != nil {
 		log.WithError(errValidate).Warn("rejected config update with invalid API key policies")
 		return configCommit{}
@@ -174,6 +167,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		return configCommit{}
 	}
 
+	if errValidate := newCfg.Models.Validate(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected invalid model catalog sources")
+		return configCommit{}
+	}
 	s.cfgMu.Lock()
 	newCfg = internalconfig.PreserveAPIKeyPolicies(s.cfg, newCfg)
 	if errValidate := newCfg.ValidateAPIKeyPolicies(); errValidate != nil {
@@ -184,7 +181,9 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	}
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
+	s.cancelStaleAntigravityProbes("")
 	s.configSequence++
+	registry.UpdateModelCatalogSources(newCfg.Models, newCfg.Home.Enabled)
 	return configCommit{cfg: newCfg, sequence: s.configSequence}
 }
 
@@ -215,6 +214,16 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 
+	// Install client credentials, including the management handler's key hash,
+	// before fallible ancillary work such as cooldown persistence or pprof stop.
+	// Revocation must not depend on those steps, but their failures still reach
+	// the watcher so it can retry the rest of the captured revision.
+	if !s.updateServerClientsContext(ctx, cfg) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	if !s.applyManagerConfig(ctx, commit) {
 		return false
 	}
@@ -225,12 +234,6 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.applyDiscoveryConfigContext(ctx, cfg)
-	if errContext := ctx.Err(); errContext != nil {
-		return false
-	}
-	if !s.updateServerClientsContext(ctx, cfg) {
-		return false
-	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
@@ -294,7 +297,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		}
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
-	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+	if s.appliedRoutingState == nil || !s.appliedRoutingState.sameRouting(routingState) {
 		var sharedCache *coreauth.SessionCache
 		if routingState.statePath != "" {
 			sharedCache = s.affinityCaches[routingState.statePath]

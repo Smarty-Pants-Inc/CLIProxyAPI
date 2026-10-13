@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -90,6 +90,15 @@ func (g *claudeModelStream) next() ([]byte, error) {
 			}
 			g.verified = true
 		case "ping":
+		case "error":
+			if !g.verified {
+				// An overload is a refusal, not model output. Keep its classification
+				// without exposing any unverified upstream message or stream bytes.
+				if gjson.GetBytes(payload, "error.type").String() == "overloaded_error" {
+					return nil, &cliproxyauth.Error{Code: "overloaded_error", Message: "upstream overloaded", HTTPStatus: http.StatusBadGateway, Retryable: true}
+				}
+				return nil, claudeModelMismatch()
+			}
 		default:
 			if !g.verified {
 				return nil, claudeModelMismatch()

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // This fallback deliberately prefers B after the first request. The real
@@ -46,6 +46,7 @@ type compactionAffinityExecutor struct {
 	streamOutput   [][]byte
 	onExecute      func()
 	attempts       []compactionAffinityCall
+	payloads       []string // opts.OriginalRequest of each attempt (smarty-dev#8742)
 }
 
 func (e *compactionAffinityExecutor) Identifier() string { return e.provider }
@@ -54,6 +55,7 @@ func (e *compactionAffinityExecutor) attempt(ctx context.Context, auth *Auth, op
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	pinned, _ := opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey].(string)
 	e.attempts = append(e.attempts, compactionAffinityCall{authID: auth.ID, pinned: pinned})
+	e.payloads = append(e.payloads, string(opts.OriginalRequest))
 	if auth.ID == e.firstID {
 		return e.failure
 	}

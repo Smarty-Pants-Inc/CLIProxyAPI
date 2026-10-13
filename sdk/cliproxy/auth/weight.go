@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 )
 
 // ValidateAuthWeight validates every explicit credential weight source.
@@ -17,7 +17,7 @@ func ValidateAuthWeight(auth *Auth) error {
 			return fmt.Errorf("invalid attributes weight: %w", errParse)
 		}
 	}
-	if rawWeight, ok := auth.Metadata[AttributeWeight]; ok {
+	if rawWeight, ok := auth.MetadataValue(AttributeWeight); ok {
 		if _, errParse := credentialweight.ParseValue(rawWeight); errParse != nil {
 			return fmt.Errorf("invalid metadata weight: %w", errParse)
 		}

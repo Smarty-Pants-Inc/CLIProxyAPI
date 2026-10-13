@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   build:
+    needs: test
     # Public fork on a self-hosted pool: never run an outside fork's PR code (smarty-dev#1246, Light 5941520806).
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     # Mergify queue drafts and PRs labelled priority-ci use the reserved smarty-priority Forge pool (org 2026-10-02 15:38Z, smarty-dev#3257).
@@ -41,6 +42,23 @@ jobs:
           for test in TestClaudeMessagesModelIntegrity TestClaudeCompactionOnDemandRoundTrip TestClaudeCompactionFailsClosed TestClaudeCompactionSkipsContextManagementInjection TestCodexHTTPModelIntegrityTerminal TestCodexUnverifiedFailureDoesNotFlush TestCodexWebsocketModelFailureReleasesSession; do
             grep -Fqx "=== RUN   $test" "$RUNNER_TEMP/claude-model-executors.log"
           done
+      - name: Test private Windows owner and DACL policy on Linux
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -v ./internal/config -run '^TestPrivate(ConfigDACLMatches|ConfigOwnerAndDACLMatches|AuthOwnerAndDACLMatches)$' -count=1 | tee "$RUNNER_TEMP/config-private-dacl.log"
+          grep -Fqx '=== RUN   TestPrivateConfigDACLMatches' "$RUNNER_TEMP/config-private-dacl.log"
+          grep -Fqx '=== RUN   TestPrivateConfigOwnerAndDACLMatches' "$RUNNER_TEMP/config-private-dacl.log"
+          grep -Fqx '=== RUN   TestPrivateAuthOwnerAndDACLMatches' "$RUNNER_TEMP/config-private-dacl.log"
+      - name: Compile Windows config publication regressions
+        timeout-minutes: 5
+        shell: bash
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/windows-amd64-config.test.exe" ./internal/config
+      - name: Compile Windows auth security regressions
+        timeout-minutes: 5
+        shell: bash
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/" ./internal/misc ./sdk/cliproxy/...
       - name: Test full Go suite with explicit known-failure quarantine
         timeout-minutes: 20
         shell: bash
@@ -53,6 +71,54 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+
+  test:
+    # Match the existing PR trust boundary; outside forks must not run on our pool.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: smarty-linux-x64
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test all packages without filters or cached results
+        run: go test ./... -count=1 -timeout 15m
+      # smarty-dev#7617: the streaming-chunk/Finalize data race only shows under the race detector.
+      - name: Race-test the request-logging middleware
+        timeout-minutes: 5
+        run: go test -race -count=3 ./internal/api/middleware/
+
+  # smarty-dev#4273 / #8742: a gateway swap must not break sessions compacted on the build it replaces. Build the
+  # PR's BASE and HEAD, have BASE compact a Codex and a Claude session against a local stub upstream, then
+  # cold-start HEAD on (i) a copy of BASE's state dir and (ii) an empty one and replay both sessions: all four must
+  # answer 200. Loopback only, scratch config and auth, no real accounts.
+  compaction-replay:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build BASE and HEAD
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/cpa-head" ./cmd/server
+          git worktree add --detach "$RUNNER_TEMP/base-src" "$BASE_SHA"
+          (cd "$RUNNER_TEMP/base-src" && go build -o "$RUNNER_TEMP/cpa-base" ./cmd/server)
+      - name: Replay BASE-compacted sessions on HEAD
+        timeout-minutes: 10
+        run: python3 .github/scripts/compaction-replay.py "$RUNNER_TEMP/cpa-base" "$RUNNER_TEMP/cpa-head"
 
   artifact:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'

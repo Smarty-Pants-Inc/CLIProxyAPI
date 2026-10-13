@@ -4,18 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -27,6 +29,7 @@ type responsesWebsocketForwardOptions struct {
 	toolCacheTurn            *responsesWebsocketToolCacheTurn
 	suppressError            func(*interfaces.ErrorMessage) bool
 	keepAliveInterval        *time.Duration
+	localInterrupt           *responsesLocalInterrupt
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -70,9 +73,16 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		defer keepAliveTicker.Stop()
 		keepAliveC = keepAliveTicker.C
 	}
+	if opts.localInterrupt != nil {
+		opts.localInterrupt.begin()
+		defer opts.localInterrupt.end()
+	}
+	localFrames := opts.localInterrupt.framesChan()
 
 	for {
 		select {
+		case interruptPayload := <-localFrames:
+			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
@@ -190,7 +200,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						cancel(payloadErrMsg.Error)
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
 					}
-				} else if isResponsesWebsocketCompletionEvent(eventType) {
+				} else if isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" {
+					// response.incomplete ends the turn too. Codex uses it, with
+					// reason "interrupted", to acknowledge response.interrupt. Closing
+					// the client socket here would block the follow-up request.
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
@@ -239,6 +252,37 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	}
 }
 
+func completeResponsesWebsocketLocalInterrupt(
+	writer *responsesWebsocketWriter,
+	wsTimelineLog websocketTimelineAppender,
+	cancel handlers.APIHandlerCancelFunc,
+	payload []byte,
+	outputItemsByIndex map[int64][]byte,
+	outputItemsFallback [][]byte,
+	pendingToolCallIDs map[string]struct{},
+) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
+	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response_id").String())
+	output := responseCompletedOutputFromPayload([]byte(`{"response":{"output":[]}}`), outputItemsByIndex, outputItemsFallback)
+	incomplete := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`)
+	var errSet error
+	incomplete, errSet = sjson.SetBytes(incomplete, "response.id", responseID)
+	if errSet != nil {
+		cancel(errSet)
+		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
+	}
+	incomplete, errSet = sjson.SetRawBytes(incomplete, "response.output", output)
+	if errSet != nil {
+		cancel(errSet)
+		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
+	}
+	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incomplete, time.Now()); errWrite != nil {
+		cancel(errWrite)
+		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
+	}
+	cancel(context.Canceled)
+	return output, responseID, sortedStringSet(pendingToolCallIDs), nil, nil
+}
+
 func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 	if errMsg == nil {
 		return 0
@@ -252,14 +296,21 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Only request-shape failures are exposed: the client can act on them and no
-// credential rotation or retry can make the request succeed. Credential, quota
-// and transport failures stay silent so the client simply reconnects and retries;
+// Request-shape failures and explicitly marked final refusals are exposed.
+// Other credential, quota and transport failures stay silent so the client
+// simply reconnects and retries;
 // a fresh connection carries no server-side transcript, so reconnecting already
 // implies a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
+	}
+	// Codex steering-off bootstrap failover retains the original quota refusal.
+	// Expose it only after the Manager has exhausted retry; unmarked providers
+	// (including xai) keep their existing silent credential-error close path.
+	var refusal interface{ ExposeWebsocketRefusal() bool }
+	if errors.As(errMsg.Error, &refusal) && refusal.ExposeWebsocketRefusal() {
+		return true
 	}
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
@@ -612,52 +663,82 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
-		headers := []byte(`{}`)
-		hasHeaders := false
-		for key, values := range errMsg.Addon {
-			if len(values) == 0 {
-				continue
-			}
-			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
-			headers, errSet = sjson.SetBytes(headers, headerPath, values[0])
-			if errSet != nil {
-				return nil, errSet
-			}
-			hasHeaders = true
-		}
-		if hasHeaders {
-			payload, errSet = sjson.SetRawBytes(payload, "headers", headers)
+	// Upstream headers are not forwarded wholesale: only Retry-After reaches the client.
+	if errMsg != nil {
+		if retryAfter := strings.TrimSpace(errMsg.Addon.Get("Retry-After")); retryAfter != "" {
+			payload, errSet = sjson.SetBytes(payload, "headers.Retry-After", scrubResponsesWebsocketErrorText(retryAfter, responsesStreamErrorFieldLimit))
 			if errSet != nil {
 				return nil, errSet
 			}
 		}
 	}
 
+	errorNode := gjson.Result{}
 	if len(body) > 0 && json.Valid(body) {
-		errorNode := gjson.GetBytes(body, "error")
-		if errorNode.Exists() {
-			payload, errSet = sjson.SetRawBytes(payload, "error", []byte(errorNode.Raw))
-		} else {
-			payload, errSet = sjson.SetRawBytes(payload, "error", body)
-		}
-		if errSet != nil {
-			return nil, errSet
+		errorNode = gjson.GetBytes(body, "error")
+		if !errorNode.Exists() {
+			errorNode = gjson.ParseBytes(body)
 		}
 	}
-
-	if !gjson.GetBytes(payload, "error").Exists() {
-		payload, errSet = sjson.SetBytes(payload, "error.type", "server_error")
-		if errSet != nil {
-			return nil, errSet
-		}
-		payload, errSet = sjson.SetBytes(payload, "error.message", errText)
-		if errSet != nil {
-			return nil, errSet
-		}
+	payload, errSet = sjson.SetRawBytes(payload, "error", allowlistResponsesWebsocketError(errorNode, http.StatusText(status)))
+	if errSet != nil {
+		return nil, errSet
 	}
-
 	return payload, nil
+}
+
+var (
+	responsesWebsocketJWTPattern     = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)
+	responsesWebsocketAPIKeyPattern  = regexp.MustCompile(`\b(?:sk|rt|sess|org)-[A-Za-z0-9_-]{8,}`)
+	responsesWebsocketEmailPattern   = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+	responsesWebsocketUUIDPattern    = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+	responsesWebsocketIdentityKeyPat = regexp.MustCompile(`(?i)((?:"?(?:(?:refresh|id|session)[_-]?token|(?:chatgpt[_-]?)?account[_-]?id|org(?:anization)?[_-]?id|user[_-]?id|email|cookie)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
+)
+
+// scrubResponsesWebsocketErrorText removes anything token- or identity-like from
+// text that reaches the websocket client.
+func scrubResponsesWebsocketErrorText(text string, limit int) string {
+	// Bearer first: the key/value pattern would otherwise redact only the word "Bearer".
+	text = responsesStreamBearerPattern.ReplaceAllString(text, "Bearer [REDACTED]")
+	text = redactResponsesStreamErrorText(text)
+	text = responsesWebsocketIdentityKeyPat.ReplaceAllString(text, `${1}[REDACTED]`)
+	text = responsesWebsocketJWTPattern.ReplaceAllString(text, "[REDACTED]")
+	text = responsesWebsocketAPIKeyPattern.ReplaceAllString(text, "[REDACTED]")
+	text = responsesWebsocketEmailPattern.ReplaceAllString(text, "[REDACTED]")
+	text = responsesWebsocketUUIDPattern.ReplaceAllString(text, "[REDACTED]")
+	return truncateResponsesStreamErrorText(text, limit)
+}
+
+// allowlistResponsesWebsocketError builds the client-facing error object from a
+// fixed set of safe fields. The upstream object is never forwarded: a final quota
+// refusal can carry access_token, account_id and similar fields (CLIProxyAPI#64).
+func allowlistResponsesWebsocketError(src gjson.Result, fallbackMessage string) []byte {
+	out := []byte(`{}`)
+	if !src.IsObject() {
+		src = gjson.Result{}
+	}
+	for _, key := range []string{"type", "code", "param"} {
+		if v := src.Get(key); v.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, key, scrubResponsesWebsocketErrorText(v.String(), responsesStreamErrorFieldLimit))
+		}
+	}
+	message := fallbackMessage
+	if v := src.Get("message"); v.Type == gjson.String && strings.TrimSpace(v.String()) != "" {
+		message = v.String()
+	}
+	out, _ = sjson.SetBytes(out, "message", scrubResponsesWebsocketErrorText(message, responsesStreamErrorMessageLimit))
+	if !gjson.GetBytes(out, "type").Exists() {
+		out, _ = sjson.SetBytes(out, "type", "server_error")
+	}
+	if v := src.Get("retryable"); v.IsBool() {
+		out, _ = sjson.SetBytes(out, "retryable", v.Bool())
+	}
+	for _, key := range []string{"resets_in_seconds", "resets_at", "retry_after"} {
+		if v := src.Get(key); v.Type == gjson.Number {
+			out, _ = sjson.SetBytes(out, key, v.Int())
+		}
+	}
+	return out
 }
 
 func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {

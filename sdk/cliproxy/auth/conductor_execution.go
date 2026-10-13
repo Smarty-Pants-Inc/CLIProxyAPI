@@ -3,9 +3,14 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -14,12 +19,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -130,6 +135,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
 		}
+		m.beginExecutionAttempt(opts)
 		resp, err := exec.Execute(ctx, a, req, opts)
 		if err != nil {
 			return resp, err
@@ -145,7 +151,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		opts.OriginalRequest = req.Payload
 	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = m.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		return cliproxyexecutor.Response{}, errOrigin
 	}
@@ -216,7 +222,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		opts.OriginalRequest = req.Payload
 	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = m.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		return cliproxyexecutor.Response{}, errOrigin
 	}
@@ -281,6 +287,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return nil, err
 		}
 		producerCtx, cancelProducer := context.WithCancel(ctx)
+		m.beginExecutionAttempt(opts)
 		result, err := exec.ExecuteStream(producerCtx, a, req, opts)
 		if err != nil {
 			cancelProducer()
@@ -354,7 +361,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		opts.OriginalRequest = req.Payload
 	}
 	var errOrigin error
-	opts, errOrigin = m.PrepareCompactionRequest(req.Model, opts, ctx)
+	req, opts, errOrigin = m.PrepareCompactionPayload(ctx, req, opts)
 	if errOrigin != nil {
 		return nil, errOrigin
 	}
@@ -469,13 +476,21 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		RequestedModel: requestedModel,
 		Stream:         opts.Stream,
 		Headers:        cloneRequestHeaders(opts.Headers),
-		Body:           bytes.Clone(req.Payload),
+		Body:           req.Payload,
 		Metadata:       opts.Metadata,
 	})
 	opts.Headers = mergeRequestHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = bytes.Clone(resp.Body)
 		opts.OriginalRequest = bytes.Clone(resp.Body)
+	}
+	if path := strings.TrimSpace(resp.Path); path != "" {
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]any, 1)
+		} else {
+			opts.Metadata = maps.Clone(opts.Metadata)
+		}
+		opts.Metadata[cliproxyexecutor.RequestPathMetadataKey] = path
 	}
 	if resp.Terminate {
 		return req, opts, &cliproxyexecutor.RequestTerminatedError{
@@ -533,7 +548,7 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		}
 	}
 	source := opts.SourceFormat.String()
-	if source == "openai-image" || source == "openai-video" {
+	if source == "openai-image" || source == "openai-video" || source == "openai-speech" {
 		return opts.SourceFormat
 	}
 	if opts.Alt == "responses/compact" && !opts.Stream {
@@ -595,6 +610,15 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 		}
 	}
 	return out
+}
+
+func executorForAuth(executor ProviderExecutor, auth *Auth) ProviderExecutor {
+	if auth.AuthKind() == AuthKindAPIKey {
+		if scoped, ok := executor.(APIKeyConfigExecutor); ok {
+			return scoped.ForAPIKey()
+		}
+	}
+	return executor
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
@@ -667,11 +691,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
 			continue
 		}
+		executor = executorForAuth(executor, auth)
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -708,11 +733,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
 			}
-			if !restoreExecutionModel {
-				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
-			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
+			m.beginExecutionAttempt(execOpts)
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
@@ -730,6 +754,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
+					m.beginExecutionAttempt(execOpts)
 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
@@ -749,7 +774,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -888,11 +913,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, SkipQuotaObservation: true}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, SkipQuotaObservation: true, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
 			continue
 		}
+		executor = executorForAuth(executor, auth)
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -929,9 +955,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
 			}
-			if !restoreExecutionModel {
-				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
-			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
@@ -970,7 +994,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -1237,7 +1261,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			if selection != nil {
 				m.reportHomeResult(execCtx, result, auth)
 				releaseAttempt()
@@ -1257,7 +1281,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
 		if selection != nil && !restoreExecutionModel {
-			execReq = attachResolvedHomeModelInfo(execReq, selection.modelInfo)
+			execReq = attachResolvedHomeModelInfo(execReq, auth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
 		}
 		streamExecutionModel := ""
 		if restoreExecutionModel {
@@ -1333,7 +1357,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					if isRequestStopError(errStream) {
 						// The upstream stop stays primary; a failed release ack must not replace
 						// its status, cause and reset with a new home_unavailable 503.
-						logEntryWithRequestID(ctx).Warnf("home release after request stop failed: %v", errEnd)
+						logEntryWithRequestID(ctx).Warnf("home release after request stop failed: %s", safeErrorDiagnosticForLog(errEnd))
 						return nil, errStream
 					}
 					return nil, errEnd
@@ -2000,64 +2024,60 @@ func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model 
 	case "api_key":
 		entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
 	case "oauth":
-		ident := formatOauthIdentity(auth, provider, accountInfo)
-		entry.Debugf("Use OAuth %s for model %s%s", ident, model, suffix)
+		// accountInfo and the auth file name carry the account email; log the
+		// same keyed reference as the warning lines (smarty-dev#5423).
+		entry.Debugf("Use OAuth %s for model %s%s", formatAuthIdentity(auth, provider), model, suffix)
 	}
 }
 
-func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string {
-	if auth == nil {
-		return ""
-	}
-	// Prefer the auth's provider when available.
-	providerName := strings.TrimSpace(auth.Provider)
-	if providerName == "" {
-		providerName = strings.TrimSpace(provider)
-	}
-	// Only log the basename to avoid leaking host paths.
-	// FileName may be unset for some auth backends; fall back to ID.
-	authFile := strings.TrimSpace(auth.FileName)
-	if authFile == "" {
-		authFile = strings.TrimSpace(auth.ID)
-	}
-	if authFile != "" {
-		authFile = filepath.Base(authFile)
-	}
-	parts := make([]string, 0, 3)
-	if providerName != "" {
-		parts = append(parts, "provider="+providerName)
-	}
-	if authFile != "" {
-		parts = append(parts, "auth_file="+authFile)
-	}
-	if len(parts) == 0 {
-		return accountInfo
-	}
-	return strings.Join(parts, " ")
-}
-
+// formatAuthIdentity names an auth in log lines without identifying the
+// account: auth ids and file names carry account emails (for example
+// claude-<hash>-<user>@<domain>.json), so the line carries the provider and a
+// keyed reference instead (smarty-dev#5423).
 func formatAuthIdentity(auth *Auth, provider string) string {
 	if auth == nil {
 		return "auth=nil"
 	}
-	accountType, accountInfo := auth.AccountInfo()
-	switch accountType {
-	case "api_key":
-		return fmt.Sprintf("api_key=%s", util.HideAPIKey(accountInfo))
-	case "oauth":
-		return formatOauthIdentity(auth, provider, accountInfo)
-	default:
-		if auth.FileName != "" {
-			return fmt.Sprintf("auth_file=%s", filepath.Base(auth.FileName))
-		}
-		if auth.ID != "" {
-			return fmt.Sprintf("auth_id=%s", auth.ID)
-		}
-		if accountInfo != "" {
-			return accountInfo
-		}
+	providerName := strings.TrimSpace(auth.Provider)
+	if providerName == "" {
+		providerName = strings.TrimSpace(provider)
+	}
+	ref := authLogRef(auth)
+	if providerName == "" {
+		return "auth_ref=" + ref
+	}
+	return "provider=" + providerName + " auth_ref=" + ref
+}
+
+var (
+	authLogRefKeyOnce sync.Once
+	authLogRefKey     []byte
+)
+
+// authLogRef returns a non-identifying reference for an auth: the first 12 hex
+// digits of HMAC-SHA256(auth.ID), falling back to the file base name, under a
+// random key generated once per process. An unkeyed hash (and Auth.Index, an
+// unkeyed sha256 of the auth path) can be matched offline against candidate
+// emails; the keyed one cannot.
+// ponytail: the key is never persisted, so a ref correlates log lines within
+// one process lifetime only; after a restart the same auth gets a new ref.
+func authLogRef(auth *Auth) string {
+	key := strings.TrimSpace(auth.ID)
+	if key == "" {
+		key = filepath.Base(strings.TrimSpace(auth.FileName))
+	}
+	if key == "" || key == "." {
 		return "unknown"
 	}
+	authLogRefKeyOnce.Do(func() {
+		authLogRefKey = make([]byte, 32)
+		if _, err := rand.Read(authLogRefKey); err != nil {
+			panic("auth log ref key: " + err.Error())
+		}
+	})
+	mac := hmac.New(sha256.New, authLogRefKey)
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil)[:6])
 }
 
 func warnLogHomeCredentialFailure(ctx context.Context, operation, provider string, auth *Auth, err error) {
@@ -2076,10 +2096,10 @@ func warnLogHomeCredentialFailure(ctx context.Context, operation, provider strin
 	if statusCode := statusCodeFromError(err); statusCode != 0 {
 		fields["status"] = statusCode
 	}
-	logEntryWithRequestID(ctx).WithFields(fields).Warnf("Home credential operation failed: err=%s", safeErrorDiagnosticForLog(err))
+	logEntryWithRequestID(ctx).WithFields(fields).Warnf("Home credential operation failed: err=%s", safeErrorDiagnosticForLog(err, auth))
 }
 
-func safeErrorDiagnosticForLog(err error) string {
+func safeErrorDiagnosticForLog(err error, auths ...*Auth) string {
 	if err == nil {
 		return ""
 	}
@@ -2091,6 +2111,19 @@ func safeErrorDiagnosticForLog(err error) string {
 	if errors.As(err, &diagnosticErr) && diagnosticErr != nil {
 		if markedDiagnostic := strings.TrimSpace(diagnosticErr.LogDiagnostic()); markedDiagnostic != "" {
 			diagnostic = markedDiagnostic
+		}
+	}
+	// Store/refresh errors may repeat an auth file name outside a named field.
+	// Remove the complete known identity before generic redaction can leave a
+	// filename hash or account prefix visible (smarty-dev#5423).
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		for _, identity := range []string{auth.FileName, auth.ID, filepath.Base(auth.FileName)} {
+			if identity != "" && identity != "." {
+				diagnostic = strings.ReplaceAll(diagnostic, identity, "[REDACTED]")
+			}
 		}
 	}
 	return logging.SafeDiagnosticForLog(diagnostic)
@@ -2117,7 +2150,7 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 		}
 	}
 	authIdent := formatAuthIdentity(auth, provider)
-	errSummary := safeErrorDiagnosticForLog(err)
+	errSummary := safeErrorDiagnosticForLog(err, auth)
 	duration = duration.Round(time.Millisecond)
 	if statusCode := statusCodeFromError(err); statusCode != 0 {
 		entry.Warnf("%3d | %13v | upstream execution failed: provider=%s model=%s auth=%s err=%s", statusCode, duration, provider, model, authIdent, errSummary)

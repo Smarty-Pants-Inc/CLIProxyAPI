@@ -27,7 +27,17 @@ func matchProvider(provider string, targets []string) (string, bool) {
 }
 
 func (w *Watcher) start(ctx context.Context) error {
-	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
+	absolute, errPath := filepath.Abs(w.configPath)
+	if errPath != nil {
+		return errPath
+	}
+	canonical, errResolve := filepath.EvalSymlinks(absolute)
+	if errResolve != nil {
+		return errResolve
+	}
+	w.configPath = canonical
+	// Publication replaces the inode; watch the stable parent directory instead.
+	if errAddConfig := w.watcher.Add(filepath.Dir(w.configPath)); errAddConfig != nil {
 		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
 		return errAddConfig
 	}
@@ -46,6 +56,7 @@ func (w *Watcher) start(ctx context.Context) error {
 }
 
 func (w *Watcher) processEvents(ctx context.Context) {
+	defer w.stopConfigRetry()
 	for {
 		select {
 		case <-ctx.Done():
@@ -101,7 +112,22 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
+		statSucceeded := false
 		if _, statErr := os.Stat(event.Name); statErr == nil {
+			statSucceeded = true
+		} else if w.isKnownAuthFile(event.Name) {
+			// On macOS (and under disk I/O pressure), atomic replace (e.g. os.Rename from temp file)
+			// can trigger a NOTE_DELETE before the target inode is fully visible. Retry briefly
+			// before treating a known auth file as permanently removed.
+			for attempt := 0; attempt < 3; attempt++ {
+				time.Sleep(25 * time.Millisecond)
+				if _, retryErr := os.Stat(event.Name); retryErr == nil {
+					statSucceeded = true
+					break
+				}
+			}
+		}
+		if statSucceeded {
 			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return

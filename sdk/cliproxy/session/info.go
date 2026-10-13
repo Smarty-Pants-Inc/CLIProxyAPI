@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -33,6 +33,52 @@ type SessionInfo struct {
 // SessionTreeInfo is an alias for SessionInfo for backward compatibility.
 type SessionTreeInfo = SessionInfo
 
+// sessionObject indexes top-level fields once so missing session keys do not
+// rescan large message arrays for every candidate path.
+type sessionObject struct {
+	result     gjson.Result
+	fields     map[string]gjson.Result
+	duplicates map[string]bool
+}
+
+func newSessionObject(result gjson.Result) sessionObject {
+	object := sessionObject{result: result}
+	if result.Type != gjson.JSON {
+		return object
+	}
+	result.ForEach(func(key, value gjson.Result) bool {
+		if object.fields == nil {
+			object.fields = make(map[string]gjson.Result)
+		}
+		if _, exists := object.fields[key.Str]; exists {
+			if object.duplicates == nil {
+				object.duplicates = make(map[string]bool)
+			}
+			object.duplicates[key.Str] = true
+		} else {
+			object.fields[key.Str] = value
+		}
+		return true
+	})
+	return object
+}
+
+func (object sessionObject) Exists() bool {
+	return object.result.Exists()
+}
+
+func (object sessionObject) Get(path string) gjson.Result {
+	key, remaining, nested := strings.Cut(path, ".")
+	if nested && object.duplicates[key] {
+		return object.result.Get(path)
+	}
+	value := object.fields[key]
+	if nested && value.Exists() {
+		return value.Get(remaining)
+	}
+	return value
+}
+
 // ExtractSessionInfo extracts session hierarchy and client identification from request attributes.
 // Priority matches selector.go:
 //  1. X-Claude-Code-Session-Id
@@ -47,7 +93,30 @@ type SessionTreeInfo = SessionInfo
 //  10. prompt_cache_key (pck:), conversation.id (conv:), metadata.user_id (user:)
 //  11. conversation_id / chat_id
 //  12. execution_session_id metadata
+//
+// Payload paths are resolved against sessionPayloadView(payload), a small cached
+// projection of the session-relevant top-level members, so the full body (often
+// megabytes of messages) is usually JSON-parsed once per distinct payload instead of
+// once per lookup. Payloads over the cache's size limits, evicted entries and hash
+// collisions are parsed again (correct, just slower). Every call still makes linear byte passes over the body (the cache
+// hash and, on a hit, a bytes.Equal check), which is far cheaper than the parse.
+// Headers and metadata are evaluated on every call.
 func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
+	view := sessionPayloadView(payload)
+	info, ok := extractSessionInfo(headers, view, metadata)
+	if sessionPayloadViewObserver != nil {
+		sessionPayloadViewObserver(headers, payload, metadata, info, ok)
+	}
+	return info, ok
+}
+
+// sessionPayloadViewObserver is a test hook that lets tests compare the projected
+// result against extractSessionInfo on the raw payload. It is nil in production.
+var sessionPayloadViewObserver func(headers http.Header, payload []byte, metadata map[string]any, info SessionInfo, ok bool)
+
+// extractSessionInfo implements ExtractSessionInfo. payload may be the full
+// request body or its sessionPayloadView; both yield the same result.
+func extractSessionInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
 	var info SessionInfo
 	if metadata != nil {
 		if scope, ok := metadata[cliproxyexecutor.CallerScopeMetadataKey].(string); ok {
@@ -55,18 +124,18 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 	}
 
-	var root gjson.Result
-	var reqRoot gjson.Result
+	var root sessionObject
+	var reqRoot sessionObject
 	var hasNestedReq bool
 	var parentCandidate string
 
 	if len(payload) > 0 {
-		root = util.ParseGJSONBytesNoCopy(payload)
+		root = newSessionObject(util.ParseGJSONBytesNoCopy(payload))
 		reqRoot = root
 		req := root.Get("request")
 		hasNestedReq = req.Exists() && !root.Get("contents").Exists()
 		if hasNestedReq {
-			reqRoot = req
+			reqRoot = newSessionObject(req)
 		}
 		for _, p := range []string{
 			// Standard session / thread parent keys
@@ -853,7 +922,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	return SessionInfo{}, false
 }
 
-func isBodyForkCandidate(root, reqRoot gjson.Result, hasNestedReq bool) bool {
+func isBodyForkCandidate(root, reqRoot sessionObject, hasNestedReq bool) bool {
 	if !root.Exists() {
 		return false
 	}

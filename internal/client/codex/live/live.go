@@ -17,13 +17,13 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -874,7 +874,7 @@ func setAccountHeader(headers http.Header, selected *auth.Auth) {
 	if selected == nil {
 		return
 	}
-	if accountID, ok := selected.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+	if accountID := selected.MetadataString("account_id"); strings.TrimSpace(accountID) != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
 }
@@ -922,8 +922,12 @@ func writeLiveError(c *gin.Context, status int, message string) {
 
 func writeSelectionError(c *gin.Context, err error) {
 	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusServiceUnavailable)
-	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
+	safeHeaders := auth.SafeResponseHeaders(err)
+	for _, value := range safeHeaders.Values("Retry-After") {
 		c.Writer.Header().Add("Retry-After", value)
+	}
+	if value := safeHeaders.Get("X-Should-Retry"); value != "" {
+		c.Writer.Header().Set("X-Should-Retry", value)
 	}
 	writeLiveError(c, status, err.Error())
 }

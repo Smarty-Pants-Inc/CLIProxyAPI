@@ -11,11 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+const antigravityCredentialAcquisitionTimeout = 30 * time.Second
 
 // Refresh refreshes the authentication credentials using the refresh token.
 func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -71,7 +73,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 	if auth == nil {
 		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
-	accessToken := metaStringValue(auth.Metadata, "access_token")
+	accessToken := metaStringValue(auth.CloneMetadata(), "access_token")
 	expiry, _ := auth.ExpirationTime()
 	if accessToken != "" && expiry.After(time.Now().Add(antigravityRequestTokenSafetyWindow)) {
 		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)
@@ -87,7 +89,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		if err != nil {
 			return "", nil, err
 		}
-		token := metaStringValue(refreshed.Metadata, "access_token")
+		token := metaStringValue(refreshed.CloneMetadata(), "access_token")
 		if strings.TrimSpace(token) == "" {
 			return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 		}
@@ -116,7 +118,10 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	refreshToken = strings.TrimSpace(refreshToken)
 
 	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return e.refreshTokenSingleFlight(context.WithoutCancel(ctx), auth, refreshToken)
+		// A caller may leave, but shared credential acquisition must still be bounded.
+		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), antigravityCredentialAcquisitionTimeout)
+		defer cancelRefresh()
+		return e.refreshTokenSingleFlight(refreshCtx, auth, refreshToken)
 	})
 	if errRefresh != nil {
 		return auth, errRefresh
@@ -141,7 +146,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
 		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
 	}
-	e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
+	e.queueAntigravityCreditsRefresh(ctx, auth, tokenResp.AccessToken, 0)
 	return auth, nil
 }
 
@@ -162,7 +167,7 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "oauth_refresh").Do(httpReq)
 	if errDo != nil {
 		return nil, errDo
 	}
@@ -222,14 +227,21 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (string, error) {
 	token := strings.TrimSpace(accessToken)
 	if token == "" {
-		token = metaStringValue(auth.Metadata, "access_token")
+		token = metaStringValue(auth.CloneMetadata(), "access_token")
 	}
 	if token == "" {
 		return "", nil
 	}
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(ctx, token, httpClient)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Project discovery is required credential preparation, not a generation request.
+	acquisitionCtx, cancelAcquisition := context.WithTimeout(ctx, antigravityCredentialAcquisitionTimeout)
+	defer cancelAcquisition()
+	httpClient := newAntigravityHTTPClient(acquisitionCtx, e.cfg, auth, 0)
+	tracedClient := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "project_discovery")
+	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(acquisitionCtx, token, tracedClient)
 	if errFetch != nil {
 		return "", errFetch
 	}
@@ -244,13 +256,7 @@ func (e *AntigravityExecutor) projectIDForRequest(_ context.Context, auth *clipr
 }
 
 func antigravityProjectIDFromAuth(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Metadata == nil {
-		return ""
-	}
-	if pid, ok := auth.Metadata["project_id"].(string); ok {
-		return strings.TrimSpace(pid)
-	}
-	return ""
+	return strings.TrimSpace(auth.MetadataString("project_id"))
 }
 
 func missingAntigravityProjectIDError(cause error) statusErr {

@@ -15,14 +15,14 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	ex "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	tr "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	ex "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	tr "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // Exercise the real manager admission, header expansion and HTTP/SSE transports.
@@ -128,9 +128,9 @@ func TestCodexRestrictedAuthorityHTTPAndSSE(t *testing.T) {
 					if tc.host == "fixed-tenant.example" {
 						wantHost = tc.host
 					}
-					if !tc.restricted && i == 1 {
-						wantHost = "other-tenant.example"
-					}
+					// client_host_unpolicied is the unrestricted F27 regression
+					// (smarty-dev#3203): a dynamic Host is dropped, so even an
+					// unpolicied send keeps the endpoint authority.
 					wantProbe := u.Host
 					if i == 1 {
 						wantProbe = "other-tenant.example"

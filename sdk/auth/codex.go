@@ -7,19 +7,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	// legacy client removed
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
 // CodexAuthenticator implements the OAuth login flow for Codex accounts.
 type CodexAuthenticator struct {
 	CallbackPort int
+	// HTTPClient overrides the proxy-configured client for authorization-code exchange.
+	// Nil keeps the production client; TokenURL defaults to the OpenAI endpoint.
+	HTTPClient *http.Client
+	TokenURL   string
 }
 
 // NewCodexAuthenticator constructs a Codex authenticator with default settings.
@@ -66,6 +70,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	}
 
 	oauthServer := codex.NewOAuthServer(callbackPort)
+	oauthServer.SetExpectedState(state)
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
 			return nil, codex.NewAuthenticationError(codex.ErrPortInUse, err)
@@ -80,7 +85,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		}
 	}()
 
-	authSvc := codex.NewCodexAuth(cfg)
+	authSvc := codex.NewCodexAuthWithHTTPClient(cfg, a.HTTPClient, a.TokenURL)
 
 	authURL, err := authSvc.GenerateAuthURL(state, pkceCodes)
 	if err != nil {

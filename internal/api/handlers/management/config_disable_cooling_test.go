@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestPatchDisableCoolingOverrideForEveryFamily(t *testing.T) {
@@ -111,6 +111,7 @@ func TestPatchDisableCoolingOverrideForEveryFamily(t *testing.T) {
 			cfg := &config.Config{}
 			tc.setup(cfg)
 			h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			loadHandlerConfigBaseline(t, h)
 
 			patch := func(value string) *httptest.ResponseRecorder {
 				t.Helper()

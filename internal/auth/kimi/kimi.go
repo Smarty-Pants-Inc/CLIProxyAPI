@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -139,8 +139,8 @@ func ResolveKimiDomainFromAuth(auth *cliproxyauth.Auth) string {
 		}
 	}
 	// 2. Metadata
-	if auth.Metadata != nil {
-		if dom, ok := auth.Metadata["domain"].(string); ok && strings.TrimSpace(dom) != "" {
+	if metadata := auth.CloneMetadata(); metadata != nil {
+		if dom, ok := metadata["domain"].(string); ok && strings.TrimSpace(dom) != "" {
 			if IsKimiAIDomain(dom) {
 				return KimiAIDomain
 			}
@@ -148,7 +148,7 @@ func ResolveKimiDomainFromAuth(auth *cliproxyauth.Auth) string {
 				return KimiDefaultDomain
 			}
 		}
-		if bu, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(bu) != "" {
+		if bu, ok := metadata["base_url"].(string); ok && strings.TrimSpace(bu) != "" {
 			if isKimiAIHost(bu) {
 				return KimiAIDomain
 			}
@@ -156,7 +156,7 @@ func ResolveKimiDomainFromAuth(auth *cliproxyauth.Auth) string {
 				return KimiDefaultDomain
 			}
 		}
-		if t, ok := auth.Metadata["type"].(string); ok && strings.TrimSpace(t) != "" {
+		if t, ok := metadata["type"].(string); ok && strings.TrimSpace(t) != "" {
 			if IsKimiAIDomain(t) {
 				return KimiAIDomain
 			}

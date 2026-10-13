@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // midSystemLegacyPayload is a caller body pairing a legacy model with a
@@ -55,7 +56,7 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 		u.called = true
 		u.headers = req.Header.Clone()
 		contentType := "application/json"
-		responseBody := `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+		responseBody := `{"id":"msg_1","type":"message","role":"assistant","model":"` + gjson.GetBytes(payload, "model").String() + `","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
 		if strings.Contains(req.URL.Path, "count_tokens") {
 			responseBody = `{"input_tokens":18}`
 		} else if gjson.GetBytes(payload, "stream").Bool() {
@@ -63,7 +64,7 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 			// A translated caller aggregates the stream back into one message, so
 			// the stub has to complete the block and report a stop reason.
 			responseBody = strings.Join([]string{
-				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"` + gjson.GetBytes(payload, "model").String() + `","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
 				`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 				`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
 				`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
@@ -149,8 +150,12 @@ func sendMidSystemExecute(t *testing.T, ex *ClaudeExecutor, ctx context.Context,
 
 func sendMidSystemStream(t *testing.T, ex *ClaudeExecutor, ctx context.Context, model string) error {
 	t.Helper()
+	payload, err := sjson.SetBytes(midSystemLegacyPayload(model), "stream", true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
-		Model: model, Payload: midSystemLegacyPayload(model),
+		Model: model, Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 	if err != nil {
 		return err
@@ -171,8 +176,7 @@ func sendMidSystemCountTokens(t *testing.T, ex *ClaudeExecutor, ctx context.Cont
 	return err
 }
 
-// Payload rules run long after translation and can rewrite model and messages,
-// so the guard has to read the finished body rather than an intermediate one.
+// Read-only validation rejects an incompatible final model/messages pairing.
 func TestClaudeExecutor_PayloadOverrideCannotSmuggleLegacyMidSystemMessage(t *testing.T) {
 	upstream := &midSystemUpstream{}
 	cfg := midSystemConfig()
@@ -183,7 +187,7 @@ func TestClaudeExecutor_PayloadOverrideCannotSmuggleLegacyMidSystemMessage(t *te
 	ex := NewClaudeExecutor(cfg)
 
 	// The caller addresses a model that accepts the turn; only the payload rule
-	// turns it into the rejected pairing.
+	// selects the otherwise incompatible pairing.
 	_, err := ex.Execute(upstream.context(t, nil), midSystemAuth(), cliproxyexecutor.Request{
 		Model: "claude-sonnet-5", Payload: midSystemLegacyPayload("claude-sonnet-5"),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
@@ -192,7 +196,7 @@ func TestClaudeExecutor_PayloadOverrideCannotSmuggleLegacyMidSystemMessage(t *te
 
 // A caller may already have the exact role=system turn that cloaking would
 // otherwise insert. The message-count proof must keep that turn caller-owned,
-// so a later legacy model rewrite is rejected instead of silently consuming it.
+// and a later explicit model override must not silently consume it.
 func TestClaudeExecutor_PayloadOverrideDoesNotClaimMatchingCallerTurn(t *testing.T) {
 	upstream := &midSystemUpstream{}
 	cfg := midSystemConfig()
@@ -214,9 +218,9 @@ func TestClaudeExecutor_PayloadOverrideDoesNotClaimMatchingCallerTurn(t *testing
 
 // Cloaking relocates a caller's system prompt into a role=system turn for models
 // that accept one. A payload rule can then rewrite the model to one that does
-// not. Because the caller never wrote that turn, CPA must reconcile its own
-// placement through the legacy reminder path instead of returning 400.
-func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testing.T) {
+// not. CPA must not rerun placement; read-only validation rejects the final
+// incompatible pairing instead of silently rewriting the configured body.
+func TestClaudeExecutor_PayloadOverrideDoesNotRerunSystemPlacement(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		send func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error
@@ -228,9 +232,14 @@ func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testin
 			return err
 		}},
 		{name: "execute stream", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error {
+			// Native Claude callers own the payload; ask the mock for an SSE response.
+			payload, err := sjson.SetBytes(payload, "stream", true)
+			if err != nil {
+				return err
+			}
 			result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
-			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true})
 			if err != nil {
 				return err
 			}
@@ -255,30 +264,16 @@ func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testin
 			// role=system turn.
 			payload := []byte(`{"model":"claude-sonnet-5","max_tokens":32,` +
 				`"system":[{"type":"text","text":"Caller top"}],` +
-				`"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+				`"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},` +
+				`{"role":"assistant","content":[{"type":"text","text":"hello"}]},` +
+				`{"role":"user","content":[{"type":"text","text":"follow-up"}]}]}`)
 
-			if err := test.send(t, ex, upstream.context(t, nil), payload); err != nil {
-				t.Fatalf("request error = %v, want CPA's inserted turn reconciled", err)
-			}
-			if !upstream.called {
-				t.Fatal("expected reconciled request to reach upstream")
-			}
-			if got := gjson.GetBytes(upstream.body, "model").String(); got != "claude-haiku-4-5-20251001" {
-				t.Fatalf("upstream model = %q, want payload override preserved", got)
-			}
-			if gjson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists() {
-				t.Fatalf("reconciled body still carries role=system; body=%s", upstream.body)
-			}
-			if !strings.Contains(gjson.GetBytes(upstream.body, "messages.0.content").Raw, "<system-reminder>") ||
-				!strings.Contains(gjson.GetBytes(upstream.body, "messages.0.content").Raw, "Caller top") {
-				t.Fatalf("caller system prompt was not replayed as a legacy reminder; body=%s", upstream.body)
-			}
+			errSend := test.send(t, ex, upstream.context(t, nil), payload)
+			assertMidSystemRejected(t, errSend, upstream)
 		})
 	}
 }
 
-// A confirmed native caller owns its wire. It gates the turn on the model
-// itself, so CPA forwards the body untouched and lets the upstream answer.
 func TestClaudeExecutor_ConfirmedNativeLegacyMidSystemMessageForwarded(t *testing.T) {
 	upstream := &midSystemUpstream{}
 	ex := NewClaudeExecutor(midSystemConfig())
@@ -482,5 +477,61 @@ func TestValidateClaudeMidSystemMessageModel(t *testing.T) {
 				t.Fatalf("error = %v, want the offending model named", err)
 			}
 		})
+	}
+}
+
+// Payload rules can repair an otherwise invalid caller pairing. Validation must
+// inspect the configured body without translating or normalizing it again.
+func TestClaudeExecutorPayloadRepairsLegacyMidSystemMessage(t *testing.T) {
+	const legacyModel = "claude-haiku-4-5-20251001"
+	const supportedModel = "claude-sonnet-5"
+	models := []config.PayloadModelRule{{Name: legacyModel, Protocol: "claude"}}
+	for _, path := range []struct {
+		name string
+		send func(*testing.T, *ClaudeExecutor, context.Context, string) error
+	}{
+		{name: "execute", send: sendMidSystemExecute},
+		{name: "stream", send: sendMidSystemStream},
+	} {
+		for _, repair := range []struct {
+			name       string
+			payload    config.PayloadConfig
+			wantModel  string
+			wantSystem bool
+		}{
+			{
+				name:      "filter system turns",
+				payload:   config.PayloadConfig{Filter: []config.PayloadFilterRule{{Models: models, Params: []string{`messages.#(role=="system")#`}}}},
+				wantModel: legacyModel,
+			},
+			{
+				name:       "override supported model",
+				payload:    config.PayloadConfig{Override: []config.PayloadRule{{Models: models, Params: map[string]any{"model": supportedModel}}}},
+				wantModel:  supportedModel,
+				wantSystem: true,
+			},
+		} {
+			t.Run(path.name+"/"+repair.name, func(t *testing.T) {
+				upstream := &midSystemUpstream{}
+				cfg := midSystemConfig()
+				cfg.Payload = repair.payload
+				executor := NewClaudeExecutor(cfg)
+				if errSend := path.send(t, executor, upstream.context(t, nil), legacyModel); errSend != nil {
+					t.Fatalf("configured repair rejected: %v", errSend)
+				}
+				if !upstream.called {
+					t.Fatal("repaired body did not reach upstream")
+				}
+				if got := gjson.GetBytes(upstream.body, "model").String(); got != repair.wantModel {
+					t.Fatalf("final model = %q, want %q", got, repair.wantModel)
+				}
+				if got := gjson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists(); got != repair.wantSystem {
+					t.Fatalf("final system-turn presence = %v, want %v; body=%s", got, repair.wantSystem, upstream.body)
+				}
+				if !gjson.GetBytes(upstream.body, `messages.#(role=="user")`).Exists() {
+					t.Fatalf("repair removed caller user turn: %s", upstream.body)
+				}
+			})
+		}
 	}
 }

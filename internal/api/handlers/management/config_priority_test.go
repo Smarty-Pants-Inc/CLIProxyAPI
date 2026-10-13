@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestPatchPriorityForEveryProvider(t *testing.T) {
@@ -96,6 +96,7 @@ func TestPatchPriorityForEveryProvider(t *testing.T) {
 			test.setup(cfg)
 			configFile := writeTestConfigFile(t)
 			h := &Handler{cfg: cfg, configFilePath: configFile}
+			loadHandlerConfigBaseline(t, h)
 
 			// Update priority to 7
 			rec := httptest.NewRecorder()

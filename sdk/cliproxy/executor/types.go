@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"net/url"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
@@ -32,6 +32,12 @@ const ServiceTierMetadataKey = "service_tier"
 // the callback with the socket's actual auth and final payload before each write.
 // Absence preserves requests whose origin has no local compaction affinity.
 const CompactionAffinityValidatorMetadataKey = "compaction_affinity_validator"
+
+// CompactionAffinitySanitizerMetadataKey carries an optional
+// func(authID string, payload []byte) []byte that removes compaction blocks the
+// socket account did not sign (or whose signer is unknown) before validation
+// (smarty-dev#8742: degrade instead of refusing the frame).
+const CompactionAffinitySanitizerMetadataKey = "compaction_affinity_sanitizer"
 
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.
 // Missing or true means generation is enabled; only an explicit false disables generation.
@@ -121,7 +127,7 @@ type RequestAfterAuthInterceptRequest struct {
 	Stream bool
 	// Headers contains the current upstream request headers.
 	Headers http.Header
-	// Body contains the current request payload.
+	// Body contains the current request payload. Treat it as read-only; modifications must be returned in RequestAfterAuthInterceptResponse.Body.
 	Body []byte
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any
@@ -129,6 +135,8 @@ type RequestAfterAuthInterceptRequest struct {
 
 // RequestAfterAuthInterceptResponse returns selected-auth request modifications.
 type RequestAfterAuthInterceptResponse struct {
+	// Path optionally overrides the inbound request path in Options.Metadata[RequestPathMetadataKey].
+	Path string
 	// Headers replaces matching current request headers and preserves headers not mentioned here.
 	Headers http.Header
 	// Body replaces the current request body only when non-empty.

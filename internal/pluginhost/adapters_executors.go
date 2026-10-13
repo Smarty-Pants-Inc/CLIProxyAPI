@@ -11,13 +11,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type executorManager interface {
@@ -411,7 +411,16 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	nativeReq := req
 	nativeOpts := opts
 	if inputRequested != "" && inputRequested != inputFormat {
-		nativeReq.Payload = sdktranslator.TranslateRequest(inputRequested, inputFormat, req.Model, req.Payload, opts.Stream)
+		translated := sdktranslator.TranslateRequestEnvelope(context.Background(), inputRequested, inputFormat, sdktranslator.RequestEnvelope{
+			Format: inputRequested,
+			Model:  req.Model,
+			Stream: opts.Stream,
+			Body:   req.Payload,
+		})
+		if translated.Err != nil {
+			return preparedExecutorCall{}, translated.Err
+		}
+		nativeReq.Payload = translated.Body
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
@@ -924,10 +933,20 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		data.ProxyURL = auth.ProxyURL
 	}
 	if len(data.Metadata) == 0 && auth != nil {
-		data.Metadata = cloneAnyMap(auth.Metadata)
+		data.Metadata = auth.CloneMetadata()
 	}
-	if len(data.Attributes) == 0 && auth != nil {
-		data.Attributes = cloneStringMap(auth.Attributes)
+	if len(data.Attributes) == 0 {
+		if auth != nil {
+			data.Attributes = cloneStringMap(auth.Attributes)
+		}
+	} else if auth != nil {
+		attributes := cloneStringMap(data.Attributes)
+		for key, value := range auth.Attributes {
+			if _, exists := attributes[key]; !exists {
+				attributes[key] = value
+			}
+		}
+		data.Attributes = attributes
 	}
 	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
@@ -939,7 +958,11 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	if !pluginResp.NextRefreshAfter.IsZero() {
 		data.NextRefreshAfter = pluginResp.NextRefreshAfter
 	}
-	next := a.host.AuthDataToCoreAuth(data, "", data.FileName)
+	path := ""
+	if auth != nil && auth.Attributes != nil {
+		path = auth.Attributes[coreauth.AttributePath]
+	}
+	next := a.host.AuthDataToCoreAuth(data, path, data.FileName)
 	if next == nil {
 		return nil, fmt.Errorf("plugin executor %s refresh returned invalid auth data", a.Identifier())
 	}
@@ -1052,10 +1075,11 @@ func storageJSONFromAuth(auth *coreauth.Auth) []byte {
 	if rawProvider, okRaw := auth.Storage.(interface{ RawJSON() []byte }); okRaw {
 		return bytes.Clone(rawProvider.RawJSON())
 	}
-	if len(auth.Metadata) == 0 {
+	metadata := auth.CloneMetadata()
+	if len(metadata) == 0 {
 		return nil
 	}
-	data, errMarshal := json.Marshal(auth.Metadata)
+	data, errMarshal := json.Marshal(metadata)
 	if errMarshal != nil {
 		return nil
 	}

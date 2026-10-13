@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	auth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	translator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -22,14 +22,14 @@ import (
 // for byte, including the signature.
 const claudeCompactionTestBlock = `{"type":"compaction","content":"Summary: codeword PLUM-42.","signature":"EuYBCkQYsig/+=="}`
 
-type claudeCompactionUpstream struct {
+type claudeNativeCompactionUpstream struct {
 	bodies  [][]byte
 	betas   []string
 	stop    string
 	summary bool
 }
 
-func (u *claudeCompactionUpstream) serve(t *testing.T) *httptest.Server {
+func (u *claudeNativeCompactionUpstream) serve(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
 		if errRead != nil {
@@ -109,7 +109,7 @@ func claudeCompactionItems(payload string, stream bool) []gjson.Result {
 func TestClaudeCompactionOnDemandRoundTrip(t *testing.T) {
 	for _, stream := range []bool{true, false} {
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
-			upstream := &claudeCompactionUpstream{stop: "compaction", summary: true}
+			upstream := &claudeNativeCompactionUpstream{stop: "compaction", summary: true}
 			server := upstream.serve(t)
 			defer server.Close()
 
@@ -170,7 +170,7 @@ func TestClaudeCompactionFailsClosed(t *testing.T) {
 	} {
 		for _, stream := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
-				upstream := &claudeCompactionUpstream{stop: tc.stop, summary: tc.summary}
+				upstream := &claudeNativeCompactionUpstream{stop: tc.stop, summary: tc.summary}
 				server := upstream.serve(t)
 				defer server.Close()
 				payload, err := claudeCompactionRun(t, server, claudeCompactionRequest(tc.input), stream)

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -45,11 +45,15 @@ func GetRequestInfo(ctx context.Context) *RequestInfo {
 }
 
 // Auth encapsulates the runtime state and metadata associated with a single credential.
+// Auth must not be copied by value; use Clone instead.
 type Auth struct {
+	metadataMu sync.RWMutex
 	// ID uniquely identifies the auth record across restarts.
 	ID string `json:"id"`
 	// RegistrationEpoch tracks monotonic registration cycles across unregister/re-register.
 	RegistrationEpoch uint64 `json:"registration_epoch,omitempty"`
+	// CredentialVersion tracks monotonic credential replacements for secret material.
+	CredentialVersion uint64 `json:"credential_version,omitempty"`
 	// Generation tracks monotonic mutations to resolve scheduler/reconcile snapshot races.
 	Generation uint64 `json:"generation,omitempty"`
 	// Index is a stable runtime identifier derived from auth metadata (not persisted).
@@ -77,6 +81,8 @@ type Auth struct {
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).
+	// Direct access is only safe before publication. Use the metadata methods once shared.
+	// Nested values must be treated as immutable and replaced, not mutated in place.
 	Metadata map[string]any `json:"metadata,omitempty"`
 	// Quota captures recent quota information for load balancers.
 	Quota QuotaState `json:"quota"`
@@ -90,6 +96,8 @@ type Auth struct {
 	LastRefreshedAt time.Time `json:"last_refreshed_at"`
 	// NextRefreshAfter is the earliest time a refresh should retrigger.
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
+	// RefreshFailures tracks consecutive refresh failures for exponential backoff (in-memory only).
+	RefreshFailures int `json:"-"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ModelStates tracks per-model runtime availability data.
@@ -97,6 +105,9 @@ type Auth struct {
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+
+	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
+	RejectedAccessToken string `json:"-"`
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -289,21 +300,25 @@ func (a *Auth) Clone() *Auth {
 	if a == nil {
 		return nil
 	}
-	copyAuth := *a
-	copyAuth.Quota = a.Quota.Clone()
-	if len(a.Attributes) > 0 {
+	copyAuth := Auth{
+		ID: a.ID, RegistrationEpoch: a.RegistrationEpoch, CredentialVersion: a.CredentialVersion,
+		Generation: a.Generation, Index: a.Index, Provider: a.Provider, Prefix: a.Prefix,
+		FileName: a.FileName, Storage: a.Storage, Label: a.Label, Status: a.Status,
+		StatusMessage: a.StatusMessage, Disabled: a.Disabled, Unavailable: a.Unavailable,
+		ProxyURL: a.ProxyURL, Quota: a.Quota.Clone(), LastError: a.LastError,
+		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, LastRefreshedAt: a.LastRefreshedAt,
+		NextRefreshAfter: a.NextRefreshAfter, RefreshFailures: a.RefreshFailures,
+		NextRetryAfter: a.NextRetryAfter, Runtime: a.Runtime, RejectedAccessToken: a.RejectedAccessToken,
+		Success: a.Success, Failed: a.Failed, recentRequests: a.recentRequests, indexAssigned: a.indexAssigned,
+		Metadata: a.CloneMetadata(),
+	}
+	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
 			copyAuth.Attributes[key] = value
 		}
 	}
-	if len(a.Metadata) > 0 {
-		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
-	}
-	if len(a.ModelStates) > 0 {
+	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()
@@ -362,12 +377,7 @@ func (a *Auth) indexSeed() string {
 		}
 		filePath = filepath.Clean(filePath)
 
-		authType := ""
-		if a.Metadata != nil {
-			if rawType, ok := a.Metadata["type"].(string); ok {
-				authType = strings.TrimSpace(rawType)
-			}
-		}
+		authType := strings.TrimSpace(a.MetadataString("type"))
 		if authType == "" {
 			authType = strings.TrimSpace(provider)
 		}
@@ -465,15 +475,15 @@ func (a *Auth) ProxyInfo() string {
 // The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
 // The second return value distinguishes explicit false from an absent override.
 func (a *Auth) DisableCoolingOverride() (bool, bool) {
-	if a == nil || a.Metadata == nil {
+	if a == nil {
 		return false, false
 	}
-	if val, ok := a.Metadata["disable_cooling"]; ok {
+	if val, ok := a.MetadataValue("disable_cooling"); ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
 			return parsed, true
 		}
 	}
-	if val, ok := a.Metadata["disable-cooling"]; ok {
+	if val, ok := a.MetadataValue("disable-cooling"); ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
 			return parsed, true
 		}
@@ -485,11 +495,11 @@ func (a *Auth) DisableCoolingOverride() (bool, bool) {
 // skipped for this auth. When true, tool names are sent to Anthropic unchanged.
 // The value is read from metadata key "tool_prefix_disabled" (or "tool-prefix-disabled").
 func (a *Auth) ToolPrefixDisabled() bool {
-	if a == nil || a.Metadata == nil {
+	if a == nil {
 		return false
 	}
 	for _, key := range []string{"tool_prefix_disabled", "tool-prefix-disabled"} {
-		if val, ok := a.Metadata[key]; ok {
+		if val, ok := a.MetadataValue(key); ok {
 			if parsed, okParse := parseBoolAny(val); okParse {
 				return parsed
 			}
@@ -502,10 +512,10 @@ func (a *Auth) ToolPrefixDisabled() bool {
 // The value is read from metadata key "request_retry" (or legacy "request-retry").
 // A negative value is treated as unset and falls back to the global request-retry.
 func (a *Auth) RequestRetryOverride() (int, bool) {
-	if a == nil || a.Metadata == nil {
+	if a == nil {
 		return 0, false
 	}
-	if val, ok := a.Metadata["request_retry"]; ok {
+	if val, ok := a.MetadataValue("request_retry"); ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
 				return 0, false
@@ -513,7 +523,7 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 			return parsed, true
 		}
 	}
-	if val, ok := a.Metadata["request-retry"]; ok {
+	if val, ok := a.MetadataValue("request-retry"); ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
 				return 0, false
@@ -588,13 +598,8 @@ func (a *Auth) AccountInfo() (string, string) {
 	}
 	switch a.AuthKind() {
 	case AuthKindOAuth:
-		if a.Metadata != nil {
-			if v, ok := a.Metadata["email"].(string); ok {
-				email := strings.TrimSpace(v)
-				if email != "" {
-					return "oauth", email
-				}
-			}
+		if email := strings.TrimSpace(a.MetadataString("email")); email != "" {
+			return "oauth", email
 		}
 		return "oauth", ""
 	case AuthKindAPIKey:
@@ -615,12 +620,16 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
 	}
-	if tokenStr := authAccessToken(a); tokenStr != "" {
+	tokenStr := authAccessToken(a)
+	if tokenStr != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
+	}
+	if tokenStr != "" {
 		if jwtExp, ok := parseJWTExp(tokenStr); ok {
 			return jwtExp, true
 		}
 	}
-	if ts, ok := expirationFromMap(a.Metadata); ok {
+	if ts, ok := expirationFromMap(a.CloneMetadata()); ok {
 		return ts, true
 	}
 	return time.Time{}, false
@@ -635,6 +644,9 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 	tokenStr := authAccessToken(a)
 	if tokenStr == "" {
 		return time.Time{}, false
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
 	}
 	if jwtExp, ok := parseJWTExp(tokenStr); ok {
 		return jwtExp, true

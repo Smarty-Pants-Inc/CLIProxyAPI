@@ -7,13 +7,16 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 const (
 	diagnosticLogRuneLimit     = 300
 	diagnosticLogScanRuneLimit = 600
+	diagnosticDecodeRounds     = 2
 )
 
 var (
@@ -22,6 +25,23 @@ var (
 	authorizationLogPattern       = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[^\s,;]+`)
 	urlUserinfoLogPattern         = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`)
 	diagnosticStatusPattern       = regexp.MustCompile(`(?i)\bstatus(?:\s+code)?\s*[:=]?\s*([1-5][0-9]{2})\b`)
+
+	// Same identity and token shapes CLIProxyAPI#64 scrubs from client error frames
+	// (sdk/api/handlers/openai scrubResponsesWebsocketErrorText); smarty-dev#5423.
+	identityKeyLogPattern = regexp.MustCompile(`(?i)((?:"?(?:(?:refresh|id|session)[_-]?token|(?:chatgpt[_-]?)?account[_-]?id|org(?:anization)?[_-]?id|user[_-]?id|email|cookie)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
+	jwtLogPattern         = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)
+	apiKeyLogPattern      = regexp.MustCompile(`\b(?:sk|rt|sess|org)-[A-Za-z0-9_-]{8,}`)
+	emailLogPattern       = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+	uuidLogPattern        = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+
+	// Encoded forms (smarty-dev#5423 security round 1): decode a bounded copy of
+	// URL (%XX) and JSON (\uXXXX, \", \/, \\) escapes before matching, then
+	// redact opaque base64/base64url values that the shape patterns cannot see.
+	urlEscapeLogPattern    = regexp.MustCompile(`%[0-9A-Fa-f]{2}`)
+	jsonEscapeLogPattern   = regexp.MustCompile(`\\u[0-9A-Fa-f]{4}|\\["/\\]`)
+	secretFieldLogPattern  = regexp.MustCompile(`(?i)((?:key|sig|signature|auth|session)["']?\s*[:=]\s*["']?)[A-Za-z0-9+/_.~-]{16,}={0,2}`)
+	opaqueBase64LogPattern = regexp.MustCompile(`[A-Za-z0-9+/_-]{32,}={0,2}`)
+	hexRequestIDLogPattern = regexp.MustCompile(`^[0-9A-Fa-f]{32}$`)
 )
 
 // SafeDiagnosticForLog returns a bounded, single-line diagnostic suitable for
@@ -39,11 +59,70 @@ func SafeDiagnosticForLog(message string) string {
 	if excerpt == "" {
 		return ""
 	}
+	excerpt = decodeDiagnosticEscapes(excerpt)
 	excerpt = urlUserinfoLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]@`)
 	excerpt = sensitiveLogAssignmentPattern.ReplaceAllString(excerpt, `${1}"[REDACTED]"`)
 	excerpt = authorizationLogPattern.ReplaceAllString(excerpt, `${1} [REDACTED]`)
+	excerpt = identityKeyLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]`)
+	for _, pattern := range []*regexp.Regexp{jwtLogPattern, apiKeyLogPattern, emailLogPattern, uuidLogPattern} {
+		excerpt = pattern.ReplaceAllString(excerpt, "[REDACTED]")
+	}
+	excerpt = secretFieldLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]`)
+	excerpt = opaqueBase64LogPattern.ReplaceAllStringFunc(excerpt, redactOpaqueBase64)
 
 	return truncateDiagnosticLogExcerpt(excerpt, sourceTruncated)
+}
+
+// decodeDiagnosticEscapes decodes URL and JSON escapes in an already bounded
+// excerpt, up to diagnosticDecodeRounds times for double encoding. Decoding
+// only shortens the text; invalid sequences stay as they are, and invalid
+// UTF-8 or control characters from decoded bytes are replaced.
+func decodeDiagnosticEscapes(excerpt string) string {
+	for round := 0; round < diagnosticDecodeRounds; round++ {
+		decoded := urlEscapeLogPattern.ReplaceAllStringFunc(excerpt, func(escape string) string {
+			value, _ := strconv.ParseUint(escape[1:], 16, 8)
+			return string([]byte{byte(value)})
+		})
+		decoded = jsonEscapeLogPattern.ReplaceAllStringFunc(decoded, func(escape string) string {
+			if len(escape) == 2 {
+				return escape[1:]
+			}
+			value, _ := strconv.ParseUint(escape[2:], 16, 32)
+			return string(rune(value))
+		})
+		if decoded == excerpt {
+			break
+		}
+		excerpt = decoded
+	}
+	excerpt = strings.ToValidUTF8(excerpt, "?")
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, excerpt)), " ")
+}
+
+// redactOpaqueBase64 redacts a 32+ char base64/base64url run unless it reads
+// as a path, identifier or request id: split on '/', '-' and '_', every piece
+// must be a 32-hex request id or a short (<16) piece without upper case.
+// That keeps /v1/responses/compact, model names and hex request ids readable
+// and redacts any opaque token, whatever its case mix (smarty-dev#5423).
+// ponytail: a 32-hex secret, or a secret made only of short lower-case pieces,
+// still passes outside a named field (see secretFieldLogPattern).
+func redactOpaqueBase64(run string) string {
+	for _, piece := range strings.FieldsFunc(strings.TrimRight(run, "="), func(r rune) bool {
+		return r == '/' || r == '-' || r == '_'
+	}) {
+		if hexRequestIDLogPattern.MatchString(piece) {
+			continue
+		}
+		if len(piece) >= 16 || strings.IndexFunc(piece, func(r rune) bool { return r >= 'A' && r <= 'Z' }) >= 0 || strings.Contains(piece, "+") {
+			return "[REDACTED]"
+		}
+	}
+	return run
 }
 
 // SafeErrorDiagnostic extracts only allowlisted failure signals from an

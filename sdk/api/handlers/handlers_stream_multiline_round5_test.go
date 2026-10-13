@@ -118,12 +118,15 @@ func TestSSEJSONValidationIncrementalKeepsDecisions(t *testing.T) {
 	}
 }
 
-// F2 downstream: a Scanner comment or id line inside a held multiline data
-// event is its own SSE line, so the event stays valid JSON.
+// F2 downstream: after Scanner framing is established, a comment or id line
+// inside a held multiline data event is its own SSE line.
 func TestSSEJSONValidationScannerControlInsideMultilineEvent(t *testing.T) {
 	for _, control := range []string{": keepalive", "id: 7", "retry: 10"} {
 		units := []string{`data: {"a":1,`, control, `data: "b":2}`}
 		state := &sseJSONValidationState{}
+		if ready, err := state.AddChunk([]byte(`data: {}`)); err != nil || string(ready) != `data: {}` {
+			t.Fatalf("establish Scanner framing: ready=%q err=%v", ready, err)
+		}
 		var out []byte
 		for _, unit := range units {
 			ready, err := state.AddChunk([]byte(unit))
@@ -137,6 +140,33 @@ func TestSSEJSONValidationScannerControlInsideMultilineEvent(t *testing.T) {
 		}
 		if want := strings.Join(units, "\n"); string(out) != want {
 			t.Fatalf("%q: got %q want %q", control, out, want)
+		}
+	}
+}
+
+func TestSSEJSONValidationScalarColonRequiresFraming(t *testing.T) {
+	for _, scalar := range []string{"1", "true", "null", `"value"`} {
+		for _, suffix := range [][]string{{":x", "data: }"}, {"", ":", "", "x\ndata: }\n\n"}} {
+			t.Run(fmt.Sprintf("%s/%q", scalar, suffix), func(t *testing.T) {
+				state := &sseJSONValidationState{}
+				units := append([]string{`data: {"a":` + scalar}, suffix...)
+				var out []byte
+				var failed error
+				for _, unit := range units {
+					ready, err := state.AddChunk([]byte(unit))
+					out = append(out, ready...)
+					if err != nil {
+						failed = err
+						break
+					}
+				}
+				if failed == nil {
+					failed = state.Finish()
+				}
+				if failed == nil || len(out) != 0 {
+					t.Fatalf("raw scalar suffix accepted: out=%q err=%v", out, failed)
+				}
+			})
 		}
 	}
 }

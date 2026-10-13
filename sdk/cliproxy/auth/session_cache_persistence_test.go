@@ -229,6 +229,9 @@ func TestSessionCacheProtectedRegistrationStickyError(t *testing.T) {
 	if errEnable := cache.EnablePersistence(filepath.Join(blocked, "sessions.state")); errEnable != nil {
 		t.Fatal(errEnable)
 	}
+	if errRemove := os.Remove(blocked); errRemove != nil {
+		t.Fatal(errRemove)
+	}
 	if errWrite := os.WriteFile(blocked, []byte("blocker"), 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
@@ -627,7 +630,10 @@ func TestSessionCachePersistenceSaveErrorRedacted(t *testing.T) {
 	if errEnable := cache.EnablePersistence(path); errEnable != nil {
 		t.Fatal(errEnable)
 	}
-	// Make the parent a regular file after initialization to force a save error.
+	// Replace the pinned parent with a regular file to force a save error.
+	if errRemove := os.Remove(blocked); errRemove != nil {
+		t.Fatal(errRemove)
+	}
 	if errWrite := os.WriteFile(blocked, []byte("blocker"), 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}

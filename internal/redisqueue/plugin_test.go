@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
@@ -587,6 +587,42 @@ func requireHeaderField(t *testing.T, payload map[string]json.RawMessage, field,
 		if got[i] != want[i] {
 			t.Fatalf("%s[%q] = %v, want %v", field, key, got, want)
 		}
+	}
+}
+
+func TestUsageQueuePluginPayloadPreservesCallerMetadataAndExplicitCompaction(t *testing.T) {
+	for _, explicitCompaction := range []bool{false, true} {
+		t.Run(map[bool]string{false: "explicit_false", true: "explicit_true"}[explicitCompaction], func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				ctx := internallogging.WithRequestID(context.Background(), "ctx-caller-meta-1")
+				ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
+					Role:                  "project-agent@abcdef1234567890",
+					CallerSession:         "018f0a31-6b4c-7d8e-9f01-23456789abcd",
+					SessionID:             "routing-session",
+					IsCompaction:          !explicitCompaction,
+					HasExplicitCompaction: true,
+					ExplicitCompaction:    explicitCompaction,
+				})
+				ctx = internallogging.WithResponseStatusHolder(ctx)
+				internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+				(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+					Provider: "openai",
+					Model:    "gpt-5.6-sol",
+					Detail: coreusage.Detail{
+						InputTokens:  1,
+						OutputTokens: 1,
+						TotalTokens:  2,
+					},
+				})
+
+				payload := popSinglePayload(t)
+				requireStringField(t, payload, "role", "project-agent@abcdef1234567890")
+				requireStringField(t, payload, "caller_session", "018f0a31-6b4c-7d8e-9f01-23456789abcd")
+				requireStringField(t, payload, "session_id", coresession.NormalizeToCanonicalUUID("routing-session"))
+				requireBoolField(t, payload, "is_compaction", explicitCompaction)
+			})
+		})
 	}
 }
 

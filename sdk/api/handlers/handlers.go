@@ -16,15 +16,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
@@ -63,7 +63,8 @@ const (
 )
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
-// If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
+// If errText is already valid JSON, it is compacted to ensure single-line SSE compatibility
+// while preserving upstream error payloads.
 func BuildErrorResponseBody(status int, errText string) []byte {
 	return BuildErrorResponseBodyWithError(status, errText, nil)
 }
@@ -111,6 +112,10 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	}
 
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		var compact bytes.Buffer
+		if errCompact := json.Compact(&compact, []byte(trimmed)); errCompact == nil {
+			return compact.Bytes()
+		}
 		return []byte(trimmed)
 	}
 
@@ -129,6 +134,9 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	case http.StatusNotFound:
 		errType = "invalid_request_error"
 		code = "model_not_found"
+	case http.StatusRequestTimeout:
+		errType = "server_error"
+		code = "request_timeout"
 	default:
 		if status >= http.StatusInternalServerError {
 			errType = "server_error"
@@ -244,6 +252,61 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
 	return meta
+}
+
+const (
+	maxSmartyRoleBytes          = 128
+	maxSmartyCallerSessionBytes = 64
+	smartyRoleHeader            = "X-Smarty-Role"
+	smartyCallerSessionHeader   = "X-Smarty-Session"
+	smartyCompactionHeader      = "X-Smarty-Compaction"
+)
+
+func validSmartyHeaderValue(headers http.Header, name string, maxBytes int) string {
+	values := headers.Values(name)
+	if len(values) != 1 || values[0] == "" || len(values[0]) > maxBytes {
+		return ""
+	}
+	for i := 0; i < len(values[0]); i++ {
+		if values[0][i] < 0x20 || values[0][i] > 0x7e {
+			return ""
+		}
+	}
+	return values[0]
+}
+
+func validSmartyCallerSession(headers http.Header) string {
+	value := validSmartyHeaderValue(headers, smartyCallerSessionHeader, maxSmartyCallerSessionBytes)
+	if len(value) != 36 {
+		return ""
+	}
+	for i := 0; i < len(value); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if value[i] != '-' {
+				return ""
+			}
+			continue
+		}
+		if !((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f') || (value[i] >= 'A' && value[i] <= 'F')) {
+			return ""
+		}
+	}
+	return value
+}
+
+func explicitSmartyCompaction(headers http.Header) (bool, bool) {
+	values := headers.Values(smartyCompactionHeader)
+	if len(values) != 1 {
+		return false, false
+	}
+	switch values[0] {
+	case "0":
+		return true, false
+	case "1":
+		return true, true
+	default:
+		return false, false
+	}
 }
 
 func requestClientIP(request *http.Request) string {
@@ -516,13 +579,18 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	if c != nil && c.Request != nil {
 		sessionID, parentSessionID := extractSessionIDsFromRequest(c.Request)
+		hasExplicitCompaction, explicitCompaction := explicitSmartyCompaction(c.Request.Header)
 		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
-			ClientIP:         requestClientIP(c.Request),
-			ResolvedClientIP: strings.TrimSpace(c.ClientIP()),
-			XForwardedFor:    strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
-			UserAgent:        strings.TrimSpace(c.Request.UserAgent()),
-			SessionID:        sessionID,
-			ParentSessionID:  parentSessionID,
+			ClientIP:              requestClientIP(c.Request),
+			ResolvedClientIP:      strings.TrimSpace(c.ClientIP()),
+			XForwardedFor:         strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:             strings.TrimSpace(c.Request.UserAgent()),
+			SessionID:             sessionID,
+			ParentSessionID:       parentSessionID,
+			Role:                  validSmartyHeaderValue(c.Request.Header, smartyRoleHeader, maxSmartyRoleBytes),
+			CallerSession:         validSmartyCallerSession(c.Request.Header),
+			HasExplicitCompaction: hasExplicitCompaction,
+			ExplicitCompaction:    explicitCompaction,
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)

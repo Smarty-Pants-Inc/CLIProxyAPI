@@ -3,7 +3,7 @@ package thinking_test
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 // smarty-dev#1579: Pi pins top-level output_config.effort to "high" and sends the

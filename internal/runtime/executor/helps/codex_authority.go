@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // The selected credential snapshot fixes both the Responses URL and the wire

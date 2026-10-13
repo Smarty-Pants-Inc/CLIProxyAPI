@@ -70,3 +70,45 @@ func TestMaskSensitiveHeaderValueShortKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestMaskSensitiveQueryOAuthSecrets(t *testing.T) {
+	const secret = "oauth-secret-DO-NOT-USE-0123456789"
+	for _, name := range []string{"id_token", "access_token", "refresh_token", "client_secret", "password", "api_key"} {
+		t.Run(name, func(t *testing.T) {
+			query := name + "=" + secret + "&provider=codex&error=access_denied"
+			got := MaskSensitiveQuery(query)
+			want := name + "=oaut...6789&provider=codex&error=access_denied"
+			if got != want {
+				t.Errorf("MaskSensitiveQuery(%q) = %q, want %q", query, got, want)
+			}
+		})
+	}
+	for _, name := range []string{"code", "state", "code_verifier", "Code", "STATE", "verifier", "custom_verifier", "CODE_VERIFIER[]", "code[]", "st%61te"} {
+		t.Run(name, func(t *testing.T) {
+			for _, value := range []string{secret, "x", "", "%ZZ", "%6Fauth-secret-DO-NOT-USE-0123456789"} {
+				query := name + "=" + value + "&provider=codex&error=access_denied"
+				want := name + "=%5BREDACTED%5D&provider=codex&error=access_denied"
+				if got := MaskSensitiveQuery(query); got != want {
+					t.Errorf("MaskSensitiveQuery(%q) = %q, want %q", query, got, want)
+				}
+			}
+		})
+	}
+	for _, name := range []string{"provider", "error", "error_description", "scope", "redirect_uri", "code_challenge_method", "statement"} {
+		if shouldMaskQueryParam(name) {
+			t.Errorf("shouldMaskQueryParam(%q) = true, want false", name)
+		}
+	}
+}
+
+// MaskSensitiveQuery sees only the raw query, not the route, so "code" and
+// "state" are masked on every route, not just OAuth callbacks. This over-masks
+// unrelated access-log queries (e.g. ?state=open), which is accepted: the logs
+// lose detail, but a callback secret never leaks (CLIProxyAPI#111 review).
+func TestMaskSensitiveQueryMasksCodeAndStateOnEveryRoute(t *testing.T) {
+	query := "state=open-issues&code=region-eu-west&page=2"
+	want := "state=%5BREDACTED%5D&code=%5BREDACTED%5D&page=2"
+	if got := MaskSensitiveQuery(query); got != want {
+		t.Fatalf("MaskSensitiveQuery(%q) = %q, want %q (global masking is intentional)", query, got, want)
+	}
+}

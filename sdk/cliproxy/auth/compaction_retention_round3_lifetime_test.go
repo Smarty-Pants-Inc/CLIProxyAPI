@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestCompactionRetentionRound3CapturedOriginReloadNoHook(t *testing.T) {

@@ -7,14 +7,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestHandlerCompactionSecurityRound1PublicRoots(t *testing.T) {
 	for _, path := range []string{"execute", "count", "stream"} {
-		for _, kind := range []string{"duplicates", "bytes", "blocks", "canceled"} {
+		// "blocks" (over the compaction block limit) now degrades instead of a 400:
+		// openai.TestResponsesUnknownOrOversizeCompactionIsServedWithoutTheBlock (smarty-dev#8742).
+		for _, kind := range []string{"duplicates", "bytes", "canceled"} {
 			t.Run(path+"/"+kind, func(t *testing.T) {
 				executor := &bootstrapStreamExecutor{stream: func(context.Context, int) (*coreexecutor.StreamResult, error) {
 					t.Fatal("rejected input reached upstream stream")

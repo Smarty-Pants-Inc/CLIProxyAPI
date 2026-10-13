@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestPatchMetaKeyUpdatesExecutionFields(t *testing.T) {
@@ -21,6 +21,7 @@ func TestPatchMetaKeyUpdatesExecutionFields(t *testing.T) {
 		}}},
 		configFilePath: writeTestConfigFile(t),
 	}
+	loadHandlerConfigBaseline(t, h)
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)

@@ -5,9 +5,9 @@ import (
 	"sync"
 	"testing"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // A single Auth is shared by every in-flight request that selects the credential,
@@ -55,10 +55,10 @@ func TestClaudeExecutorPrepareRequestAuthIsRaceFreeOnSharedCredential(t *testing
 	}
 	wg.Wait()
 
-	if got := claudeauth.ReadMetadataString(&auth.Metadata, "account_uuid"); got != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+	if got := claudeauth.ReadMetadataString(auth, "account_uuid"); got != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Fatalf("account_uuid = %q, want the fetched profile account", got)
 	}
-	if !claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(&auth.Metadata)) {
+	if !claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(auth)) {
 		t.Fatal("device ID pool was not established under concurrency")
 	}
 }
@@ -81,8 +81,8 @@ func TestClaudeExecutorSharedCredentialMetadataReadersUseOneLock(t *testing.T) {
 			defer wg.Done()
 			<-start
 			if i%3 == 0 {
-				claudeauth.StoreMetadataValue(&auth.Metadata, "access_token", "sk-ant-oat-race-probe")
-				claudeauth.StoreMetadataValue(&auth.Metadata, "cloak_mode", "always")
+				claudeauth.StoreMetadataValue(auth, "access_token", "sk-ant-oat-race-probe")
+				claudeauth.StoreMetadataValue(auth, "cloak_mode", "always")
 				return
 			}
 			if i%3 == 1 {
@@ -120,9 +120,9 @@ func TestClaudeExecutorSharedCredentialMetadataMixedAccess(t *testing.T) {
 			case 1:
 				_ = executor.ShouldPrepareRequestAuth(auth)
 			case 2:
-				_ = claudeauth.ReadMetadataString(&auth.Metadata, "account_uuid")
+				_ = claudeauth.ReadMetadataString(auth, "account_uuid")
 			default:
-				_ = claudeauth.ReadDeviceIDPool(&auth.Metadata)
+				_ = claudeauth.ReadDeviceIDPool(auth)
 			}
 		}(i)
 	}

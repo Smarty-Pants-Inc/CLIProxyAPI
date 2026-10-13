@@ -1,0 +1,17 @@
+//go:build !windows
+
+package auth
+
+import (
+	"os"
+	"syscall"
+)
+
+// fileOwnerUID returns the owner uid of an fstat/lstat result.
+func fileOwnerUID(info os.FileInfo) (int, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		return 0, false
+	}
+	return int(stat.Uid), true
+}

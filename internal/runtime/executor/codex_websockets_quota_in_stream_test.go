@@ -6,16 +6,14 @@ import (
 	"testing"
 )
 
-// WebSocket quota failover is cut from CLIProxyAPI#39 until disconnect arbitration lands (smarty-dev#3484).
-// A quota refusal on a WebSocket keeps main's behaviour: the attempt does not fail over in the
-// executor; the handshake is flushed and the refusal arrives in-stream.
-func TestCodexWebsocketsExecutor_QuotaRefusalStaysInStream(t *testing.T) {
+// Quota failover must remain disabled after an upstream server tool has started.
+func TestCodexWebsocketsExecutor_UnsafeQuotaRefusalStaysInStream(t *testing.T) {
 	for name, event := range map[string]string{
 		"insufficient_quota":  `{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"insufficient_quota","message":"You exceeded your current quota"}},"sequence_number":2}`,
 		"usage_limit_reached": `{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}},"sequence_number":2}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			server := codexWebsocketServer(t, codexCreatedEvent, codexInProgressEvent, event)
+			server := codexWebsocketServer(t, codexCreatedEvent, WSReplayUnsafeTool, codexInProgressEvent, event)
 			defer server.Close()
 
 			req, opts := codexWebsocketRequest()

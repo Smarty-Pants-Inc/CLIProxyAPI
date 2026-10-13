@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
 const (
@@ -308,6 +308,12 @@ func SafeResponseHeaders(err error) http.Header {
 	var unavailable *authUnavailableError
 	if errors.As(err, &unavailable) && unavailable != nil {
 		return unavailable.Headers()
+	}
+	// An unknown signed compaction block is a deterministic local 409; tell
+	// OpenAI SDK clients (which retry every 409 by default) not to blind-retry.
+	var local *Error
+	if errors.As(err, &local) && local != nil && local.Code == "compaction_affinity_missing" {
+		return http.Header{"X-Should-Retry": []string{"false"}}
 	}
 	return nil
 }

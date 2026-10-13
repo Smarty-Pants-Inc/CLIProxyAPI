@@ -13,14 +13,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/testwait"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // This transport still uses a real HTTP server and the real Claude producer.
@@ -69,6 +69,8 @@ func TestCompactionStreamRound2RealClaudeProducerCancellation(t *testing.T) {
 	for _, mode := range []string{"persistence-refusal", "budget-refusal", "downstream-cancel", "completion", "503-retry"} {
 		t.Run(mode, func(t *testing.T) {
 			const model = "claude-opus-5"
+			// Every wait below is on its event; hang only ends the wait.
+			hang := testwait.Context(t).Done()
 			statePath := filepath.Join(t.TempDir(), "affinity.state")
 			selector := coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{Fallback: &coreauth.FillFirstSelector{}, StatePath: statePath})
 			defer selector.Stop()
@@ -149,12 +151,12 @@ func TestCompactionStreamRound2RealClaudeProducerCancellation(t *testing.T) {
 			if mode == "503-retry" {
 				select {
 				case <-requestReceipt.ctx.Done():
-				case <-time.After(2 * time.Second):
+				case <-hang:
 					t.Fatal("abandoned 503 attempt context was not canceled")
 				}
 				select {
 				case <-requestReceipt.bodyClosed:
-				case <-time.After(2 * time.Second):
+				case <-hang:
 					t.Fatal("abandoned 503 response body was not closed")
 				}
 				requestReceipt = <-transport.requests
@@ -164,9 +166,8 @@ func TestCompactionStreamRound2RealClaudeProducerCancellation(t *testing.T) {
 			}
 			var terminal error
 			// A hang bound, not a speed check: budget-refusal first makes 256
-			// durable publications (file and directory fsync each, ~20 ms on Dev1).
-			timer := time.NewTimer(20 * time.Second)
-			defer timer.Stop()
+			// durable publications (file and directory fsync each, ~20 ms on Dev1,
+			// far longer on a loaded CI runner), so wait for the stream to close.
 		readStream:
 			for {
 				select {
@@ -180,7 +181,7 @@ func TestCompactionStreamRound2RealClaudeProducerCancellation(t *testing.T) {
 					if mode == "persistence-refusal" && strings.Contains(string(chunk.Payload), "round2-signed-summary") {
 						t.Fatal("refused signed output leaked")
 					}
-				case <-timer.C:
+				case <-hang:
 					t.Fatal("consumer did not terminate")
 				}
 			}
@@ -202,18 +203,18 @@ func TestCompactionStreamRound2RealClaudeProducerCancellation(t *testing.T) {
 			}
 			select {
 			case <-requestReceipt.ctx.Done():
-			case <-time.After(2 * time.Second):
+			case <-hang:
 				t.Fatal("producer request context still live after consumer terminal")
 			}
 			select {
 			case <-requestReceipt.bodyClosed:
-			case <-time.After(2 * time.Second):
+			case <-hang:
 				t.Fatal("real Claude producer did not close upstream response body")
 			}
 			if refused || callerCancel != nil {
 				select {
 				case <-upstreamCanceled:
-				case <-time.After(2 * time.Second):
+				case <-hang:
 					t.Fatal("live upstream did not observe request cancellation")
 				}
 			}

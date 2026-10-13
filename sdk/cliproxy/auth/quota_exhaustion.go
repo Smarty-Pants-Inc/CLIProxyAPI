@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,6 +19,35 @@ const quotaExhaustedUtilization = 0.98
 // windows are at most weekly, so a reset beyond this horizon is bogus data and
 // is treated as unknown: an out-of-range value never causes a skip.
 const quotaMaxResetHorizon = 30 * 24 * time.Hour
+
+// DefaultQuotaReadingMaxAge is how long a quota reading may keep an account
+// skipped as exhausted when the config does not set a bound (smarty-dev#6379).
+const DefaultQuotaReadingMaxAge = 6 * time.Hour
+
+// quotaReadingMaxAge holds the active bound in nanoseconds; 0 never expires.
+var quotaReadingMaxAge atomic.Int64
+
+func init() { quotaReadingMaxAge.Store(int64(DefaultQuotaReadingMaxAge)) }
+
+// SetQuotaReadingMaxAgeSeconds configures quota-exceeded.exhausted-reading-max-age-seconds:
+// nil restores the default, 0 or negative never expires a reading.
+func SetQuotaReadingMaxAgeSeconds(seconds *int) {
+	maxAge := DefaultQuotaReadingMaxAge
+	if seconds != nil {
+		maxAge = time.Duration(max(*seconds, 0)) * time.Second
+	}
+	quotaReadingMaxAge.Store(int64(maxAge))
+}
+
+// quotaReadingExpired reports that a reading observed at observedAt is older
+// than the bound. Providers can reset windows early, and a skipped account gets
+// no traffic and so no fresh headers; an expired reading is therefore unknown,
+// the account is eligible, and its next response replaces the reading. A real
+// exhaustion then costs at most one upstream 429 per account per bound.
+func quotaReadingExpired(observedAt, now time.Time) bool {
+	maxAge := time.Duration(quotaReadingMaxAge.Load())
+	return maxAge > 0 && !observedAt.IsZero() && now.Sub(observedAt) > maxAge
+}
 
 // quotaMaxTimestamp is the largest raw unix value (milliseconds) accepted
 // before conversion, so huge values cannot overflow int64.
@@ -40,10 +70,11 @@ type quotaUsage struct {
 // A window only counts as exhausted while its reset time is known and in the
 // future; once the reset passes the account is eligible again even if no newer
 // response has refreshed the snapshot. A window without a parseable reset is
-// never treated as exhausted, so incomplete data cannot remove capacity.
+// never treated as exhausted, so incomplete data cannot remove capacity. A
+// reading older than the configured max age is unknown (quotaReadingExpired).
 func quotaUsageOf(auth *Auth, now time.Time) quotaUsage {
 	var usage quotaUsage
-	if auth == nil || len(auth.Quota.Signals) == 0 {
+	if auth == nil || len(auth.Quota.Signals) == 0 || quotaReadingExpired(auth.Quota.ObservedAt, now) {
 		return usage
 	}
 	signals := auth.Quota.Signals

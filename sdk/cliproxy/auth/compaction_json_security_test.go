@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/tidwall/gjson"
 )
 
@@ -57,6 +57,19 @@ func TestManagerCompactionJSONSecurityBeforeHTTPExecution(t *testing.T) {
 				req, opts := compactionAffinityRequest("security-model", "none", false, false)
 				req.Payload, opts.OriginalRequest = []byte(tc.payload), []byte(tc.payload)
 				err := runCompactionAffinityRequest(t, manager, executor, path, req, opts)
+				if tc.name == "blocks" || tc.name == "shared-input-messages-bound" {
+					// smarty-dev#8742: over the block limit degrades: every compaction
+					// block is removed and the request is served, never a 400.
+					if err != nil || len(executor.attempts) == 0 {
+						t.Fatalf("over-limit compaction = %v (attempts %d), want served without blocks", err, len(executor.attempts))
+					}
+					for _, sent := range executor.payloads {
+						if strings.Contains(sent, `"compaction"`) {
+							t.Fatalf("over-limit block reached upstream: %.200s", sent)
+						}
+					}
+					return
+				}
 				requireCompactionJSONLocalStop(t, err)
 				if len(executor.attempts) != 0 {
 					t.Fatalf("upstream attempts = %d, want zero", len(executor.attempts))

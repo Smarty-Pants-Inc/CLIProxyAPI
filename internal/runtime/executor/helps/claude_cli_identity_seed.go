@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // Stable identity seeds for fingerprint-profile=claude-code-cli on non-OAuth credentials.
@@ -90,12 +90,12 @@ func EnsureClaudeCLIFingerprintIdentity(auth *cliproxyauth.Auth, seed string, sy
 		seed = "anonymous"
 	}
 	if ClaudeCredentialAccountUUID(auth) == "" {
-		claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", stableClaudeCLIAccountUUID(seed))
+		claudeauth.StoreMetadataString(auth, "account_uuid", stableClaudeCLIAccountUUID(seed))
 	}
-	if !claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(&auth.Metadata)) {
-		claudeauth.StoreDeviceIDPool(&auth.Metadata, []string{stableClaudeCLIDeviceID(seed)})
+	if !claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(auth)) {
+		claudeauth.StoreDeviceIDPool(auth, []string{stableClaudeCLIDeviceID(seed)})
 	}
-	if _, _, errPool := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata); errPool != nil {
+	if _, _, errPool := claudeauth.EnsureDeviceIDPoolFor(auth); errPool != nil {
 		return fmt.Errorf("ensure device pool: %w", errPool)
 	}
 	return nil

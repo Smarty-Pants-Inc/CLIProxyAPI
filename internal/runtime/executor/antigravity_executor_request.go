@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -83,6 +83,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 
 		payloadStrBytes := applyAntigravityNativeSignatureReplayIfNeeded(modelName, []byte(payloadStr))
+		payloadStrBytes = helps.FinalizePayload(ctx, payloadStrBytes)
 		bodyReader = bytes.NewReader(payloadStrBytes)
 		if e.cfg != nil && e.cfg.RequestLog {
 			payloadLog = append([]byte(nil), payloadStrBytes...)
@@ -95,6 +96,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 
 		payload = applyAntigravityNativeSignatureReplayIfNeeded(modelName, payload)
+		payload = helps.FinalizePayload(ctx, payload)
 		bodyReader = bytes.NewReader(payload)
 		if e.cfg != nil && e.cfg.RequestLog {
 			payloadLog = append([]byte(nil), payload...)
@@ -427,10 +429,8 @@ func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {
 				raw = ua
 			}
 		}
-		if raw == "" && auth.Metadata != nil {
-			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
-				raw = strings.TrimSpace(ua)
-			}
+		if raw == "" {
+			raw = strings.TrimSpace(auth.MetadataString("user_agent"))
 		}
 	}
 	return raw
@@ -445,13 +445,8 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 			return strings.TrimSuffix(v, "/")
 		}
 	}
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["base_url"].(string); ok {
-			v = strings.TrimSpace(v)
-			if v != "" {
-				return strings.TrimSuffix(v, "/")
-			}
-		}
+	if v := strings.TrimSpace(auth.MetadataString("base_url")); v != "" {
+		return strings.TrimSuffix(v, "/")
 	}
 	return ""
 }

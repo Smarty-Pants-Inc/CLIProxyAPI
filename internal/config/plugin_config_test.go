@@ -182,13 +182,8 @@ func TestSaveConfigPreserveComments_PrunesDefaultPluginsDir(t *testing.T) {
 		t.Fatalf("os.WriteFile() error = %v", errWrite)
 	}
 
-	cfg := &Config{
-		Debug: true,
-		Plugins: PluginsConfig{
-			Dir:     "plugins",
-			Configs: map[string]PluginInstanceConfig{},
-		},
-	}
+	cfg := fenceLoad(t, configPath)
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
 	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
 	}

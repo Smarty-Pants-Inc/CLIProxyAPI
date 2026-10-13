@@ -6,12 +6,13 @@ import (
 	"encoding/hex"
 	"strings"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -75,7 +76,7 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	scope.snapshot = snapshot
 	scope.cacheReady = errGet == nil
 	if errGet != nil {
-		log.Warnf("claude compatible thinking replay cache read failed: %v", errGet)
+		log.Warnf("claude compatible thinking replay cache read failed: %s", logging.SafeErrorDiagnostic(errGet))
 		return req, scope
 	}
 	if !found {
@@ -119,7 +120,7 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 	}
 	if kimiThinkingReplayContentIsReplayable(content) {
 		if _, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content); errReplace != nil {
-			log.Warnf("claude compatible thinking replay cache replace failed: %v", errReplace)
+			log.Warnf("claude compatible thinking replay cache replace failed: %s", logging.SafeErrorDiagnostic(errReplace))
 		}
 		return
 	}
@@ -131,7 +132,7 @@ func clearClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 		return
 	}
 	if _, errDelete := internalcache.DeleteClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot); errDelete != nil {
-		log.Warnf("claude compatible thinking replay cache delete failed: %v", errDelete)
+		log.Warnf("claude compatible thinking replay cache delete failed: %s", logging.SafeErrorDiagnostic(errDelete))
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -519,7 +519,16 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 		return true
 	}
 	switch eventType {
-	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata", "keepalive":
+	case "response.created", "response.in_progress":
+		// A snapshot may already carry output (a started web_search_call, partial text); it is
+		// held back or kept replayable only while every item in it is still empty and model-made.
+		for _, item := range gjson.GetBytes(payload, "response.output").Array() {
+			if !isCodexBufferableOutputItem(item) {
+				return false
+			}
+		}
+		return true
+	case "codex.rate_limits", "codex.response.metadata", "keepalive":
 		return true
 	case "response.output_item.added":
 		return isCodexBufferableOutputItem(gjson.GetBytes(payload, "item"))
@@ -621,7 +630,7 @@ func isCodexEmptyPart(payload []byte) bool {
 // token event, and records the model the upstream reports serving.
 func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 	helps.ObserveResponsesTokenEvent(reporter, payload)
-	reporter.ObserveCodexResponseModel(payload)
+	reporter.ObserveResponseModel(payload)
 }
 
 // newCodexBootstrapOverloadErr reports a buffered overload rejection with its real status.

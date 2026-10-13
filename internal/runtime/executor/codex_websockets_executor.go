@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
@@ -109,6 +111,13 @@ func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	return e.httpExec.CountTokens(ctx, auth, req, opts)
 }
 
+func (e *CodexAutoExecutor) BeginExecutionAttempt(sessionID string) {
+	if e == nil || e.wsExec == nil {
+		return
+	}
+	e.wsExec.BeginExecutionAttempt(sessionID)
+}
+
 func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 	if e == nil || e.wsExec == nil {
 		return
@@ -135,10 +144,7 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 			}
 		}
 	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	raw, ok := auth.Metadata["websockets"]
+	raw, ok := auth.MetadataValue("websockets")
 	if !ok || raw == nil {
 		return false
 	}
@@ -153,4 +159,68 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 	default:
 	}
 	return false
+}
+
+// SupportsApplyPatch requires both selectable transports to support the tool.
+func (e *CodexAutoExecutor) SupportsApplyPatch() bool {
+	return e != nil && e.httpExec != nil && e.wsExec != nil && e.httpExec.SupportsApplyPatch() && e.wsExec.SupportsApplyPatch()
+}
+
+// InterruptExecutionSession forwards a response.interrupt control frame on the
+// current upstream socket. It does not dial, replay, or select another credential.
+func (e *CodexAutoExecutor) InterruptExecutionSession(ctx context.Context, sessionID string, payload []byte) error {
+	if e == nil || e.wsExec == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	return e.wsExec.InterruptExecutionSession(ctx, sessionID, payload)
+}
+
+// InterruptExecutionSession writes the original interrupt payload to the session
+// socket captured for this execution. Payload rules and response.create defaults
+// must not rewrite response_id, mode, or extension fields.
+func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context, sessionID string, payload []byte) error {
+	if e == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	if ctx != nil {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return errCtx
+		}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	store.mu.Lock()
+	sess := store.sessions[sessionID]
+	store.mu.Unlock()
+	if sess == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	sess.connMu.Lock()
+	conn := sess.conn
+	authID := sess.authID
+	sess.connMu.Unlock()
+	if conn == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	// A retained socket from an earlier turn is not the current upstream.
+	// HTTP turns must fall through to local cancellation instead.
+	if readCh, _ := sess.activeForConn(conn); readCh == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	if !cliproxyexecutor.WebsocketAuthEnabled(ctx, authID) {
+		return fmt.Errorf("websocket credential is no longer enabled")
+	}
+	if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+		return errWrite
+	}
+	// Auth IDs can contain account identity and URLs can contain credentials.
+	// Keep only bounded, redacted session correlation in this control-frame log.
+	helps.LogWithRequestID(ctx).Info(logging.SafeDiagnosticForLog(fmt.Sprintf("codex websockets: request forwarded session=%s event=response.interrupt", sessionID)))
+	return nil
 }

@@ -17,11 +17,11 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
@@ -388,7 +388,7 @@ func authWeight(auth *Auth) int64 {
 		}
 		return weight
 	}
-	if rawWeight, ok := auth.Metadata[AttributeWeight]; ok {
+	if rawWeight, ok := auth.MetadataValue(AttributeWeight); ok {
 		weight, errParse := credentialweight.ParseValue(rawWeight)
 		if errParse != nil {
 			return 0
@@ -423,10 +423,7 @@ func authWebsocketsEnabled(auth *Auth) bool {
 			}
 		}
 	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	raw, ok := auth.Metadata["websockets"]
+	raw, ok := auth.MetadataValue("websockets")
 	if !ok || raw == nil {
 		return false
 	}
@@ -1009,6 +1006,9 @@ type SessionAffinityConfig struct {
 	SubagentAffinity *bool
 	// StatePath persists affinity bindings; empty retains in-memory SDK behavior.
 	StatePath string
+	// LegacyStatePath is read once, read-only, when StatePath does not exist yet
+	// (smarty-dev#8742: the state file moved out of auth-dir).
+	LegacyStatePath string
 	// Cache reuses one binding-store owner across selector/config rebuilds.
 	// StatePath is loaded only when Cache is nil.
 	Cache *SessionCache
@@ -1043,7 +1043,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cache.persistenceErr = cfg.InitializationError
 		cache.mu.Unlock()
 		if cfg.InitializationError == nil && cfg.StatePath != "" {
-			if errLoad := cache.EnablePersistence(cfg.StatePath); errLoad != nil {
+			if errLoad := cache.EnablePersistenceWithLegacy(cfg.StatePath, cfg.LegacyStatePath); errLoad != nil {
 				log.WithError(errLoad).Error("failed to load session affinity state; routing will fail closed")
 			}
 		}

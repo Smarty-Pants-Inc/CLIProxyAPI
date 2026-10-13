@@ -13,25 +13,27 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
-func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
+func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) bool {
 	log.Debugf("starting full client load process")
 
 	w.clientsMutex.RLock()
 	cfg := w.config
+	reloadResultCallback := w.reloadResultCallback
+	reloadCallback := w.reloadCallback
 	w.clientsMutex.RUnlock()
 
 	if cfg == nil {
 		log.Error("config is nil, cannot reload clients")
-		return
+		return false
 	}
 
 	if len(affectedOAuthProviders) > 0 {
@@ -141,9 +143,14 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
 
-	if w.reloadCallback != nil {
+	if reloadResultCallback != nil {
+		if !reloadResultCallback(cfg) {
+			log.Warn("runtime config application failed; leaving revision unobserved for retry")
+			return false
+		}
+	} else if reloadCallback != nil {
 		log.Debugf("triggering server update callback before auth refresh")
-		w.reloadCallback(cfg)
+		reloadCallback(cfg)
 	}
 
 	w.refreshAuthState(forceAuthRefresh)
@@ -160,6 +167,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		metaAPIKeyCount,
 		openAICompatCount,
 	)
+	return true
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {

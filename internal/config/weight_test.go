@@ -49,6 +49,10 @@ func TestAPIKeyWeightParsingAndZeroPersistence(t *testing.T) {
 `), 0644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
+	// Start the mutation from the actual disk baseline, not the distinct parsing fixture.
+	cfg = fenceLoad(t, configPath)
+	zero := 0
+	cfg.XAIKey[0].Weight = &zero
 	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
 		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
 	}

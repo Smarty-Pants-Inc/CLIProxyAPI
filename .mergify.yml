@@ -10,7 +10,8 @@ queue_rules:
   - name: default
     batch_size: 4
     batch_max_wait_time: 2 min
-    checks_timeout: 30 min
+    # ponytail: above the fleet CI-wait p95 (151 min, 10-09); a lower value dequeued green PRs mid-run (smarty-dev#8527). Lower once queue-draft p95 < 60 min.
+    checks_timeout: 180 min
     merge_method: merge
     queue_conditions:
       - base = main
@@ -28,8 +29,11 @@ queue_rules:
           - -head ~= ^sync/upstream-
           - check-success = review/security
       - check-success = build
+      # smarty-dev#4273: sessions compacted on the base build must still be served by the head build.
+      - check-success = compaction-replay
     merge_conditions:
       - check-success = build
+      - check-success = compaction-replay
 
 # The fleet's write App bot may queue (smarty-dev#735, #736): GitHub reports App bots as permission
 # none, so the default `sender-permission >= write` restriction refused its queue commands.
@@ -41,6 +45,16 @@ commands_restrictions:
           - sender = smarty-fleet-write[bot]
           - sender = smarty-fleet-write-leads[bot]
           - sender = smarty-fleet-write-lanes[bot]
+          - sender = smarty-fleet-write-versehq[bot]
+  # smarty-land's emergency dequeue posts as the actor that queued, the write App bot on the fleet host.
+  dequeue:
+    conditions:
+      - or:
+          - sender-permission >= write
+          - sender = smarty-fleet-write[bot]
+          - sender = smarty-fleet-write-leads[bot]
+          - sender = smarty-fleet-write-lanes[bot]
+          - sender = smarty-fleet-write-versehq[bot]
   # The stuck-work check's R4 posts `@mergifyio refresh` as the write App (smarty-dev#868, #983).
   refresh:
     conditions:
@@ -49,6 +63,17 @@ commands_restrictions:
           - sender = smarty-fleet-write[bot]
           - sender = smarty-fleet-write-leads[bot]
           - sender = smarty-fleet-write-lanes[bot]
+          - sender = smarty-fleet-write-versehq[bot]
+  # Deprecated queue alias, still a legal restriction key in Mergify's public schema.
+  # Prefer `@mergifyio queue` for new writes; mergify_alarm.py also handles requeue refusals.
+  requeue:
+    conditions:
+      - or:
+          - sender-permission >= write
+          - sender = smarty-fleet-write[bot]
+          - sender = smarty-fleet-write-leads[bot]
+          - sender = smarty-fleet-write-lanes[bot]
+          - sender = smarty-fleet-write-versehq[bot]
 
 # Sanctioned front-of-queue route, as smarty-dev (#2004 T10; org for Paul 2026-10-02): a PR labelled p0 is
 # checked ahead of the rest of the queue.

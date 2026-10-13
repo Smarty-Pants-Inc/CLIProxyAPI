@@ -3,12 +3,17 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type sessionCacheFile struct {
@@ -29,6 +34,21 @@ type sessionCacheRecord struct {
 // Errors are sticky so a selector can fail closed, including after a failed
 // initialization.
 func (c *SessionCache) EnablePersistence(path string) error {
+	return c.EnablePersistenceWithLegacy(path, "")
+}
+
+// maxLegacySessionCacheBytes bounds the one-time read of a legacy state file.
+const maxLegacySessionCacheBytes = 64 << 20
+
+// EnablePersistenceWithLegacy is EnablePersistence plus a one-time migration
+// (smarty-dev#8742): when path does not exist yet, a valid legacy state file
+// (the pre-34efa7bb location inside auth-dir) is read once, read-only, and its
+// live groups are written to path. The legacy file is never written, moved or
+// removed. A missing, unreadable or invalid legacy file is ignored with a
+// warning: it must not make routing fail closed.
+// An existing new file always wins and the legacy file is then not read, so a
+// stale legacy binding never overrides a newer one.
+func (c *SessionCache) EnablePersistenceWithLegacy(path, legacyPath string) error {
 	if c == nil {
 		return errors.New("session cache persistence: nil cache")
 	}
@@ -43,28 +63,51 @@ func (c *SessionCache) EnablePersistence(path string) error {
 	}
 
 	// Do not expose filesystem paths, aliases, auth IDs, or parser input in errors.
-	data, errRead := os.ReadFile(path)
-	if errRead != nil && !errors.Is(errRead, os.ErrNotExist) {
-		c.persistenceErr = errors.New("session cache persistence: read failed")
+	// All later file I/O goes through the pinned root, so swapping a path
+	// ancestor after this point cannot redirect reads or writes.
+	root, errRoot := openSessionCacheRoot(filepath.Dir(path))
+	if errRoot != nil {
+		c.persistenceErr = errors.New("session cache persistence: resolve directory failed")
 		return c.persistenceErr
+	}
+	fail := func(message string) error {
+		_ = root.Close()
+		c.persistenceErr = errors.New(message)
+		return c.persistenceErr
+	}
+	data, errRead := root.ReadFile(filepath.Base(path))
+	if errRead != nil && !errors.Is(errRead, os.ErrNotExist) {
+		return fail("session cache persistence: read failed")
+	}
+	migrated := false
+	if errors.Is(errRead, os.ErrNotExist) && strings.TrimSpace(legacyPath) != "" {
+		if legacy, ok := readLegacySessionCacheFile(legacyPath); ok {
+			data, errRead, migrated = legacy, nil, true
+		}
 	}
 	var state sessionCacheFile
 	if errRead == nil {
 		if errDecode := json.Unmarshal(data, &state); errDecode != nil || state.Version != 1 {
-			c.persistenceErr = errors.New("session cache persistence: invalid state")
-			return c.persistenceErr
+			if migrated {
+				log.Warn("session affinity: legacy state file is not valid; not migrated")
+				state, migrated = sessionCacheFile{}, false
+			} else {
+				return fail("session cache persistence: invalid state")
+			}
+		}
+		if migrated && !legacyGroupsValid(state.Groups) {
+			log.Warn("session affinity: legacy state file is not valid; not migrated")
+			state, migrated = sessionCacheFile{}, false
 		}
 		// Validate the whole file before modifying the cache, including stale groups.
 		seen := make(map[string]bool)
 		for _, record := range state.Groups {
 			if record.AuthID == "" || record.ExpiresAt.IsZero() || len(record.Aliases) == 0 {
-				c.persistenceErr = errors.New("session cache persistence: invalid group")
-				return c.persistenceErr
+				return fail("session cache persistence: invalid group")
 			}
 			for _, alias := range record.Aliases {
 				if alias == "" || seen[alias] {
-					c.persistenceErr = errors.New("session cache persistence: invalid aliases")
-					return c.persistenceErr
+					return fail("session cache persistence: invalid aliases")
 				}
 				seen[alias] = true
 			}
@@ -97,7 +140,83 @@ func (c *SessionCache) EnablePersistence(path string) error {
 	}
 	c.persistenceDirty = false
 	c.persistencePath = path
+	c.persistenceRoot = root
+	if migrated {
+		// Write the migrated groups to the new path now, through the pinned root.
+		c.persistenceDirty = true
+		c.persistLocked()
+		if c.persistenceErr != nil {
+			return c.persistenceErr
+		}
+		log.Warnf("session affinity: migrated %d binding group(s) from the legacy state file", len(state.Groups))
+	}
 	return nil
+}
+
+// Seams for tests; production uses the process uid and the real owner lookup.
+var (
+	legacyStateUID   = os.Getuid
+	legacyStateOwner = fileOwnerUID
+)
+
+// trustedLegacyEntry: owned by this process's uid and not group/other-writable.
+// Imported aliases decide which account a signed block is routed to, so a file
+// another principal could write must never be imported (smarty-dev#8742 r1).
+func trustedLegacyEntry(info os.FileInfo) bool {
+	owner, ok := legacyStateOwner(info)
+	return ok && owner == legacyStateUID() && info.Mode().Perm()&0o022 == 0
+}
+
+// readLegacySessionCacheFile reads a regular, non-symlink legacy file once,
+// only when it and its directory are this uid's and not group/other-writable.
+func readLegacySessionCacheFile(path string) ([]byte, bool) {
+	if dir, errDir := os.Lstat(filepath.Dir(path)); errDir != nil || !dir.IsDir() || !trustedLegacyEntry(dir) {
+		log.Warn("session affinity: legacy state directory is not owned by this user or is group/other-writable; not migrated")
+		return nil, false
+	}
+	info, errStat := os.Lstat(path)
+	if errStat != nil {
+		return nil, false
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxLegacySessionCacheBytes {
+		log.Warn("session affinity: legacy state file is not a regular file within the size limit; not migrated")
+		return nil, false
+	}
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		log.Warn("session affinity: legacy state file is unreadable; not migrated")
+		return nil, false
+	}
+	defer func() { _ = file.Close() }()
+	opened, errFstat := file.Stat()
+	if errFstat != nil || !os.SameFile(info, opened) {
+		return nil, false
+	}
+	if !trustedLegacyEntry(opened) {
+		log.Warn("session affinity: legacy state file is not owned by this user or is group/other-writable; not migrated")
+		return nil, false
+	}
+	data, errRead := io.ReadAll(io.LimitReader(file, maxLegacySessionCacheBytes+1))
+	if errRead != nil || len(data) > maxLegacySessionCacheBytes {
+		return nil, false
+	}
+	return data, true
+}
+
+func legacyGroupsValid(groups []sessionCacheRecord) bool {
+	seen := make(map[string]bool)
+	for _, record := range groups {
+		if record.AuthID == "" || record.ExpiresAt.IsZero() || len(record.Aliases) == 0 {
+			return false
+		}
+		for _, alias := range record.Aliases {
+			if alias == "" || seen[alias] {
+				return false
+			}
+			seen[alias] = true
+		}
+	}
+	return true
 }
 
 // PersistenceError returns the first load or save error. A non-nil error means
@@ -130,37 +249,90 @@ func (c *SessionCache) persistLocked() {
 	sort.Slice(state.Groups, func(i, j int) bool {
 		return state.Groups[i].Aliases[0] < state.Groups[j].Aliases[0]
 	})
-	if errSave := writeSessionCacheFile(c.persistencePath, state); errSave != nil {
+	if errSave := writeSessionCacheFile(c.persistenceRoot, c.persistencePath, state); errSave != nil {
+		// The error is sticky and no later save runs, so release the pinned root.
+		_ = c.persistenceRoot.Close()
 		c.persistenceErr = errSave
 		return
 	}
 	c.persistenceDirty = false
 }
 
-func writeSessionCacheFile(path string, state sessionCacheFile) error {
-	data, errMarshal := json.Marshal(state)
-	if errMarshal != nil {
-		return errors.New("session cache persistence: encode failed")
+// resolveSessionCacheDir resolves symlinks in dir's longest existing ancestor.
+// A dangling symlink is an error, not a missing directory.
+func resolveSessionCacheDir(dir string) (string, error) {
+	missing := ""
+	for ancestor := dir; ; {
+		realDir, errReal := filepath.EvalSymlinks(ancestor)
+		if errReal == nil {
+			return filepath.Join(realDir, missing), nil
+		}
+		if !errors.Is(errReal, os.ErrNotExist) {
+			return "", errReal
+		}
+		if info, errLstat := os.Lstat(ancestor); errLstat == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", errReal
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", errReal
+		}
+		missing = filepath.Join(filepath.Base(ancestor), missing)
+		ancestor = parent
 	}
-	dir := filepath.Dir(path)
+}
+
+// openSessionCacheRoot creates dir (private when new) and pins it as an
+// os.Root. The pinned directory must be the one the symlink-free path names.
+func openSessionCacheRoot(dir string) (*os.Root, error) {
+	resolved, errResolve := resolveSessionCacheDir(dir)
+	if errResolve != nil {
+		return nil, errResolve
+	}
 	// Directories that MkdirAll creates need their own entries synced too.
-	syncDirs := []string{dir}
+	var syncDirs []string
 	for missing := dir; ; missing = filepath.Dir(missing) {
 		if _, errStat := os.Stat(missing); !errors.Is(errStat, os.ErrNotExist) || filepath.Dir(missing) == missing {
 			break
 		}
 		syncDirs = append(syncDirs, filepath.Dir(missing))
 	}
-	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
-		return errors.New("session cache persistence: create directory failed")
+	if errMkdir := os.MkdirAll(resolved, 0o700); errMkdir != nil {
+		return nil, errMkdir
 	}
-	file, errCreate := os.CreateTemp(dir, ".session-cache-*.tmp")
+	for _, syncDir := range syncDirs {
+		if errSync := sessionCacheSyncDir(syncDir, nil); errSync != nil {
+			return nil, errSync
+		}
+	}
+	root, errOpen := os.OpenRoot(resolved)
+	if errOpen != nil {
+		return nil, errOpen
+	}
+	pinned, errPinned := root.Stat(".")
+	named, errNamed := os.Stat(resolved)
+	again, errAgain := filepath.EvalSymlinks(resolved)
+	if errPinned != nil || errNamed != nil || errAgain != nil || again != resolved || !os.SameFile(pinned, named) {
+		_ = root.Close()
+		return nil, errors.New("state directory changed")
+	}
+	return root, nil
+}
+
+// writeSessionCacheFile replaces path's file atomically (temp file + rename)
+// inside the pinned root only. Rename replaces a symlinked state file rather
+// than writing through it.
+func writeSessionCacheFile(root *os.Root, path string, state sessionCacheFile) error {
+	data, errMarshal := json.Marshal(state)
+	if errMarshal != nil {
+		return errors.New("session cache persistence: encode failed")
+	}
+	tmp := fmt.Sprintf(".session-cache-%d.tmp", rand.Uint64())
+	file, errCreate := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errCreate != nil {
 		return errors.New("session cache persistence: create temporary file failed")
 	}
-	tmp := file.Name()
-	defer func() { _ = os.Remove(tmp) }()
-	// CreateTemp creates mode 0600 files, independent of the old target's mode.
+	defer func() { _ = root.Remove(tmp) }()
 	_, errWrite := file.Write(data)
 	if errWrite == nil {
 		errWrite = file.Sync()
@@ -169,25 +341,30 @@ func writeSessionCacheFile(path string, state sessionCacheFile) error {
 	if errWrite != nil || errClose != nil {
 		return errors.New("session cache persistence: write temporary file failed")
 	}
-	if errRename := os.Rename(tmp, path); errRename != nil {
+	if errRename := root.Rename(tmp, filepath.Base(path)); errRename != nil {
 		return errors.New("session cache persistence: replace file failed")
 	}
 	// The rename is durable across a crash only once the directory is synced.
-	for _, syncDir := range syncDirs {
-		if errSync := sessionCacheSyncDir(syncDir); errSync != nil {
-			return errors.New("session cache persistence: sync directory failed")
-		}
+	if errSync := sessionCacheSyncDir(filepath.Dir(path), root); errSync != nil {
+		return errors.New("session cache persistence: sync directory failed")
 	}
 	return nil
 }
 
 // sessionCacheSyncDir is a variable so tests can check its order and failure.
-var sessionCacheSyncDir = func(dir string) error {
+// dir names the directory; a non-nil root syncs the pinned directory instead.
+var sessionCacheSyncDir = func(dir string, root *os.Root) error {
 	if runtime.GOOS == "windows" {
 		// ponytail: Windows cannot fsync a directory handle; NTFS journals the rename.
 		return nil
 	}
-	handle, errOpen := os.Open(dir)
+	var handle *os.File
+	var errOpen error
+	if root != nil {
+		handle, errOpen = root.Open(".")
+	} else {
+		handle, errOpen = os.Open(dir)
+	}
 	if errOpen != nil {
 		return errOpen
 	}
