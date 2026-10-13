@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,6 +201,76 @@ func TestCodexWebsocketsExecutor_BootstrapBufferingExplicitOff_WithholdsBeforeId
 	combined, streamErr := drainChunks(outcome.result)
 	if streamErr != nil || !strings.Contains(combined, "response.created") || !strings.Contains(combined, `"delta":"hi"`) {
 		t.Fatalf("verified stream = %s / %v; want the held delta and response.created", combined, streamErr)
+	}
+}
+
+// Ported from CLIProxyAPI#54 (cf34267a): an unset option (nil or zero config) keeps the hold, so
+// an overload right after the handshake fails the attempt for failover on both transports.
+func TestCodexBootstrapBuffering_DefaultUnsetKeepsOverloadFailover(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		for _, cfg := range []*config.Config{nil, {}} {
+			t.Run(fmt.Sprintf("websocket=%t/nil-config=%t", websocketTransport, cfg == nil), func(t *testing.T) {
+				var server *httptest.Server
+				execute := NewCodexExecutor(cfg).ExecuteStream
+				if websocketTransport {
+					server = codexWebsocketServer(t, codexCreatedEvent, codexInProgressEvent, codexOverloadEvent)
+					execute = NewCodexWebsocketsExecutor(cfg).ExecuteStream
+				} else {
+					server = codexSSEServer(codexCreatedEvent, codexInProgressEvent, codexOverloadEvent)
+				}
+				defer server.Close()
+				req, opts := codexWebsocketRequest()
+				result, err := execute(context.Background(), codexTestAuth(server.URL), req, opts)
+				if result != nil || err == nil {
+					t.Fatalf("default must fail over without releasing handshake: result=%v err=%v", result, err)
+				}
+				if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
+					t.Fatalf("status = %d, want 503", got)
+				}
+			})
+		}
+	}
+}
+
+// Ported from CLIProxyAPI#54 (cf34267a): explicit off still verifies the exact model on both
+// transports; a wrong or missing model never escapes.
+func TestCodexBootstrapBuffering_DisabledStillVerifiesModel(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		for _, model := range []string{"gpt-5.6-terra", "wrong-model", ""} {
+			t.Run(fmt.Sprintf("websocket=%t/model=%s", websocketTransport, model), func(t *testing.T) {
+				// main's fixture now carries the verified model; drop it so this case controls the model.
+				terminal := strings.Replace(codexCompletedEventBody, `"model":"gpt-5.6-terra",`, "", 1)
+				if model != "" {
+					terminal = strings.Replace(terminal, `"id":"resp_1"`, fmt.Sprintf(`"id":"resp_1","model":%q`, model), 1)
+				}
+				frames := []string{`{"type":"response.created","response":{"id":"resp_1"}}`, codexOutputDeltaEvent, terminal}
+				cfg := codexBufferingExplicitlyOffConfig()
+				var server *httptest.Server
+				execute := NewCodexExecutor(cfg).ExecuteStream
+				if websocketTransport {
+					server = codexWebsocketServer(t, frames...)
+					execute = NewCodexWebsocketsExecutor(cfg).ExecuteStream
+				} else {
+					server = codexSSEServer(frames...)
+				}
+				defer server.Close()
+				req, opts := codexWebsocketRequest()
+				result, err := execute(context.Background(), codexTestAuth(server.URL), req, opts)
+				if model != req.Model {
+					if result != nil || err == nil || !strings.Contains(err.Error(), "model_mismatch") {
+						t.Fatalf("unverified stream must not escape: result=%v err=%v", result, err)
+					}
+					return
+				}
+				if err != nil || result == nil {
+					t.Fatalf("verified stream failed: result=%v err=%v", result, err)
+				}
+				combined, streamErr := drainChunks(result)
+				if streamErr != nil || !strings.Contains(combined, `"delta":"hi"`) {
+					t.Fatalf("held output lost after verification: payload=%s err=%v", combined, streamErr)
+				}
+			})
+		}
 	}
 }
 
