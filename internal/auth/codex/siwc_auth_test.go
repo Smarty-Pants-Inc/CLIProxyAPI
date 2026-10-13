@@ -1,8 +1,10 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -351,6 +354,23 @@ func TestSaveTokenToFileDoesNotOverwriteNewerDiskSIWC(t *testing.T) {
 	}
 	if saved["use_siwc"] != true {
 		t.Fatalf("use_siwc from newer on-disk SIWC bind should remain true, got %v", saved["use_siwc"])
+	}
+}
+
+func TestSIWCRefreshErrorBodyNotLogged(t *testing.T) {
+	var output bytes.Buffer
+	original := log.StandardLogger().Out
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(original) })
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{"code":"refresh_token_reused","detail":"sk-siwc-error-test\nforged-log"}`))}, nil
+	})}}
+	_, errRefresh := auth.RefreshSIWCTokensWithRetry(context.Background(), "test-refresh", "test-client", "", 1)
+	if errRefresh == nil || !isNonRetryableRefreshErr(errRefresh) {
+		t.Fatalf("expected fixed non-retryable error, got %v", errRefresh)
+	}
+	if strings.Contains(output.String()+errRefresh.Error(), "sk-siwc-error-test") || strings.Contains(output.String(), "forged-log") || !strings.Contains(output.String(), "400") || !strings.Contains(output.String(), "refresh_token_reused") {
+		t.Fatalf("expected status and fixed reason only: %q; error=%v", output.String(), errRefresh)
 	}
 }
 

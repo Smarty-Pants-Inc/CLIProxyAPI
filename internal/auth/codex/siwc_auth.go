@@ -120,12 +120,20 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		var tokenError struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&tokenError)
+		reason := "upstream_rejected"
+		if tokenError.Code == "refresh_token_reused" {
+			reason = "refresh_token_reused"
+		}
+		return nil, fmt.Errorf("OpenAI OAuth token request failed (%d): %s", resp.StatusCode, reason)
+	}
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
 		return nil, fmt.Errorf("failed to read SIWC token response: %w", errRead)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OpenAI OAuth token request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var tokenResp siwcTokenResponse
