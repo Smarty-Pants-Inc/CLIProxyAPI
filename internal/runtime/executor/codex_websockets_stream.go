@@ -255,11 +255,17 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
 
-	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
+	// The pre-output hold always runs, whatever the option says: it keeps the downstream
+	// headers uncommitted until the first output or terminal frame, so a quota or overload
+	// refusal right after response.created still fails over to the next credential.
+	buffering := true
+	// bufferingOptIn is the configured stream-bootstrap-buffering value. With it off, every
+	// frame after the hold is still delivered to the response observer, in wire order.
+	bufferingOptIn := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
 	var exhaustionLogged bool
-	if e.cfg != nil {
+	if buffering && e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
 	}
@@ -296,7 +302,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, modelErr
 	}
 
-	if buffering || !modelGuard.Authoritative() {
+	if buffering {
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				if sess != nil {
@@ -531,7 +537,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if !modelGuard.Authoritative() && (!windowOpen || isTerminalEvent) {
 				return failModelGuard(modelGuard.Missing())
 			}
-			if windowOpen && (buffering && bufferableEvent || !modelGuard.Authoritative()) && !isTerminalEvent {
+			if windowOpen && (bufferableEvent || !modelGuard.Authoritative()) && !isTerminalEvent {
 				frameBytes := len(payload)
 				for i := range currentChunks {
 					frameBytes += len(currentChunks[i])
@@ -721,11 +727,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: modelErr})
 				return
 			}
-			// With bootstrap buffering disabled, the bootstrap loop above stops right after the
-			// frame that verifies identity (normally response.created), so every later frame
-			// arrives here. Observe it at the same point as the bootstrap loop does, in wire
-			// order, so observers do not lose events. The buffering-enabled path is unchanged.
-			if !buffering {
+			// The bootstrap loop observed every frame up to and including the one that released
+			// the stream; later frames arrive here. With the option off, observe them at the same
+			// point (after the model guard), in wire order. The opted-in path is unchanged.
+			if !bufferingOptIn {
 				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			}
 

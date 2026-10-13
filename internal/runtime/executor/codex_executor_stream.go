@@ -151,10 +151,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
-	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
+	buffering := true
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
-	if e.cfg != nil {
+	if buffering && e.cfg != nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
 	}
@@ -195,7 +195,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	sawOutputDelta := false
-	if buffering || !modelGuard.Authoritative() {
+	if buffering {
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -306,7 +306,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
-			if (!modelGuard.Authoritative() || (buffering && isHandshake)) && !terminalSuccess {
+			if (!modelGuard.Authoritative() || isHandshake) && !terminalSuccess {
 				frameBytes := len(line)
 				for i := range chunks {
 					frameBytes += len(chunks[i])

@@ -1031,14 +1031,19 @@ func TestCodexExecutor_BootstrapBuffering_FlushesInOrderOnFirstOutput(t *testing
 	}
 }
 
-// With buffering disabled, a verified identity releases the first chunk immediately.
-func TestCodexExecutor_BootstrapBuffering_DisabledForwardsAfterIdentity(t *testing.T) {
+// With buffering disabled, the pre-output hold still keeps response.created back (so a refusal
+// right after it can fail over), and the first output frame releases both at once, while the
+// upstream is still streaming.
+func TestCodexExecutor_BootstrapBuffering_DisabledReleasesAtFirstOutput(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
+		flusher, _ := w.(http.Flusher)
+		for _, event := range []string{codexCreatedEvent, codexOutputDeltaEvent} {
+			_, _ = w.Write([]byte("data: " + event + "\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
 		}
 		<-release
 	}))
@@ -1064,7 +1069,20 @@ func TestCodexExecutor_BootstrapBuffering_DisabledForwardsAfterIdentity(t *testi
 			t.Fatalf("first chunk = %s, want response.created", chunk.Payload)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("first verified chunk was not forwarded without waiting for bootstrap")
+		t.Fatal("held response.created was not forwarded once output started")
+	}
+	for {
+		select {
+		case chunk, ok := <-result.Chunks:
+			if !ok || chunk.Err != nil {
+				t.Fatalf("stream ended before the first output: ok=%t err=%v", ok, chunk.Err)
+			}
+			if strings.Contains(string(chunk.Payload), `"delta":"hi"`) {
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatal("first output was not forwarded while the upstream was still streaming")
+		}
 	}
 }
 
