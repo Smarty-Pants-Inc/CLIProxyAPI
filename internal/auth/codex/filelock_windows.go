@@ -4,9 +4,10 @@ package codex
 
 import (
 	"fmt"
-	"os"
 	"syscall"
 	"unsafe"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 var (
@@ -19,7 +20,7 @@ const lockfileExclusiveLock = 0x00000002
 
 func acquireInterProcessLockFile(authFilePath string) (func(), error) {
 	lockPath := canonicalLockPath(authFilePath) + ".lock"
-	f, errOpen := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	f, errOpen := config.OpenPrivateAuthLock(lockPath)
 	if errOpen != nil {
 		return nil, fmt.Errorf("failed to open credential lock file %s: %w", lockPath, errOpen)
 	}
