@@ -48,8 +48,8 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	}
 	unavailable := &auth.Error{HTTPStatus: 503, Message: "api_key_policy_unavailable"}
 	path := c.Request.URL.Path
-	messages := path == "/v1/messages"
-	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses" && !messages) {
+	messages, chat := path == "/v1/messages", path == "/v1/chat/completions"
+	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses" && !messages && !chat) {
 		return fail(unavailable)
 	}
 	// F32: bound encoded and decoded bytes before model checks or admission.
@@ -72,9 +72,12 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 	// Keep protocol/error handling and SSE delivery, but no plugins/bootstrap retries.
 	clean := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, m)
-	if messages {
+	switch {
+	case messages:
 		claude.NewClaudeCodeAPIHandler(clean).ClaudeMessages(c)
-	} else {
+	case chat:
+		openai.NewOpenAIAPIHandler(clean).ChatCompletions(c)
+	default:
 		openai.NewOpenAIResponsesAPIHandler(clean).Responses(c)
 	}
 	c.Abort()

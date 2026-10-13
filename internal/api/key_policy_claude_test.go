@@ -92,6 +92,17 @@ func policyClaudeConfig(models []string, auths []string, tokenCap, requestCap *i
 	return cfg
 }
 
+// policyBody builds a minimal request body in the endpoint's own format.
+func policyBody(path, model string, stream bool) string {
+	switch path {
+	case "/v1/messages":
+		return fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":%t}`, model, stream)
+	case "/v1/chat/completions":
+		return fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"stream":%t}`, model, stream)
+	}
+	return fmt.Sprintf(`{"model":%q,"input":"hello","stream":%t}`, model, stream)
+}
+
 func sendPolicied(server *Server, path, body string) *httptest.ResponseRecorder {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
@@ -124,6 +135,12 @@ func TestKeyPolicyClaude(t *testing.T) {
 		{name: "OAuth", path: "/v1/responses", oauth: true, tokenCap: 100, want: 200, wantCalls: 1},
 		{name: "model forbidden", path: "/v1/responses", model: "claude-other", tokenCap: 100, want: 403},
 		{name: "messages model forbidden", path: "/v1/messages", model: "claude-other", tokenCap: 100, want: 403},
+		// TriStar's node-gateway calls POST /v1/chat/completions.
+		{name: "chat cap spent", path: "/v1/chat/completions", tokenCap: 7, want: 200, second: 429, wantCalls: 1},
+		{name: "chat cap left", path: "/v1/chat/completions", tokenCap: 8, want: 200, second: 200, wantCalls: 2},
+		{name: "chat SSE cap spent", path: "/v1/chat/completions", stream: true, tokenCap: 7, want: 200, second: 429, wantCalls: 1},
+		{name: "chat SSE cap left", path: "/v1/chat/completions", stream: true, tokenCap: 8, want: 200, second: 200, wantCalls: 2},
+		{name: "chat model forbidden", path: "/v1/chat/completions", model: "claude-other", tokenCap: 100, want: 403},
 		{name: "only outside auth eligible", path: "/v1/responses", disableA: true, tokenCap: 100, want: 503},
 		{name: "redirect", path: "/v1/responses", upstream: 307, tokenCap: 100, want: 503, wantCalls: 1},
 		{name: "request cap", path: "/v1/responses", noCap: true, tokenCap: 100, want: 429},
@@ -150,10 +167,7 @@ func TestKeyPolicyClaude(t *testing.T) {
 			if model == "" {
 				model = policyClaudeModel
 			}
-			body := fmt.Sprintf(`{"model":%q,"input":"hello","stream":%t}`, model, tc.stream)
-			if tc.path == "/v1/messages" {
-				body = fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":%t}`, model, tc.stream)
-			}
+			body := policyBody(tc.path, model, tc.stream)
 			rr := sendPolicied(server, tc.path, body)
 			if rr.Code != tc.want {
 				t.Fatalf("status=%d want=%d: %s", rr.Code, tc.want, rr.Body.String())
