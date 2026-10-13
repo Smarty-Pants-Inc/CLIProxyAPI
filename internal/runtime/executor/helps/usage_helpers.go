@@ -3,6 +3,8 @@ package helps
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -836,7 +838,10 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 				}
 			}
 		}
-		if _, value := auth.AccountInfo(); value != "" {
+		if kind, value := auth.AccountInfo(); value != "" {
+			if kind == "api_key" {
+				return usageAPIKeySource(value)
+			}
 			return strings.TrimSpace(value)
 		}
 		if auth.Metadata != nil {
@@ -848,7 +853,7 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 		}
 		if auth.Attributes != nil {
 			if key := strings.TrimSpace(auth.Attributes["api_key"]); key != "" {
-				return key
+				return usageAPIKeySource(key)
 			}
 		}
 	}
@@ -856,6 +861,13 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 		return trimmed
 	}
 	return ""
+}
+
+// usageAPIKeySource labels an upstream API-key credential without its secret:
+// usage records reach external sinks (for example the Redis usage queue).
+func usageAPIKeySource(key string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return "api-key:" + hex.EncodeToString(digest[:4])
 }
 
 func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
