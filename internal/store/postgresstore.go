@@ -46,6 +46,7 @@ type PostgresStore struct {
 	authDir       string
 	cooldownStore *postgresCooldownStateStore
 	mu            sync.Mutex
+	persistAuthFn func(ctx context.Context, relID string, data []byte) error
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -240,33 +241,40 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
-	switch {
-	case auth.Storage != nil:
-		auth.SetMetadata("disabled", auth.Disabled)
-		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-			setter.SetMetadata(auth.CloneMetadata())
+	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
+		if errCodex != nil {
+			return "", errCodex
 		}
-		if err = auth.Storage.SaveTokenToFile(path); err != nil {
-			return "", err
-		}
-	case auth.CloneMetadata() != nil:
-		auth.SetMetadata("disabled", auth.Disabled)
-		raw, errMarshal := json.Marshal(auth.CloneMetadata())
-		if errMarshal != nil {
-			return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
-		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
-				return path, nil
+	} else {
+		switch {
+		case auth.Storage != nil:
+			auth.SetMetadata("disabled", auth.Disabled)
+			if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+				setter.SetMetadata(auth.CloneMetadata())
 			}
-		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
-			return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
+			if err = auth.Storage.SaveTokenToFile(path); err != nil {
+				return "", err
+			}
+		case auth.CloneMetadata() != nil:
+			auth.SetMetadata("disabled", auth.Disabled)
+			raw, errMarshal := json.Marshal(auth.CloneMetadata())
+			if errMarshal != nil {
+				return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
+			}
+			contentsMatch := false
+			if existing, errRead := os.ReadFile(path); errRead == nil {
+				contentsMatch = jsonEqual(existing, raw)
+			} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+				return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
+			}
+			if !contentsMatch {
+				if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
+					return "", fmt.Errorf("postgres store: write auth file: %w", errWrite)
+				}
+			}
+		default:
+			return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
 		}
-		if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
-			return "", fmt.Errorf("postgres store: write auth file: %w", errWrite)
-		}
-	default:
-		return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
 	}
 
 	if auth.Attributes == nil {
@@ -544,6 +552,12 @@ func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string
 }
 
 func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []byte) error {
+	if s.persistAuthFn != nil {
+		return s.persistAuthFn(ctx, relID, data)
+	}
+	if s.db == nil {
+		return fmt.Errorf("postgres store: database not configured")
+	}
 	jsonPayload := json.RawMessage(data)
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)

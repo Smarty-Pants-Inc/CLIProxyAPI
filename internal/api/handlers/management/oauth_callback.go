@@ -44,6 +44,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 	if errDecode := json.Unmarshal(body, &req); errDecode != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+
 		return
 	}
 	h.handleOAuthCallback(c, req)

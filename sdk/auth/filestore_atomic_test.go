@@ -71,12 +71,19 @@ func assertReadersSeeWholeJSON(t *testing.T, path string, iterations int, write 
 	if errReadDir != nil {
 		t.Fatalf("read auth dir: %v", errReadDir)
 	}
-	if len(entries) != 1 {
-		names := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			names = append(names, entry.Name())
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(path) {
+			continue
 		}
-		t.Fatalf("auth dir has leftover files: %v", names)
+		// Codex's new inter-process lock is persistent; temporary credential
+		// files are still forbidden, and the lock contains no credential bytes.
+		if entry.Name() == filepath.Base(path)+".lock" {
+			info, errInfo := entry.Info()
+			if errInfo == nil && info.Mode().IsRegular() && info.Size() == 0 && (os.PathSeparator != '/' || info.Mode().Perm() == 0o600) {
+				continue
+			}
+		}
+		t.Fatalf("auth dir has unexpected leftover file: %s", entry.Name())
 	}
 }
 
