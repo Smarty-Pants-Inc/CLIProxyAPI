@@ -4,8 +4,9 @@ set -euo pipefail
 models_repository="${MODELS_REPOSITORY_URL:-https://github.com/router-for-me/models.git}"
 # Pinned, not main: an upstream catalog change must not turn our CI red overnight. Bump this ref deliberately in
 # each upstream sync (smarty-dev#755/#5776), together with the tests that expect the catalog's models.
-# 9fef0649 is the last router-for-me/models commit with gemini-pro-agent and gemini-3.1-pro-low (9c4717a4 drops them).
-models_ref="${MODELS_REPOSITORY_REF:-9fef0649fe65dbd69c75840e4f825afe0221dc83}"
+# e11df623 is the last router-for-me/models commit with gemini-pro-agent, gemini-3.1-pro-low and gemini-3.7-flash
+# (9fef0649 drops 3.7-flash; 9c4717a4 drops the other two).
+models_ref="${MODELS_REPOSITORY_REF:-e11df623bdd04d2987df48abd6c85786e0825940}"
 catalog_dir="${MODEL_CATALOG_DIR:-internal/registry/models}"
 codex_catalog="$catalog_dir/codex_client_models.json"
 codex_candidate="$(mktemp)"
