@@ -419,6 +419,8 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.APIKeySHA256 = APIKeyDigest(record.APIKey)
 		}
 		record.APIKey = "[REDACTED]"
+		// Defence in depth: a source label may name an upstream credential.
+		record.Source = "[REDACTED]"
 	}
 	observeRecord(ctx, record)
 	// ensure worker is running even if Start was not called explicitly

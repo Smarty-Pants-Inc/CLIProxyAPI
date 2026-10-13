@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	ex "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -47,7 +48,8 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	}
 	unavailable := &auth.Error{HTTPStatus: 503, Message: "api_key_policy_unavailable"}
 	path := c.Request.URL.Path
-	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses") {
+	messages, chat := path == "/v1/messages", path == "/v1/chat/completions"
+	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses" && !messages && !chat) {
 		return fail(unavailable)
 	}
 	// F32: bound encoded and decoded bytes before model checks or admission.
@@ -70,7 +72,14 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 	// Keep protocol/error handling and SSE delivery, but no plugins/bootstrap retries.
 	clean := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, m)
-	openai.NewOpenAIResponsesAPIHandler(clean).Responses(c)
+	switch {
+	case messages:
+		claude.NewClaudeCodeAPIHandler(clean).ClaudeMessages(c)
+	case chat:
+		openai.NewOpenAIAPIHandler(clean).ChatCompletions(c)
+	default:
+		openai.NewOpenAIResponsesAPIHandler(clean).Responses(c)
+	}
 	c.Abort()
 	return func() {}, false
 }

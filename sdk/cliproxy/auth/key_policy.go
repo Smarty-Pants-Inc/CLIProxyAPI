@@ -251,7 +251,7 @@ func (op *KeyPolicyOperation) allows(a *Auth) bool {
 	return true
 }
 
-// The cut deliberately supports only native Codex HTTP generation. It does not
+// The cut deliberately supports only native Codex and Claude HTTP generation. It does not
 // enter aliases, plugins, Home, preparation, refresh/retry or MarkResult paths.
 func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*Auth, ProviderExecutor, error) {
 	op.mu.Lock()
@@ -269,13 +269,13 @@ func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*
 	defer m.mu.RUnlock()
 	for _, id := range op.policies[0].AllowedAuths {
 		a := m.auths[id]
-		if a == nil || a.Provider != "codex" || !op.allows(a) || !registry.GetGlobalRegistry().ClientSupportsModel(id, req.Model) {
+		if a == nil || (a.Provider != "codex" && a.Provider != "claude") || !op.allows(a) || !registry.GetGlobalRegistry().ClientSupportsModel(id, req.Model) {
 			continue
 		}
 		if blocked, _, _ := isAuthBlockedForModel(a, req.Model, time.Now()); blocked {
 			continue
 		}
-		if exec := m.executors["codex"]; exec != nil {
+		if exec := m.executors[a.Provider]; exec != nil {
 			op.selected = a.Clone()
 			// Auth.Clone only copies the top-level metadata map. Fence nested secrets too.
 			b, err := json.Marshal(a.Metadata)
@@ -321,7 +321,17 @@ func CheckKeyPolicySend(req *http.Request) error {
 		token, _ = selected.Metadata["access_token"].(string)
 	}
 	account, _ := selected.Metadata["account_id"].(string)
-	if token == "" || req.Header.Get("Authorization") != "Bearer "+token || (selected.Attributes["api_key"] == "" && req.Header.Get("Chatgpt-Account-Id") != account) {
+	bearer, apiKey := req.Header.Get("Authorization"), req.Header.Get("X-Api-Key")
+	if selected.Provider == "claude" {
+		// Claude sends exactly one credential header with exactly one value:
+		// x-api-key or a bearer token, never both and never repeated.
+		bearers, apiKeys := req.Header.Values("Authorization"), req.Header.Values("X-Api-Key")
+		viaBearer := len(bearers) == 1 && bearer == "Bearer "+token && len(apiKeys) == 0
+		viaAPIKey := len(apiKeys) == 1 && apiKey == token && len(bearers) == 0
+		if token == "" || !(viaBearer || viaAPIKey) {
+			return policyError("api_key_policy_unavailable", 503)
+		}
+	} else if token == "" || bearer != "Bearer "+token || (selected.Attributes["api_key"] == "" && req.Header.Get("Chatgpt-Account-Id") != account) {
 		return policyError("api_key_policy_unavailable", 503)
 	}
 	op.manager.keyPolicyMu.Lock()
