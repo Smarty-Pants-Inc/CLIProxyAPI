@@ -244,6 +244,9 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 		if errRead != nil && !os.IsNotExist(errRead) {
 			return fmt.Errorf("failed to read existing credentials: %w", errRead)
 		}
+		if os.IsNotExist(errRead) && ts.RefreshPatch != nil {
+			return ErrRefreshNotPersisted
+		}
 		if errRead == nil {
 			var diskMap map[string]any
 			if errUnmarshal := json.Unmarshal(existingBytes, &diskMap); errUnmarshal != nil || diskMap == nil {

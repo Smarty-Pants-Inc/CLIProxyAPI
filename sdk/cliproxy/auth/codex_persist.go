@@ -43,11 +43,9 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 				if !os.IsNotExist(errRead) {
 					return fmt.Errorf("auth filestore: read refresh source failed: %w", errRead)
 				}
-				persisted = auth.CloneMetadata()
-				if persisted == nil {
-					persisted = make(map[string]any)
-				}
-				persisted["disabled"] = auth.Disabled
+				// The source may have been deleted after the executor released its
+				// file lock but before the manager committed the refresh result.
+				return codex.ErrRefreshNotPersisted
 			} else {
 				var diskMap map[string]any
 				if errUnmarshal := json.Unmarshal(existing, &diskMap); errUnmarshal != nil || diskMap == nil {

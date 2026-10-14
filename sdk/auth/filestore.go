@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -202,10 +203,12 @@ func (s *FileTokenStore) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("auth filestore: delete failed: %w", err)
-	}
-	return nil
+	return codexauth.WithFileLock(path, func() error {
+		if errRemove := os.Remove(path); errRemove != nil && !os.IsNotExist(errRemove) {
+			return fmt.Errorf("auth filestore: delete failed: %w", errRemove)
+		}
+		return nil
+	})
 }
 
 func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {

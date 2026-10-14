@@ -744,7 +744,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 
 	base := auth
-	updated, err := exec.Refresh(ctx, base.Clone())
+	updated, err := exec.Refresh(m.withRefreshPersistenceFence(ctx, base), base.Clone())
 	now := time.Now()
 	if err != nil && errors.Is(err, context.Canceled) {
 		logEntryWithRequestID(ctx).Debugf("refresh canceled for %s", formatAuthIdentity(auth, auth.Provider))

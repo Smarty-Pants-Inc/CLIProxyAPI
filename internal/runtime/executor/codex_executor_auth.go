@@ -425,6 +425,9 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	if diskPath != "" {
 		latestBytes, errReadLatest := os.ReadFile(diskPath)
 		if errReadLatest != nil {
+			if os.IsNotExist(errReadLatest) {
+				return auth, codexauth.ErrRefreshNotPersisted
+			}
 			return auth, fmt.Errorf("codex executor: re-read credential file %s before write: %w", diskPath, errReadLatest)
 		}
 		var latestDisk map[string]any
@@ -432,7 +435,17 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			return auth, fmt.Errorf("codex executor: invalid credential JSON in %s before write: %w", diskPath, errUnmarshal)
 		}
 		mergedDisk := patch.Apply(latestDisk)
-		if errWrite := codexauth.WriteJSONFileAtomic(diskPath, mergedDisk); errWrite != nil {
+		if errWrite := cliproxyauth.PersistRefreshCredentials(ctx, func() error {
+			// Refresh never creates credentials. Deletion shares this file lock,
+			// and the manager fence keeps the original registration live through rename.
+			if _, errStat := os.Stat(diskPath); errStat != nil {
+				if os.IsNotExist(errStat) {
+					return codexauth.ErrRefreshNotPersisted
+				}
+				return errStat
+			}
+			return codexauth.WriteJSONFileAtomic(diskPath, mergedDisk)
+		}); errWrite != nil {
 			return auth, fmt.Errorf("codex executor: persist refreshed credentials to %s: %w", diskPath, errWrite)
 		}
 		auth.Metadata = mergedDisk

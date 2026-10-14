@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -158,7 +159,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					full = abs
 				}
 			}
-			if err = os.Remove(full); err == nil {
+			if err = codexauth.WithFileLock(full, func() error { return os.Remove(full) }); err == nil {
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
 					c.JSON(500, gin.H{"error": errDel.Error()})
 					return
@@ -372,7 +373,7 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
-	if errRemove := os.Remove(targetPath); errRemove != nil {
+	if errRemove := codexauth.WithFileLock(targetPath, func() error { return os.Remove(targetPath) }); errRemove != nil {
 		if os.IsNotExist(errRemove) {
 			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
 		}

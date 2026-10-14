@@ -164,6 +164,10 @@ func TestCodexExecutorRefresh_MissingPlanTypeDefaultsToFree(t *testing.T) {
 	store := fileauth.NewFileTokenStore()
 	store.SetBaseDir(tempDir)
 	refreshed.Attributes[cliproxyauth.AttributePath] = filepath.Join(tempDir, "codex-refreshed.json")
+	// A refresh updates an existing source; only login may create credentials.
+	if errSeed := codexauth.WriteJSONFileAtomic(refreshed.Attributes[cliproxyauth.AttributePath], auth.CloneMetadata()); errSeed != nil {
+		t.Fatal(errSeed)
+	}
 	savedPath, errSave := store.Save(ctx, refreshed)
 	if errSave != nil {
 		t.Fatalf("store.Save error: %v", errSave)
@@ -240,6 +244,10 @@ func TestCodexExecutorRefresh_ExtractsPlanTypeWhenPresent(t *testing.T) {
 	store := fileauth.NewFileTokenStore()
 	store.SetBaseDir(tempDir)
 	refreshed.Attributes[cliproxyauth.AttributePath] = filepath.Join(tempDir, "codex-team-refreshed.json")
+	// A refresh updates an existing source; only login may create credentials.
+	if errSeed := codexauth.WriteJSONFileAtomic(refreshed.Attributes[cliproxyauth.AttributePath], auth.CloneMetadata()); errSeed != nil {
+		t.Fatal(errSeed)
+	}
 	savedPath, errSave := store.Save(ctx, refreshed)
 	if errSave != nil {
 		t.Fatalf("store.Save error: %v", errSave)
