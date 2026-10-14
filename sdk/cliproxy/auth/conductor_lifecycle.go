@@ -62,6 +62,8 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 		return
 	}
 	if sharer, ok := replaced.(ExecutionSessionSharer); ok && sharer != nil && sharer.SharesExecutionSessionsWith(executor) {
+		// Keep sessions owned by the same store. Codex caps terminal-response
+		// history at 1024 IDs per connection, including across executor replacement.
 		return
 	}
 	if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
