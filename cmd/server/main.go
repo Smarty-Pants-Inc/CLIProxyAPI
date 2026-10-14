@@ -541,6 +541,10 @@ func main() {
 			log.Infof("object-backed token store enabled, bucket: %s", objectStoreBucket)
 		}
 	} else if useGitStore {
+		if errStartup := validateTokenStoreStartup(useGitStore); errStartup != nil {
+			log.WithError(errStartup).Error(errStartup.Error())
+			os.Exit(1)
+		}
 		if gitStoreLocalPath == "" {
 			if writableBase != "" {
 				gitStoreLocalPath = writableBase
