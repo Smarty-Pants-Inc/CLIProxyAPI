@@ -17,6 +17,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -289,8 +290,13 @@ func (s *ObjectTokenStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err = os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("object store: delete auth file: %w", err)
+	if err = codexauth.WithFileLock(path, func() error {
+		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
+			return fmt.Errorf("object store: delete auth file: %w", errRemove)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if err = s.deleteAuthObject(ctx, path); err != nil {
 		return err

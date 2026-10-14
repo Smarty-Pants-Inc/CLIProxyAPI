@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -585,8 +586,13 @@ func (s *GitTokenStore) Delete(_ context.Context, id string) error {
 	if errRel != nil {
 		return errRel
 	}
-	if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("auth filestore: delete failed: %w", err)
+	if err = codexauth.WithFileLock(path, func() error {
+		if errRemove := os.Remove(path); errRemove != nil && !os.IsNotExist(errRemove) {
+			return fmt.Errorf("auth filestore: delete failed: %w", errRemove)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	messageID := id
 	if errCommit := s.commitAndPushLocked(fmt.Sprintf("Delete auth %s", messageID), rel); errCommit != nil {
@@ -1166,8 +1172,13 @@ func applyTreePaths(tree *object.Tree, repoDir string, paths []string) error {
 		destination := filepath.Join(repoDir, filepath.FromSlash(path))
 		file, errFile := tree.File(path)
 		if errors.Is(errFile, object.ErrFileNotFound) {
-			if errRemove := os.Remove(destination); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
-				return fmt.Errorf("remove %s: %w", path, errRemove)
+			if errRemove := codexauth.WithFileLock(destination, func() error {
+				if err := os.Remove(destination); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return fmt.Errorf("remove %s: %w", path, err)
+				}
+				return nil
+			}); errRemove != nil {
+				return errRemove
 			}
 			continue
 		}
