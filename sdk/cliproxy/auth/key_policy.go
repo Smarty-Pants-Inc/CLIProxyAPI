@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ type keyPolicyAccount struct {
 	gate             chan struct{}
 	day              string
 	requests, tokens int64
+	reserved         int64
 }
 type KeyPolicyOperation struct {
 	manager                  *Manager
@@ -36,6 +38,9 @@ type KeyPolicyOperation struct {
 	mu                       sync.Mutex
 	attempted, sent, metered bool
 	reported                 int64
+	reservation              int64
+	reservationDay           string
+	failed, settled          bool
 	streamDone               <-chan struct{}
 }
 
@@ -81,6 +86,7 @@ func (m *Manager) resetPolicyDay(a *keyPolicyAccount) {
 		a.day = day
 		a.requests = 0
 		a.tokens = 0
+		a.reserved = 0
 	}
 }
 func containsExact(values []string, value string) bool {
@@ -92,8 +98,8 @@ func containsExact(values []string, value string) bool {
 	return false
 }
 
-// BeginKeyPolicy captures the effective authentication/operation floor. One active
-// operation per key bounds token overshoot to one operation, independent of callers.
+// BeginKeyPolicy captures the effective authentication/operation floor. The gate
+// stays held until settlement; the final send fence reserves the request bound.
 func (m *Manager) BeginKeyPolicy(ctx context.Context, policies []config.APIKeyPolicy, model string) (context.Context, func(), error) {
 	if len(policies) == 0 {
 		return ctx, func() {}, nil
@@ -150,7 +156,7 @@ func (m *Manager) BeginKeyPolicy(ctx context.Context, policies []config.APIKeyPo
 		if p.AllowedModels != nil && !containsExact(*p.AllowedModels, model) {
 			err = policyError("api_key_model_forbidden", 403)
 		}
-		if p.DailyTokenCap != nil && a.tokens >= *p.DailyTokenCap {
+		if p.DailyTokenCap != nil && saturatingAdd(a.tokens, a.reserved) >= *p.DailyTokenCap {
 			err = policyError("api_key_daily_token_cap", 429)
 		}
 		if p.DailyRequestCap != nil && a.requests >= *p.DailyRequestCap {
@@ -174,14 +180,20 @@ func (m *Manager) BeginKeyPolicy(ctx context.Context, policies []config.APIKeyPo
 				<-op.streamDone
 			}
 			op.mu.Lock()
-			missing := op.sent && !op.metered
-			op.mu.Unlock()
-			if missing {
-				m.keyPolicyMu.Lock()
-				m.resetPolicyDay(a)
-				a.tokens = math.MaxInt64
-				m.keyPolicyMu.Unlock()
+			defer op.mu.Unlock()
+			m.keyPolicyMu.Lock()
+			m.resetPolicyDay(a)
+			if op.reservationDay == a.day {
+				a.reserved -= op.reservation
 			}
+			a.tokens = saturatingAdd(a.tokens, op.reported)
+			// Successful sends without trustworthy usage retain the existing
+			// fail-closed behavior. Errors/aborts charge any reported usage only.
+			if op.sent && !op.metered && !op.failed && ctx.Err() == nil {
+				a.tokens = math.MaxInt64
+			}
+			op.settled = true
+			m.keyPolicyMu.Unlock()
 			release()
 		})
 	}, nil
@@ -213,24 +225,20 @@ func saturatingAdd(a, b int64) int64 {
 func (op *KeyPolicyOperation) observe(r usage.Record) {
 	op.mu.Lock()
 	defer op.mu.Unlock()
-	if r.Detail.Incomplete || r.Detail.InputTokens < 0 || r.Detail.OutputTokens < 0 {
+	if op.settled {
+		return
+	}
+	op.failed = op.failed || r.Failed
+	if r.Detail.InputTokens < 0 || r.Detail.OutputTokens < 0 {
 		return
 	}
 	total := max(saturatingAdd(r.Detail.InputTokens, r.Detail.OutputTokens), r.Detail.TotalTokens, r.Detail.TokenBreakdown.TotalTokens)
-	if total == 0 {
-		return
+	if total > 0 && !r.Detail.Incomplete {
+		op.metered = true
 	}
-	op.metered = true
-	// Exactly one execution: cumulative usage may increase, never count twice.
-	previous := op.reported
-	if total <= previous {
-		return
-	}
-	op.reported = total
-	op.manager.keyPolicyMu.Lock()
-	defer op.manager.keyPolicyMu.Unlock()
-	op.manager.resetPolicyDay(op.account)
-	op.account.tokens = saturatingAdd(op.account.tokens, total-previous)
+	// Retain partial counts for error/abort settlement; cumulative reports
+	// may increase, but must never count the same execution twice.
+	op.reported = max(op.reported, total)
 }
 func (op *KeyPolicyOperation) effective() []config.APIKeyPolicy {
 	out := append([]config.APIKeyPolicy(nil), op.policies...)
@@ -276,7 +284,7 @@ func (op *KeyPolicyOperation) selectWithCompaction(ctx context.Context, req ex.R
 func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*Auth, ProviderExecutor, error) {
 	op.mu.Lock()
 	defer op.mu.Unlock()
-	if op.attempted || req.Model != op.model || opts.Alt != "" {
+	if op.settled || op.attempted || req.Model != op.model || opts.Alt != "" {
 		return nil, nil, policyError("api_key_policy_unavailable", 503)
 	}
 	op.attempted = true
@@ -327,7 +335,7 @@ func CheckKeyPolicySend(req *http.Request) error {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 	selected := op.selected
-	if op.sent || selected == nil || !op.allows(selected) {
+	if op.settled || op.sent || selected == nil || !op.allows(selected) {
 		return policyError("api_key_policy_unavailable", 503)
 	}
 	current, ok := op.manager.GetByID(selected.ID)
@@ -362,8 +370,9 @@ func CheckKeyPolicySend(req *http.Request) error {
 	op.manager.keyPolicyMu.Lock()
 	defer op.manager.keyPolicyMu.Unlock()
 	op.manager.resetPolicyDay(op.account)
-	for _, p := range op.effective() {
-		if (p.DailyRequestCap != nil && (*p.DailyRequestCap == 0 || op.account.requests > *p.DailyRequestCap)) || (p.DailyTokenCap != nil && op.account.tokens >= *p.DailyTokenCap) {
+	policies := op.effective()
+	for _, p := range policies {
+		if p.DailyRequestCap != nil && (*p.DailyRequestCap == 0 || op.account.requests > *p.DailyRequestCap) {
 			return policyError("api_key_daily_cap", 429)
 		}
 	}
@@ -377,6 +386,106 @@ func CheckKeyPolicySend(req *http.Request) error {
 	if err != nil || model != op.model {
 		return policyError("api_key_model_forbidden", 403)
 	}
+	bound := keyPolicyTokenBound(payload, model, selected.Provider)
+	used := saturatingAdd(op.account.tokens, op.account.reserved)
+	for _, p := range policies {
+		if p.DailyTokenCap != nil && (used >= *p.DailyTokenCap || bound > *p.DailyTokenCap-used) {
+			return policyError("api_key_daily_token_cap", 429)
+		}
+	}
+	op.reservation = bound
+	op.reservationDay = op.account.day
+	op.account.reserved = saturatingAdd(op.account.reserved, bound)
 	op.sent = true
 	return nil
+}
+
+// Unknown ceilings fail closed rather than assuming an arbitrary provider limit.
+const keyPolicyUnknownTokenBound int64 = math.MaxInt64
+
+// keyPolicyTokenBound reads the final business payload after all translation,
+// injection and user payload rules. For byte-tokenized text, the complete JSON
+// byte length overestimates input (including framing), unlike a bytes/4 guess.
+// Opaque/media inputs instead reserve the entire registered input/context limit.
+func keyPolicyTokenBound(payload []byte, model, provider string) int64 {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return keyPolicyUnknownTokenBound
+	}
+	output := int64(0)
+	for _, name := range []string{"max_tokens", "max_output_tokens", "max_completion_tokens"} {
+		if raw, ok := fields[name]; ok {
+			var limit int64
+			if json.Unmarshal(raw, &limit) != nil || limit <= 0 {
+				return keyPolicyUnknownTokenBound
+			}
+			output = max(output, limit)
+		}
+	}
+	info := registry.LookupModelInfo(model, provider)
+	if output == 0 {
+		if info == nil {
+			return keyPolicyUnknownTokenBound
+		}
+		output = int64(max(info.MaxCompletionTokens, info.OutputTokenLimit))
+		if output <= 0 {
+			return keyPolicyUnknownTokenBound
+		}
+	}
+	// A compatible endpoint may support multiple candidates. Never bound only one.
+	candidates := int64(1)
+	for _, name := range []string{"n", "best_of"} {
+		if raw, ok := fields[name]; ok {
+			var count int64
+			if json.Unmarshal(raw, &count) != nil || count <= 0 {
+				return keyPolicyUnknownTokenBound
+			}
+			candidates = max(candidates, count)
+		}
+	}
+	if output > math.MaxInt64/candidates {
+		return keyPolicyUnknownTokenBound
+	}
+	input := int64(len(payload))
+	var body any
+	if json.Unmarshal(payload, &body) != nil {
+		return keyPolicyUnknownTokenBound
+	}
+	if keyPolicyOpaqueInput(body) {
+		if info == nil || max(info.InputTokenLimit, info.ContextLength, info.MaxContextLength) <= 0 {
+			return keyPolicyUnknownTokenBound
+		}
+		input = max(input, int64(max(info.InputTokenLimit, info.ContextLength, info.MaxContextLength)))
+	}
+	return saturatingAdd(input, output*candidates)
+}
+
+func keyPolicyOpaqueInput(value any) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		if kind, _ := v["type"].(string); kind != "" {
+			if strings.HasPrefix(kind, "web_search") || strings.HasPrefix(kind, "web_fetch") || strings.HasPrefix(kind, "file_search") || strings.HasPrefix(kind, "code_execution") {
+				return true
+			}
+			switch kind {
+			case "image", "image_url", "input_image", "document", "input_document", "input_file", "file", "input_audio", "audio", "video", "input_video", "video_url", "compaction", "redacted_thinking":
+				return true
+			}
+		}
+		for name, child := range v {
+			if name == "encrypted_content" || name == "file_id" || name == "image_url" || name == "previous_response_id" || name == "conversation" {
+				return true
+			}
+			if keyPolicyOpaqueInput(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if keyPolicyOpaqueInput(child) {
+				return true
+			}
+		}
+	}
+	return false
 }

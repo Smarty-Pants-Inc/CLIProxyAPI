@@ -44,7 +44,7 @@ func TestKeyPolicyClaudeCredentialHeader(t *testing.T) {
 			if _, _, err := KeyPolicyFromContext(ctx).selectExecutor(ex.Request{Model: "claude-model"}, ex.Options{}); err != nil {
 				t.Fatal(err)
 			}
-			req := httptest.NewRequest("POST", "http://example/v1/messages?beta=true", strings.NewReader(`{"model":"claude-model"}`)).WithContext(ctx)
+			req := httptest.NewRequest("POST", "http://example/v1/messages?beta=true", strings.NewReader(`{"model":"claude-model","max_tokens":16}`)).WithContext(ctx)
 			for _, h := range tc.headers {
 				req.Header.Add(h[0], h[1])
 			}

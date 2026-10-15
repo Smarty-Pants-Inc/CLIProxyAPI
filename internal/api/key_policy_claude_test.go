@@ -128,27 +128,27 @@ func TestKeyPolicyClaude(t *testing.T) {
 		want, second         int
 		wantCalls            int32
 	}{
-		// A cap of 7 is spent by one call (7 tokens), a cap of 8 is not.
-		{name: "responses cap spent", path: "/v1/responses", tokenCap: 7, want: 200, second: 429, wantCalls: 1},
-		{name: "responses cap left", path: "/v1/responses", tokenCap: 8, want: 200, second: 200, wantCalls: 2},
-		{name: "responses SSE cap spent", path: "/v1/responses", stream: true, tokenCap: 7, want: 200, second: 429, wantCalls: 1},
-		{name: "responses SSE cap left", path: "/v1/responses", stream: true, tokenCap: 8, want: 200, second: 200, wantCalls: 2},
-		{name: "messages cap spent", path: "/v1/messages", tokenCap: 7, want: 200, second: 429, wantCalls: 1},
-		{name: "messages cap left", path: "/v1/messages", tokenCap: 8, want: 200, second: 200, wantCalls: 2},
-		{name: "messages SSE cap spent", path: "/v1/messages", stream: true, tokenCap: 7, want: 200, second: 429, wantCalls: 1},
-		{name: "messages SSE cap left", path: "/v1/messages", stream: true, tokenCap: 8, want: 200, second: 200, wantCalls: 2},
-		{name: "OAuth", path: "/v1/responses", oauth: true, tokenCap: 100, want: 200, wantCalls: 1},
-		{name: "model forbidden", path: "/v1/responses", model: "claude-other", tokenCap: 100, want: 403},
-		{name: "messages model forbidden", path: "/v1/messages", model: "claude-other", tokenCap: 100, want: 403},
-		// TriStar's node-gateway calls POST /v1/chat/completions.
-		{name: "chat cap spent", path: "/v1/chat/completions", tokenCap: 7, want: 200, second: 429, wantCalls: 1},
-		{name: "chat cap left", path: "/v1/chat/completions", tokenCap: 8, want: 200, second: 200, wantCalls: 2},
-		{name: "chat SSE cap spent", path: "/v1/chat/completions", stream: true, tokenCap: 7, want: 200, second: 429, wantCalls: 1},
-		{name: "chat SSE cap left", path: "/v1/chat/completions", stream: true, tokenCap: 8, want: 200, second: 200, wantCalls: 2},
-		{name: "chat model forbidden", path: "/v1/chat/completions", model: "claude-other", tokenCap: 100, want: 403},
-		{name: "only outside auth eligible", path: "/v1/responses", disableA: true, tokenCap: 100, want: 503},
-		{name: "redirect", path: "/v1/responses", upstream: 307, tokenCap: 100, want: 503, wantCalls: 1},
-		{name: "request cap", path: "/v1/responses", noCap: true, tokenCap: 100, want: 429},
+		// A cap below the wire bound refuses even if actual usage would be seven.
+		{name: "responses insufficient bound", path: "/v1/responses", tokenCap: 7, want: 429},
+		{name: "responses cap left", path: "/v1/responses", tokenCap: 1000000, want: 200, second: 200, wantCalls: 2},
+		{name: "responses SSE insufficient bound", path: "/v1/responses", stream: true, tokenCap: 7, want: 429},
+		{name: "responses SSE cap left", path: "/v1/responses", stream: true, tokenCap: 1000000, want: 200, second: 200, wantCalls: 2},
+		{name: "messages insufficient bound", path: "/v1/messages", tokenCap: 7, want: 429},
+		{name: "messages cap left", path: "/v1/messages", tokenCap: 1000000, want: 200, second: 200, wantCalls: 2},
+		{name: "messages SSE insufficient bound", path: "/v1/messages", stream: true, tokenCap: 7, want: 429},
+		{name: "messages SSE cap left", path: "/v1/messages", stream: true, tokenCap: 1000000, want: 200, second: 200, wantCalls: 2},
+		{name: "OAuth", path: "/v1/responses", oauth: true, tokenCap: 1000000, want: 200, wantCalls: 1},
+		{name: "model forbidden", path: "/v1/responses", model: "claude-other", tokenCap: 1000000, want: 403},
+		{name: "messages model forbidden", path: "/v1/messages", model: "claude-other", tokenCap: 1000000, want: 403},
+		// TriStar uses Chat Completions as well as Responses.
+		{name: "chat insufficient bound", path: "/v1/chat/completions", tokenCap: 7, want: 429},
+		{name: "chat cap left", path: "/v1/chat/completions", tokenCap: 1000000, want: 200, second: 200, wantCalls: 2},
+		{name: "chat SSE insufficient bound", path: "/v1/chat/completions", stream: true, tokenCap: 7, want: 429},
+		{name: "chat SSE cap left", path: "/v1/chat/completions", stream: true, tokenCap: 1000000, want: 200, second: 200, wantCalls: 2},
+		{name: "chat model forbidden", path: "/v1/chat/completions", model: "claude-other", tokenCap: 1000000, want: 403},
+		{name: "only outside auth eligible", path: "/v1/responses", disableA: true, tokenCap: 1000000, want: 503},
+		{name: "redirect", path: "/v1/responses", upstream: 307, tokenCap: 1000000, want: 503, wantCalls: 1},
+		{name: "request cap", path: "/v1/responses", noCap: true, tokenCap: 1000000, want: 429},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
@@ -218,7 +218,7 @@ func TestKeyPolicyClaudeResponsesReasoning(t *testing.T) {
 				var last []byte
 				upstream := fakeClaudeUpstream(t, 200, &calls, &last, &mu, "verified-A")
 				defer upstream.Close()
-				tokenCap, requestCap := int64(100), int64(10)
+				tokenCap, requestCap := int64(1000000), int64(10)
 				cfg := policyClaudeConfig([]string{tc.model}, []string{"A"}, &tokenCap, &requestCap)
 				if !policied {
 					cfg.APIKeyPolicies = nil
@@ -273,7 +273,7 @@ func TestKeyPolicyClaudeThirdPartyEffortBeta(t *testing.T) {
 					mu.Unlock()
 				})
 				defer upstream.Close()
-				tokenCap, requestCap := int64(100), int64(10)
+				tokenCap, requestCap := int64(1000000), int64(10)
 				cfg := policyClaudeConfig([]string{policyClaudeModel}, []string{"A"}, &tokenCap, &requestCap)
 				cfg.ClaudeKey = []config.ClaudeKey{{APIKey: "verified-A", BaseURL: upstream.URL, FingerprintProfile: config.ClaudeFingerprintProfileClaudeCodeCLI}}
 				server := newTestServerWithConfig(t, cfg)
@@ -330,7 +330,7 @@ func TestKeyPolicyClaudeSingleAuthPolicy(t *testing.T) {
 				w.WriteHeader(500)
 			}))
 			defer codexUp.Close()
-			tokenCap, requestCap := int64(100), int64(10)
+			tokenCap, requestCap := int64(1000000), int64(10)
 			cfg := policyClaudeConfig([]string{policyClaudeModel, "claude-sonnet-5-5"}, []string{"A"}, &tokenCap, &requestCap)
 			server := newTestServerWithConfig(t, cfg)
 			server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
@@ -377,7 +377,7 @@ func TestKeyPolicyClaudeCodexSeparation(t *testing.T) {
 					fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":%q,\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":3,\"total_tokens\":7}}}\n\n", codexModel)
 				}))
 				defer codexUp.Close()
-				tokenCap, requestCap := int64(100), int64(10)
+				tokenCap, requestCap := int64(1000000), int64(10)
 				cfg := policyClaudeConfig([]string{policyClaudeModel, codexModel}, order, &tokenCap, &requestCap)
 				server := newTestServerWithConfig(t, cfg)
 				server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
@@ -387,7 +387,7 @@ func TestKeyPolicyClaudeCodexSeparation(t *testing.T) {
 				if _, err := server.handlers.AuthManager.Register(context.Background(), c); err != nil {
 					t.Fatal(err)
 				}
-				registry.GetGlobalRegistry().RegisterClient("C", "codex", []*registry.ModelInfo{{ID: codexModel}})
+				registry.GetGlobalRegistry().RegisterClient("C", "codex", []*registry.ModelInfo{registry.LookupStaticModelInfo(codexModel)})
 				defer registry.GetGlobalRegistry().UnregisterClient("C")
 				rr := sendPolicied(server, "/v1/responses", fmt.Sprintf(`{"model":%q,"input":"hello"}`, model))
 				if rr.Code != 200 {

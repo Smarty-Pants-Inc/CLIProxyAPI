@@ -54,7 +54,7 @@ func TestKeyPolicyUsageNeverCarriesUpstreamAPIKey(t *testing.T) {
 			}
 			defer upstream.Close()
 
-			tokenCap, requestCap := int64(100), int64(10)
+			tokenCap, requestCap := int64(1000000), int64(10)
 			cfg := policyClaudeConfig([]string{model}, []string{"K"}, &tokenCap, &requestCap)
 			server := newTestServerWithConfig(t, cfg)
 			server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))

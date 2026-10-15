@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -30,24 +31,24 @@ func (w *cancelOnWrite) Write(b []byte) (int, error) {
 
 func (w *cancelOnWrite) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
 
-// An aborted Claude stream reports only partial usage (message_start and a
-// message_delta without message_stop). Partial usage must not count as
-// metered: the operation takes the fail-safe path and the key's daily token
-// budget closes, so the next request is 429 even under a generous cap.
-func TestKeyPolicyClaudeAbortedStreamFailsClosed(t *testing.T) {
+// Successful streams without complete usage still fail closed. A client abort
+// releases the reservation and charges only the partial usage reported so far.
+func TestKeyPolicyClaudeAbortedStreamSettlement(t *testing.T) {
 	for _, path := range []string{"/v1/responses", "/v1/messages", "/v1/chat/completions"} {
 		for _, abort := range []string{"no message_stop", "client disconnect"} {
 			t.Run(path+"/"+abort, func(t *testing.T) {
 				release := make(chan struct{})
 				defer close(release)
+				var calls atomic.Int32
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					call := calls.Add(1)
 					w.Header().Set("Content-Type", "text/event-stream")
 					fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n", policyClaudeModel)
 					fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
 					fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
 					fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\"usage\":{\"input_tokens\":4,\"output_tokens\":3}}\n\n")
 					w.(http.Flusher).Flush()
-					if abort == "client disconnect" {
+					if abort == "client disconnect" && call == 1 {
 						select {
 						case <-r.Context().Done():
 						case <-release:
@@ -55,8 +56,8 @@ func TestKeyPolicyClaudeAbortedStreamFailsClosed(t *testing.T) {
 					}
 					// Return without message_stop.
 				}))
-				defer upstream.Close()
-				tokenCap, requestCap := int64(1000), int64(10)
+				t.Cleanup(upstream.Close)
+				tokenCap, requestCap := int64(1000000), int64(10)
 				cfg := policyClaudeConfig([]string{policyClaudeModel}, []string{"A"}, &tokenCap, &requestCap)
 				server := newTestServerWithConfig(t, cfg)
 				server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
@@ -82,10 +83,13 @@ func TestKeyPolicyClaudeAbortedStreamFailsClosed(t *testing.T) {
 					t.Fatalf("client never saw %q before disconnect: %s", w.marker, w.Body.String())
 				}
 
-				// Partial usage is 7 of a 1000 cap: only the fail-safe yields 429.
+				want, wantCalls := http.StatusTooManyRequests, int32(1)
+				if abort == "client disconnect" {
+					want, wantCalls = http.StatusOK, 2
+				}
 				next := sendPolicied(server, path, body)
-				if next.Code != http.StatusTooManyRequests {
-					t.Fatalf("next request status=%d, want 429 (fail-safe): %s", next.Code, next.Body.String())
+				if next.Code != want || calls.Load() != wantCalls {
+					t.Fatalf("next status=%d calls=%d, want %d/%d: %s", next.Code, calls.Load(), want, wantCalls, next.Body.String())
 				}
 			})
 		}

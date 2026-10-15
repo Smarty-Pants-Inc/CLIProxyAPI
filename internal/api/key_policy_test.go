@@ -51,7 +51,7 @@ func TestKeyPolicyHTTP(t *testing.T) {
 		{name: "output only SSE", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10, stream: true},
 		{name: "mixed aliases", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10},
 		{name: "mixed aliases SSE", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10, stream: true},
-		{name: "token meter", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10},
+		{name: "token meter", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 429, cap: 10},
 		{name: "request meter", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 1},
 		{name: "allowed", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10},
 		{name: "SSE", model: "gpt-6.1-sol", allowed: "A", upstream: 200, want: 200, cap: 10, stream: true},
@@ -126,7 +126,8 @@ func TestKeyPolicyHTTP(t *testing.T) {
 				cfg.APIKeyPolicies = []config.APIKeyPolicy{{KeySHA256: hex.EncodeToString(digest[:]), AllowedAuths: []string{tc.allowed}, AllowedModels: &models, DailyRequestCap: &tc.cap}}
 			}
 			if tc.name == "partial usage" || strings.Contains(tc.name, "only") || strings.HasPrefix(tc.name, "mixed aliases") {
-				cfg.APIKeyPolicies[0].DailyTokenCap = &tc.cap
+				limit := int64(1000000)
+				cfg.APIKeyPolicies[0].DailyTokenCap = &limit
 			}
 			if tc.name == "token meter" {
 				limit := int64(1)
@@ -143,7 +144,7 @@ func TestKeyPolicyHTTP(t *testing.T) {
 				if _, err := server.handlers.AuthManager.Register(context.Background(), a); err != nil {
 					t.Fatal(err)
 				}
-				registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "gpt-6.1-sol"}})
+				registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{registry.LookupStaticModelInfo("gpt-6.1-sol")})
 				defer registry.GetGlobalRegistry().UnregisterClient(id)
 			}
 			path := tc.path
@@ -177,8 +178,14 @@ func TestKeyPolicyHTTP(t *testing.T) {
 				req = httptest.NewRequest("POST", path, strings.NewReader(`{"model":"gpt-6.1-sol","input":"hello"}`))
 				req.Header.Set("Authorization", "Bearer test-key")
 				server.engine.ServeHTTP(rr, req)
-				if rr.Code != 429 {
-					t.Fatalf("second request=%d: %s", rr.Code, rr.Body.String())
+				wantSecond := 429
+				if tc.name == "partial usage" {
+					// A known total is metered even with an omitted output field.
+					wantSecond = 200
+					wantCalls++
+				}
+				if rr.Code != wantSecond {
+					t.Fatalf("second request=%d want=%d: %s", rr.Code, wantSecond, rr.Body.String())
 				}
 			}
 			if tc.name == "usage reload" {
