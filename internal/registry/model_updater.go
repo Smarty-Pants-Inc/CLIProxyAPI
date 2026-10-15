@@ -315,8 +315,8 @@ func mergeProviderNames(existing, incoming []string) []string {
 // keepEmbeddedClaudeModels appends embedded Claude models that the remote catalog lacks.
 // ponytail: the fork can ship a new Anthropic model before router-for-me/models lists it
 // (claude-sonnet-5-5, smarty-dev#1830); remote entries still win for IDs present in both.
-// ponytail: claude-haiku-5-5 ships from the embedded catalog with provisional limits
-// (context 200000, max output 64000, adaptive levels) until upstream publishes them;
+// ponytail: claude-haiku-5-5 ships from the embedded catalog with the same limits as
+// claude-sonnet-5-5 (context 1000000, max output 128000, adaptive levels);
 // router-for-me/models' entry replaces ours once it lists the ID.
 func keepEmbeddedClaudeModels(remote []*ModelInfo) []*ModelInfo {
 	var embedded staticModelsJSON

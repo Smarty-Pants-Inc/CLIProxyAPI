@@ -7,7 +7,7 @@ import (
 )
 
 // TestValidateConfig_ClaudeHaiku55AcceptsOrdinaryRequests pins that the
-// provisional claude-haiku-5-5 thinking metadata does not reject ordinary
+// claude-haiku-5-5 thinking metadata does not reject ordinary
 // Claude requests at the gateway (levels, adaptive, disabled, budgets).
 func TestValidateConfig_ClaudeHaiku55AcceptsOrdinaryRequests(t *testing.T) {
 	modelInfo := registry.LookupStaticModelInfoByChannel("claude-haiku-5-5", "claude")

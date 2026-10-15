@@ -27,6 +27,9 @@ func TestClaudeHaiku55_EmbeddedCatalog(t *testing.T) {
 	if m.Type != "claude" || m.OwnedBy != "anthropic" || m.DisplayName != "Claude Haiku 5.5" {
 		t.Fatalf("unexpected metadata: %+v", m)
 	}
+	if m.ContextLength != 1000000 || m.MaxCompletionTokens != 128000 {
+		t.Fatalf("unexpected limits: context = %d, max output = %d; want 1000000, 128000", m.ContextLength, m.MaxCompletionTokens)
+	}
 	if m.Thinking == nil || !m.Thinking.ZeroAllowed || !m.Thinking.DynamicAllowed || len(m.Thinking.Levels) == 0 {
 		t.Fatalf("unexpected thinking support: %+v", m.Thinking)
 	}
