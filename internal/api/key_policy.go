@@ -17,7 +17,7 @@ import (
 
 // Intercept only policied clients. A private built-in handler has no plugin host,
 // including if configuration changes while this admitted request is running.
-func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
+func admitKeyPolicy(c *gin.Context, managers []*auth.Manager, base *handlers.BaseAPIHandler) (func(), bool) {
 	key := c.GetString("userApiKey")
 	var policies []config.APIKeyPolicy
 	if metadata, ok := c.Get("accessMetadata"); ok {
@@ -70,8 +70,14 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	c.Request = c.Request.WithContext(ctx)
 	c.Request.Header.Del("Content-Encoding")
 	c.Request.Body = io.NopCloser(bytes.NewReader(body))
-	// Keep protocol/error handling and SSE delivery, but no plugins/bootstrap retries.
-	clean := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, m)
+	// Retain loaded SDK behavior without mutating shared settings. A fresh
+	// handler has no plugin/router hosts, and policy sends never bootstrap-retry.
+	var sdkCfg config.SDKConfig
+	if base != nil && base.Cfg != nil {
+		sdkCfg = *base.Cfg
+	}
+	sdkCfg.Streaming.BootstrapRetries = 0
+	clean := handlers.NewBaseAPIHandlers(&sdkCfg, m)
 	switch {
 	case messages:
 		claude.NewClaudeCodeAPIHandler(clean).ClaudeMessages(c)

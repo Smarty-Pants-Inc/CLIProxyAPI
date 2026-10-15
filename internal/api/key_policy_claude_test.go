@@ -45,6 +45,7 @@ func fakeClaudeUpstream(t *testing.T, status int, calls *atomic.Int32, last *[]b
 		if got := r.Header.Get("Authorization") + r.Header.Get("X-Api-Key"); !strings.HasSuffix(got, cred) {
 			t.Errorf("wrong credential: %q want %q", got, cred)
 		}
+		w.Header().Set("X-Ratelimit-Remaining", "42")
 		if status != 200 {
 			w.Header().Set("Location", "/other")
 			w.WriteHeader(status)
