@@ -48,6 +48,10 @@ func (c *websocketConnectionCloser) Close() error {
 	return c.err
 }
 
+// ponytail: late interrupts race terminal delivery or the next turn; 1024 completed
+// responses is far above that in-flight window without retaining the connection's history.
+const maxTerminalResponseIDs = 1024
+
 type codexWebsocketSession struct {
 	sessionID string
 
@@ -76,8 +80,9 @@ type codexWebsocketSession struct {
 	terminalConn *websocket.Conn
 	terminalErr  error
 
-	responseStateConn   *websocket.Conn
-	terminalResponseIDs map[string]struct{}
+	responseStateConn       *websocket.Conn
+	terminalResponseIDs     map[string]struct{}
+	terminalResponseIDOrder []string
 
 	readerConn *websocket.Conn
 
@@ -149,8 +154,23 @@ func (s *codexWebsocketSession) resetTerminalError(conn *websocket.Conn) {
 	if s.responseStateConn != conn {
 		s.responseStateConn = conn
 		s.terminalResponseIDs = make(map[string]struct{})
+		s.terminalResponseIDOrder = make([]string, 0, maxTerminalResponseIDs)
 	}
 	s.activeMu.Unlock()
+}
+
+// recordTerminalResponseIDLocked records a terminal ID while activeMu is held.
+func (s *codexWebsocketSession) recordTerminalResponseIDLocked(responseID string) {
+	if _, exists := s.terminalResponseIDs[responseID]; exists {
+		return
+	}
+	if len(s.terminalResponseIDOrder) == maxTerminalResponseIDs {
+		delete(s.terminalResponseIDs, s.terminalResponseIDOrder[0])
+		copy(s.terminalResponseIDOrder, s.terminalResponseIDOrder[1:])
+		s.terminalResponseIDOrder = s.terminalResponseIDOrder[:maxTerminalResponseIDs-1]
+	}
+	s.terminalResponseIDs[responseID] = struct{}{}
+	s.terminalResponseIDOrder = append(s.terminalResponseIDOrder, responseID)
 }
 
 func (s *codexWebsocketSession) markTerminalError(conn *websocket.Conn, err error) bool {
@@ -782,7 +802,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			if isTerminalEvent(eventType) && eventType != "error" && responseID.Type == gjson.String && responseID.String() != "" {
 				sess.activeMu.Lock()
 				if sess.responseStateConn == conn {
-					sess.terminalResponseIDs[responseID.String()] = struct{}{}
+					sess.recordTerminalResponseIDLocked(responseID.String())
 				}
 				sess.activeMu.Unlock()
 			}
