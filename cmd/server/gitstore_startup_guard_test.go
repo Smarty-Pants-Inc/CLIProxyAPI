@@ -132,12 +132,12 @@ func TestServerGitStoreStartupGuard(t *testing.T) {
 }
 
 func TestValidateTokenStoreStartupReturnsTypedError(t *testing.T) {
-	errStartup := validateTokenStoreStartup(true)
+	errStartup := validateTokenStoreStartup(true, false, false)
 	var disabled *gitTokenStoreDisabledError
 	if !errors.As(errStartup, &disabled) || errStartup.Error() != gitStoreDisabledMessage {
 		t.Fatalf("git startup error = %T %v, want typed disabled error", errStartup, errStartup)
 	}
-	if errOther := validateTokenStoreStartup(false); errOther != nil {
+	if errOther := validateTokenStoreStartup(false, false, false); errOther != nil {
 		t.Fatalf("non-git backend rejected: %v", errOther)
 	}
 }

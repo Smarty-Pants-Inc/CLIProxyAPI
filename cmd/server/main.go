@@ -337,8 +337,17 @@ func main() {
 		isCloudDeploy = true
 	}
 
+	// Refuse unsafe token stores before initializing a workspace or contacting a
+	// remote backend. Home mode does not use these stores and clears their flags.
+	if strings.TrimSpace(homeJWT) == "" {
+		if errStartup := validateTokenStoreStartup(useGitStore, usePostgresStore, useObjectStore); errStartup != nil {
+			log.WithError(errStartup).Error(errStartup.Error())
+			os.Exit(1)
+		}
+	}
+
 	// Determine and load the configuration file.
-	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
+	// Prefer Postgres, then object storage, Git, or local files.
 	var configFilePath string
 	if strings.TrimSpace(homeJWT) != "" {
 		configLoadedFromHome = true
@@ -541,10 +550,6 @@ func main() {
 			log.Infof("object-backed token store enabled, bucket: %s", objectStoreBucket)
 		}
 	} else if useGitStore {
-		if errStartup := validateTokenStoreStartup(useGitStore); errStartup != nil {
-			log.WithError(errStartup).Error(errStartup.Error())
-			os.Exit(1)
-		}
 		if gitStoreLocalPath == "" {
 			if writableBase != "" {
 				gitStoreLocalPath = writableBase
