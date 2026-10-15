@@ -25,6 +25,7 @@ func TestSaveTokenToFileOwnerOnly(t *testing.T) {
 		t.Fatalf("chmod: %v", err)
 	}
 	storage.AccessToken = "fake-access-2"
+	storage.ReplaceCredentials = true // This is an intentional login replacement, not a stale snapshot.
 	if err := storage.SaveTokenToFile(path); err != nil {
 		t.Fatalf("second SaveTokenToFile: %v", err)
 	}
@@ -43,9 +44,14 @@ func TestSaveTokenToFileOwnerOnly(t *testing.T) {
 	if got := dirInfo.Mode().Perm(); got != 0o700 {
 		t.Fatalf("created token dir mode = %#o, want 0700", got)
 	}
+	// The persistent sidecar keeps all processes locking the same inode.
+	lockInfo, err := os.Stat(path + ".lock")
+	if err != nil || lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("credential lock must be owner-only: info=%v err=%v", lockInfo, err)
+	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("dir entries = %v, %v; want only the token file", entries, err)
+	if err != nil || len(entries) != 2 || entries[0].Name() != filepath.Base(path) || entries[1].Name() != filepath.Base(path)+".lock" {
+		t.Fatalf("dir entries = %v, %v; want only token and persistent lock", entries, err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -553,7 +554,11 @@ func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 }
 
 func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
-	if h == nil || h.Cfg == nil {
+	if h == nil {
+		return payload
+	}
+	cfg := h.CurrentConfig()
+	if cfg == nil {
 		return payload
 	}
 
@@ -572,7 +577,7 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context
 		requestCtx,
 		requestHeaders,
 		payload,
-		h.Cfg.Client.Codex.OptimizeMultiAgentV2,
+		cfg.Client.Codex.OptimizeMultiAgentV2,
 		homeEnabled,
 	)
 	if prepared && c != nil {
@@ -582,7 +587,11 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context
 }
 
 func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context, payload []byte) []byte {
-	if h == nil || h.Cfg == nil || !h.Cfg.CodexOrphanDelegationCompatibility {
+	if h == nil {
+		return payload
+	}
+	cfg := h.CurrentConfig()
+	if cfg == nil || !cfg.CodexOrphanDelegationCompatibility {
 		return payload
 	}
 	requestCtx := context.Background()
@@ -636,7 +645,7 @@ func requestBodyErrorStatus(err error) int {
 	if errors.Is(err, handlers.ErrRequestBodyTooLarge) {
 		return http.StatusRequestEntityTooLarge
 	}
-	return http.StatusBadRequest
+	return clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest)
 }
 
 func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
@@ -740,14 +749,45 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		finishDelivery(err)
 		cancelExecution(err)
 	}
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
-
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
+	var upstreamHeaders http.Header
+	committed := false
+	commitSSE := func() {
+		if committed {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		committed = true
+	}
+	writeKeepAlive := func() bool {
+		commitSSE()
+		if errWrite := writeResponsesSSEChunk(c.Writer, []byte(": keep-alive\n\n")); errWrite != nil {
+			cliCancel(errWrite)
+			return false
+		}
+		if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+			cliCancel(errFlush)
+			return false
+		}
+		return true
+	}
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	defer stopKeepAlive()
+
+	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
+		c, cliCtx, cliCancel, h.HandlerType(), modelName, rawJSON, "", keepAliveC, writeKeepAlive,
+	)
+	if !okBootstrap {
+		return
+	}
+	upstreamHeaders = resolvedHeaders
+
 	isCodexClient := isCodexResponsesClientRequest(c)
 	failureEvent := "error"
 	if isCodexClient {
@@ -769,19 +809,22 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				continue
 			}
 			framer.Flush(&initialOutput)
-			safeErrMsg := sanitizeResponsesStreamErrorMessage(errMsg)
-			if framer.dataFrames == 0 {
-				safeErrMsg = sanitizeResponsesInitialErrorMessage(errMsg)
-			}
-			if safeErrMsg != nil && framer.dataFrames > 0 {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
-					cliCancel(errWrite)
-					return
+			if committed || framer.dataFrames > 0 {
+				stopKeepAlive()
+				safeErrMsg := sanitizeResponsesStreamErrorMessage(errMsg)
+				commitSSE()
+				if initialOutput.Len() > 0 {
+					if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
+						cliCancel(errWrite)
+						return
+					}
+					if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+						cliCancel(errFlush)
+						return
+					}
 				}
-				if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
-					cliCancel(errFlush)
+				if safeErrMsg == nil {
+					cliCancel(nil)
 					return
 				}
 				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
@@ -790,7 +833,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, framer)
 				return
 			}
-			// Upstream failed before a complete SSE data frame. Return JSON.
+			// Upstream failed before SSE was committed. Return JSON with HTTP status.
+			safeErrMsg := sanitizeResponsesInitialErrorMessage(errMsg)
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), safeErrMsg)
 			h.WriteErrorResponse(c, safeErrMsg)
 			if safeErrMsg != nil {
@@ -810,22 +854,24 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 					}
 					errMsg = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("%s", message)}
 				}
-				if framer.dataFrames > 0 {
+				if committed || framer.dataFrames > 0 {
 					errMsg = sanitizeResponsesStreamErrorMessage(errMsg)
 				} else {
 					errMsg = sanitizeResponsesInitialErrorMessage(errMsg)
 				}
 
-				if framer.dataFrames > 0 {
-					setSSEHeaders()
-					handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-					if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
-						cliCancel(errWrite)
-						return
-					}
-					if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
-						cliCancel(errFlush)
-						return
+				if committed || framer.dataFrames > 0 {
+					stopKeepAlive()
+					commitSSE()
+					if initialOutput.Len() > 0 {
+						if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
+							cliCancel(errWrite)
+							return
+						}
+						if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+							cliCancel(errFlush)
+							return
+						}
 					}
 					if framer.terminalError != nil {
 						h.logResponsesStreamError(c, framer, framer.terminalError)
@@ -858,8 +904,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				continue
 			}
 
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			stopKeepAlive()
+			commitSSE()
 			if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 				cliCancel(errWrite)
 				return
@@ -876,6 +922,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
 			return
+		case <-keepAliveC:
+			if !writeKeepAlive() {
+				return
+			}
 		}
 	}
 }

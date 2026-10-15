@@ -43,12 +43,13 @@ type ObjectStoreConfig struct {
 // ObjectTokenStore persists configuration and authentication metadata using an S3-compatible object storage backend.
 // Files are mirrored to a local workspace so existing file-based flows continue to operate.
 type ObjectTokenStore struct {
-	client     *minio.Client
-	cfg        ObjectStoreConfig
-	spoolRoot  string
-	configPath string
-	authDir    string
-	mu         sync.Mutex
+	client      *minio.Client
+	cfg         ObjectStoreConfig
+	spoolRoot   string
+	configPath  string
+	authDir     string
+	mu          sync.Mutex
+	putObjectFn func(ctx context.Context, key string, data []byte, contentType string) error
 }
 
 // NewObjectTokenStore initializes an object storage backed token store.
@@ -189,33 +190,40 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", fmt.Errorf("object store: create auth directory: %w", err)
 	}
 
-	switch {
-	case auth.Storage != nil:
-		auth.SetMetadata("disabled", auth.Disabled)
-		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-			setter.SetMetadata(auth.CloneMetadata())
+	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
+		if errCodex != nil {
+			return "", errCodex
 		}
-		if err = auth.Storage.SaveTokenToFile(path); err != nil {
-			return "", err
-		}
-	case auth.CloneMetadata() != nil:
-		auth.SetMetadata("disabled", auth.Disabled)
-		raw, errMarshal := json.Marshal(auth.CloneMetadata())
-		if errMarshal != nil {
-			return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
-		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
-				return path, nil
+	} else {
+		switch {
+		case auth.Storage != nil:
+			auth.SetMetadata("disabled", auth.Disabled)
+			if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+				setter.SetMetadata(auth.CloneMetadata())
 			}
-		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
-			return "", fmt.Errorf("object store: read existing metadata: %w", errRead)
+			if err = auth.Storage.SaveTokenToFile(path); err != nil {
+				return "", err
+			}
+		case auth.CloneMetadata() != nil:
+			auth.SetMetadata("disabled", auth.Disabled)
+			raw, errMarshal := json.Marshal(auth.CloneMetadata())
+			if errMarshal != nil {
+				return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
+			}
+			contentsMatch := false
+			if existing, errRead := os.ReadFile(path); errRead == nil {
+				contentsMatch = jsonEqual(existing, raw)
+			} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+				return "", fmt.Errorf("object store: read existing metadata: %w", errRead)
+			}
+			if !contentsMatch {
+				if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
+					return "", fmt.Errorf("object store: write auth file: %w", errWrite)
+				}
+			}
+		default:
+			return "", fmt.Errorf("object store: nothing to persist for %s", auth.ID)
 		}
-		if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
-			return "", fmt.Errorf("object store: write auth file: %w", errWrite)
-		}
-	default:
-		return "", fmt.Errorf("object store: nothing to persist for %s", auth.ID)
 	}
 
 	if auth.Attributes == nil {
@@ -481,8 +489,14 @@ func (s *ObjectTokenStore) deleteAuthObject(ctx context.Context, path string) er
 }
 
 func (s *ObjectTokenStore) putObject(ctx context.Context, key string, data []byte, contentType string) error {
+	if s.putObjectFn != nil {
+		return s.putObjectFn(ctx, key, data, contentType)
+	}
 	if len(data) == 0 {
 		return s.deleteObject(ctx, key)
+	}
+	if s.client == nil {
+		return fmt.Errorf("object store: client not configured")
 	}
 	fullKey := s.prefixedKey(key)
 	reader := bytes.NewReader(data)

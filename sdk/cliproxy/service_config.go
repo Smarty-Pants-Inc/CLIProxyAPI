@@ -16,6 +16,35 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func (s *Service) currentConfig() *config.Config {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	return cfg
+}
+
+func (s *Service) currentWatcher() *WatcherWrapper {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	w := s.watcher
+	s.cfgMu.RUnlock()
+	return w
+}
+
+func (s *Service) setWatcher(w *WatcherWrapper) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	s.watcher = w
+	s.cfgMu.Unlock()
+}
+
 func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
 }
@@ -37,6 +66,7 @@ type routingRuntimeState struct {
 	legacyStatePath          string
 	statePathUnavailable     bool
 	sessionAffinitySubagents bool
+	sessionAffinityRebindOn  string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -44,6 +74,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		strategy:                 "round-robin",
 		sessionAffinityTTL:       coreauth.DefaultSessionAffinityTTL,
 		sessionAffinitySubagents: true,
+		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
 	}
 	if cfg == nil {
 		return state
@@ -84,6 +115,9 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
+	if state.sessionAffinity && strings.EqualFold(strings.TrimSpace(cfg.Routing.SessionAffinityRebindOn), coreauth.SessionAffinityRebindOnQuota) {
+		state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnQuota
+	}
 	return state
 }
 
@@ -121,6 +155,7 @@ func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCac
 			LegacyStatePath:     state.legacyStatePath,
 			InitializationError: initializationError,
 			SubagentAffinity:    &subagents,
+			RebindOn:            state.sessionAffinityRebindOn,
 			Cache:               sharedCache,
 		})
 	}
@@ -335,10 +370,11 @@ func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Co
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {
-	if s == nil || s.watcher == nil {
+	w := s.currentWatcher()
+	if w == nil {
 		return false
 	}
-	return s.watcher.ReloadConfigIfChanged()
+	return w.ReloadConfigIfChanged()
 }
 
 func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Config) {

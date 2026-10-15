@@ -61,6 +61,9 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if replaced == nil || replaced == executor {
 		return
 	}
+	if sharer, ok := replaced.(ExecutionSessionSharer); ok && sharer != nil && sharer.SharesExecutionSessionsWith(executor) {
+		return
+	}
 	if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
 		closer.CloseExecutionSession(CloseAllExecutionSessionsID)
 	}
@@ -217,11 +220,15 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
 	if mode == updateModeRefresh && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
-		current := existing.Clone()
-		m.mu.Unlock()
-		return current, nil
+		if auth.CodexRefreshPatch == nil || !auth.CodexRefreshPatch.CanApplyTo(existing.CloneMetadata()) {
+			current := existing.Clone()
+			m.mu.Unlock()
+			return current, nil
+		}
 	}
 	if mode == updateModeRefresh {
+		// Fork policy: even a partition-scoped patch cannot bypass a changed
+		// credential binding. Retry from the new snapshot after outer rotation.
 		if refreshBindingChanged(base, existing) {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("update auth %s: stale refresh credential binding", auth.ID)
@@ -304,6 +311,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
+	}
+	if persistedHints, hasHints := existing.MetadataValue("antigravity_capability_hints"); hasHints {
+		auth.SetMetadata("antigravity_capability_hints", persistedHints)
 	}
 	auth.EnsureIndex()
 	// Save before publication, including the transactional Meta mint path.
@@ -410,7 +420,9 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 
 	if provider != "" {
 		if exec, ok := m.Executor(provider); ok && exec != nil {
-			if closer, okCloser := exec.(ExecutionSessionCloser); okCloser {
+			if authCloser, okAuthCloser := exec.(AuthExecutionSessionCloser); okAuthCloser && authCloser != nil {
+				authCloser.CloseAuthExecutionSessions(id)
+			} else if closer, okCloser := exec.(ExecutionSessionCloser); okCloser {
 				closer.CloseExecutionSession(CloseAllExecutionSessionsID)
 			}
 		}
@@ -560,6 +572,11 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		if shouldSkipPersist(ctx) {
 			return nil
 		}
+		releaseFg, errWait := m.beginForegroundStoreSave(ctx)
+		if errWait != nil {
+			return errWait
+		}
+		defer releaseFg()
 		_, err := store.Save(ctx, auth)
 		return err
 	}
@@ -567,6 +584,11 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if shouldSkipPersist(ctx) {
 		return nil
 	}
+	releaseFg, errWait := m.beginForegroundStoreSave(ctx)
+	if errWait != nil {
+		return errWait
+	}
+	defer releaseFg()
 	_, err := store.Save(ctx, auth)
 	return err
 }

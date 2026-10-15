@@ -78,7 +78,7 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.watcher != nil && s.watcher.DispatchRuntimeAuthUpdate(update) {
+	if watcher := s.currentWatcher(); watcher != nil && watcher.DispatchRuntimeAuthUpdate(update) {
 		return
 	}
 	if s.authUpdates != nil {
@@ -366,6 +366,14 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 			return existing
 		}
 		auth.CreatedAt = existing.CreatedAt
+		if existing.Metadata != nil {
+			if persistedHints, hasHints := existing.Metadata[antigravityPersistedHintsMetaKey]; hasHints {
+				if auth.Metadata == nil {
+					auth.Metadata = make(map[string]any)
+				}
+				auth.Metadata[antigravityPersistedHintsMetaKey] = persistedHints
+			}
+		}
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter

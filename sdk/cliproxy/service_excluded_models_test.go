@@ -284,7 +284,7 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 						"maxTokens": 1,
 						"maxOutputTokens": 2
 					},
-					"gemini-pro-agent": {},
+					"gemini-3-flash": {},
 					"fetched-only-search-model": {
 						"displayName": "Fetched Only Search Model"
 					}
@@ -336,7 +336,7 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		switch strings.TrimSpace(model.ID) {
 		case "gemini-3.1-flash-lite":
 			webSearchModel = model
-		case "gemini-pro-agent":
+		case "gemini-3-flash":
 			agentModel = model
 		case "gpt-oss-120b-medium":
 			staticOnlyModel = model
@@ -358,11 +358,11 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		t.Fatalf("static token limits should be preserved, got=%#v static=%#v", webSearchModel, staticWebSearchModel)
 	}
 	if agentModel == nil {
-		t.Fatal("expected account-entitled gemini-pro-agent to be registered")
+		t.Fatal("expected account-entitled gemini-3-flash to be registered")
 	}
 	// Remote hints add capabilities; omission must preserve the static catalog value.
-	if staticAgentModel := staticByID["gemini-pro-agent"]; staticAgentModel == nil || agentModel.SupportsWebSearch != staticAgentModel.SupportsWebSearch {
-		t.Fatal("gemini-pro-agent should preserve its static web search capability")
+	if staticAgentModel := staticByID["gemini-3-flash"]; staticAgentModel == nil || agentModel.SupportsWebSearch != staticAgentModel.SupportsWebSearch {
+		t.Fatal("gemini-3-flash should preserve its static web search capability")
 	}
 	if staticOnlyModel != nil {
 		t.Fatal("models absent from the account catalog must not be registered")

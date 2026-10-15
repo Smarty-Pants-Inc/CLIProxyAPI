@@ -127,6 +127,20 @@ func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 	e.wsExec.CloseExecutionSession(sessionID)
 }
 
+func (e *CodexAutoExecutor) SharesExecutionSessionsWith(other cliproxyauth.ProviderExecutor) bool {
+	if e == nil || e.wsExec == nil {
+		return false
+	}
+	return e.wsExec.SharesExecutionSessionsWith(other)
+}
+
+func (e *CodexAutoExecutor) CloseAuthExecutionSessions(authID string) {
+	if e == nil || e.wsExec == nil {
+		return
+	}
+	e.wsExec.CloseAuthExecutionSessions(authID)
+}
+
 func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
 	if e == nil || e.wsExec == nil {
 		return nil

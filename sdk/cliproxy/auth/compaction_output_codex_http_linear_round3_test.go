@@ -3,6 +3,7 @@ package auth_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,9 +21,10 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-// BASE-compatible RED on the real Codex HTTP Scanner -> registered Responses
-// translator -> public Manager. Setup and bootstrap are outside the allocation
-// receipt; the barrier is released only after authoritative ordinary output.
+// Exercise the real Codex HTTP scanner -> registered Responses translator ->
+// public Manager. Upstream canonicalizes multiline data into one SSE event;
+// JSON content, attribution before exposure, cancellation and linear work remain
+// the fork's contract. Setup and bootstrap are outside the allocation receipt.
 func TestCompactionOutputRound3RealCodexHTTPAllocationBound(t *testing.T) {
 	for _, signed := range []bool{false, true} {
 		t.Run(fmt.Sprint(signed), func(t *testing.T) {
@@ -47,6 +49,15 @@ func round3RealCodexHTTP(t *testing.T, count int, signed, cancelTail bool, decor
 	if len(strings.Join(units, "\n")) >= 1<<20 {
 		t.Fatal("fixture must remain below 1 MiB")
 	}
+	dataLines := make([]string, len(units))
+	for i, unit := range units {
+		dataLines[i] = strings.TrimPrefix(unit, "data: ")
+	}
+	var canonical bytes.Buffer
+	if err := json.Compact(&canonical, []byte(strings.Join(dataLines, "\n"))); err != nil {
+		t.Fatalf("invalid multiline fixture: %v", err)
+	}
+	expectedUnits := []string{"data: " + canonical.String()}
 	release := make(chan struct{})
 	partial := make(chan struct{})
 	closed := make(chan struct{})
@@ -135,20 +146,21 @@ bootstrapDone:
 			}
 			t.Fatal(chunk.Err)
 		}
-		if index < len(units) && string(chunk.Payload) == units[index] {
+		if index < len(expectedUnits) && string(chunk.Payload) == expectedUnits[index] {
 			if signed && index == 0 {
-				// Before even the first retained unit is visible, attribution to
-				// another producing account must already conflict with actual A.
+				// Attribution to actual A must precede even the first canonical
+				// event becoming visible, including its unchanged encrypted bytes.
 				if err := manager.RecordCompactionOutput("B", cliproxyexecutor.Options{}, []byte(`{"output":[`+block+`]}`)); err == nil {
 					t.Fatal("signed multiline bytes delivered before A registration")
 				}
 			}
 			index++
-		} else if index < len(units) && len(chunk.Payload) != 0 {
-			t.Fatalf("original Scanner unit %d changed: %q", index, chunk.Payload)
+		} else if index < len(expectedUnits) && len(chunk.Payload) != 0 {
+			t.Fatalf("canonical SSE event %d changed JSON or encrypted content: got %d bytes, want %d", index, len(chunk.Payload), len(expectedUnits[index]))
 		}
 	}
 	runtime.ReadMemStats(&after)
+	t.Logf("allocation receipt: raw_data_lines=%d canonical_events=%d signed=%t cancel=%t allocated_bytes=%d", len(units), index, signed, cancelTail, after.TotalAlloc-before.TotalAlloc)
 	if cancelTail {
 		if index != 0 {
 			t.Fatalf("canceled partial event released %d units", index)
@@ -160,8 +172,8 @@ bootstrapDone:
 		}
 		return
 	}
-	if index != len(units) {
-		t.Fatalf("delivered %d original units, want %d", index, len(units))
+	if index != len(expectedUnits) {
+		t.Fatalf("delivered %d canonical events, want %d", index, len(expectedUnits))
 	}
 	// Upstream translator and final validation are included. A generous linear
 	// ceiling permits their ordinary allocations, but not O(N^2) prefix copies.

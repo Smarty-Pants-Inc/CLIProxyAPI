@@ -18,7 +18,7 @@ import (
 // assertReadersSeeWholeJSON runs readers that loop over os.ReadFile and
 // json.Valid while write is called repeatedly. It fails when a reader ever
 // observes a missing, empty or partial auth file.
-func assertReadersSeeWholeJSON(t *testing.T, path string, iterations int, write func(i int) error) {
+func assertReadersSeeWholeJSON(t *testing.T, path string, iterations int, expectLock bool, write func(i int) error) {
 	t.Helper()
 	var (
 		stop    atomic.Bool
@@ -71,12 +71,20 @@ func assertReadersSeeWholeJSON(t *testing.T, path string, iterations int, write 
 	if errReadDir != nil {
 		t.Fatalf("read auth dir: %v", errReadDir)
 	}
-	if len(entries) != 1 {
-		names := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			names = append(names, entry.Name())
+	wantNames := []string{filepath.Base(path)}
+	if expectLock {
+		wantNames = append(wantNames, filepath.Base(path)+".lock")
+		lockInfo, errLock := os.Stat(path + ".lock")
+		if errLock != nil || (os.PathSeparator == '/' && lockInfo.Mode().Perm() != 0o600) {
+			t.Fatalf("credential lock must be owner-only: info=%v err=%v", lockInfo, errLock)
 		}
-		t.Fatalf("auth dir has leftover files: %v", names)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if strings.Join(names, ",") != strings.Join(wantNames, ",") {
+		t.Fatalf("auth dir files = %v, want %v (no temporary-file leftovers)", names, wantNames)
 	}
 }
 
@@ -106,7 +114,7 @@ func TestFileTokenStoreSaveIsAtomicForConcurrentReaders(t *testing.T) {
 		if errSave := save(-1); errSave != nil {
 			t.Fatalf("initial save: %v", errSave)
 		}
-		assertReadersSeeWholeJSON(t, path, atomicTestWrites, save)
+		assertReadersSeeWholeJSON(t, path, atomicTestWrites, true, save)
 	})
 
 	t.Run("token_storage", func(t *testing.T) {
@@ -126,6 +134,6 @@ func TestFileTokenStoreSaveIsAtomicForConcurrentReaders(t *testing.T) {
 		if errSave := save(-1); errSave != nil {
 			t.Fatalf("initial save: %v", errSave)
 		}
-		assertReadersSeeWholeJSON(t, path, atomicTestWrites, save)
+		assertReadersSeeWholeJSON(t, path, atomicTestWrites, false, save)
 	})
 }

@@ -33,8 +33,9 @@ const (
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
-	httpClient *http.Client
-	tokenURL   string
+	httpClient        *http.Client
+	tokenURL          string
+	siwcAgentNameHint string
 }
 
 var codexRefreshGroup singleflight.Group
@@ -63,16 +64,19 @@ func NewCodexAuthWithHTTPClient(cfg *config.Config, client *http.Client, tokenUR
 func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	effectiveProxyURL := strings.TrimSpace(proxyURL)
 	var sdkCfg config.SDKConfig
+	agentNameHint := SIWCAgentNameHint
 	if cfg != nil {
 		sdkCfg = cfg.SDKConfig
 		if effectiveProxyURL == "" {
 			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
 		}
+		agentNameHint = cfg.Codex.EffectiveSignInWithChatGPTIdentifier()
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
-		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
-		tokenURL:   TokenURL,
+		httpClient:        util.SetProxy(&sdkCfg, &http.Client{}),
+		tokenURL:          TokenURL,
+		siwcAgentNameHint: agentNameHint,
 	}
 }
 

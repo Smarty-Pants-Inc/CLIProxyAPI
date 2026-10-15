@@ -14,6 +14,7 @@ import (
 )
 
 type openAICompatibilityRegistrationCache struct {
+	cfg     *config.Config
 	byName  map[string]*openAICompatibilityRegistrationEntry
 	byIndex map[int]*openAICompatibilityRegistrationEntry
 }
@@ -37,14 +38,16 @@ func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibility
 	if s == nil {
 		return nil
 	}
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
+	return newOpenAICompatibilityRegistrationCacheForConfig(s.currentConfig())
+}
+
+func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config) *openAICompatibilityRegistrationCache {
 	if cfg == nil || len(cfg.OpenAICompatibility) == 0 {
 		return nil
 	}
 
 	cache := &openAICompatibilityRegistrationCache{
+		cfg:     cfg,
 		byName:  make(map[string]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
 		byIndex: make(map[int]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
 	}
@@ -236,12 +239,19 @@ func baselineExecutorAuths() []*coreauth.Auth {
 
 func (s *Service) registerExecutorsForAuths(auths []*coreauth.Auth, forceReplace bool) {
 	reboundCodex := false
+	reboundXAI := false
 	for _, auth := range auths {
 		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 			if reboundCodex && forceReplace {
 				continue
 			}
 			reboundCodex = true
+		}
+		if auth != nil && !auth.Disabled && strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+			if reboundXAI && forceReplace {
+				continue
+			}
+			reboundXAI = true
 		}
 		s.registerExecutorForAuth(auth, forceReplace)
 	}
@@ -255,13 +265,13 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
-		// Replacing the executor closes every live Codex websocket session, so a
-		// config reload keeps the executor already bound to that exact config.
-		// Compare with the bound executor, not the last committed config: a
-		// superseded commit may never have reached registration.
+		// Keep the executor already bound to this exact config, whether or not the
+		// caller forces replacement. Compare with the bound executor, not the last
+		// committed config: a superseded commit may never have reached registration.
+		// A config change replaces it; the shared session store keeps live sessions open.
 		if existingExecutor, hasExecutor := s.coreManager.Executor("codex"); hasExecutor {
 			existingCodexAutoExecutor, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
-			if isCodexAutoExecutor && (!forceReplace || existingCodexAutoExecutor.UsesConfig(cfg)) {
+			if isCodexAutoExecutor && existingCodexAutoExecutor.UsesConfig(cfg) {
 				return
 			}
 		}
@@ -502,6 +512,10 @@ func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo) []
 }
 
 func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreauth.Auth, provider, authKind string, excluded []string) bool {
+	return s.tryRegisterPluginModelsForAuthWithConfig(ctx, s.currentConfig(), a, provider, authKind, excluded)
+}
+
+func (s *Service) tryRegisterPluginModelsForAuthWithConfig(ctx context.Context, cfg *config.Config, a *coreauth.Auth, provider, authKind string, excluded []string) bool {
 	if s == nil || s.pluginHost == nil || a == nil {
 		return false
 	}
@@ -556,7 +570,7 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 		providerKey = strings.ToLower(strings.TrimSpace(provider))
 	}
 	activeAuthKind := activeAuth.AuthKind()
-	activeExcluded := s.oauthExcludedModels(providerKey, activeAuthKind)
+	activeExcluded := oauthExcludedModelsForConfig(cfg, providerKey, activeAuthKind)
 	if a == activeAuth && len(activeExcluded) == 0 {
 		activeExcluded = excluded
 	}
@@ -569,10 +583,10 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 		return true
 	}
 	models := applyExcludedModels(result.Models, activeExcluded)
-	models = applyOAuthModelAliasForAuth(s.cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
+	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	if len(models) > 0 {
-		models = applyOAuthSettingsForAuth(s.cfg, providerKey, activeAuthKind, models)
-		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		models = applyOAuthSettingsForAuth(cfg, providerKey, activeAuthKind, models)
+		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))
 		return true
 	}
 	GlobalModelRegistry().UnregisterClient(activeAuth.ID)
