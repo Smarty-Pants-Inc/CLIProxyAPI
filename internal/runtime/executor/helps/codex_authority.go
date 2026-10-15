@@ -70,7 +70,12 @@ func restrictCodexAuthority(ctx context.Context, auth *cliproxyauth.Auth, base h
 }
 
 func (t *codexAuthorityRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if t.endpoint == nil || req.URL == nil || req.URL.Opaque != "" || req.URL.User != nil || req.URL.Fragment != "" || req.URL.Scheme != t.endpoint.Scheme || req.URL.Host != t.endpoint.Host || req.URL.String() != t.endpoint.String() || req.Host != t.authority || (req.Header.Get("Host") != "" && req.Header.Get("Host") != t.authority) {
+	authority := req.Host
+	if authority == "" && req.URL != nil {
+		// Match net/http's wire authority when no explicit Host is set.
+		authority = req.URL.Host
+	}
+	if t.endpoint == nil || req.URL == nil || req.URL.Opaque != "" || req.URL.User != nil || req.URL.Fragment != "" || req.URL.Scheme != t.endpoint.Scheme || req.URL.Host != t.endpoint.Host || req.URL.String() != t.endpoint.String() || authority != t.authority || (req.Header.Get("Host") != "" && req.Header.Get("Host") != t.authority) {
 		return nil, &cliproxyauth.Error{Code: "api_key_policy_unavailable", Message: "api_key_policy_unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
 	return t.base.RoundTrip(req)
