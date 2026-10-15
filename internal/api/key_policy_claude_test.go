@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -200,8 +200,8 @@ func TestKeyPolicyClaudeResponsesReasoning(t *testing.T) {
 		model, effort, wantType, wantEffort string
 		wantBudget                          int64
 	}{
-		// Observed on this base: xhigh reaches the upstream as effort "max".
-		{model: policyClaudeModel, effort: "xhigh", wantType: "adaptive", wantEffort: "max"},
+		// Main's newer catalog supports xhigh directly; policy admission must preserve it.
+		{model: policyClaudeModel, effort: "xhigh", wantType: "adaptive", wantEffort: "xhigh"},
 		{model: policyClaudeModel, effort: "medium", wantType: "adaptive", wantEffort: "medium"},
 		{model: "claude-sonnet-4-5-20250929", effort: "xhigh", wantType: "enabled", wantBudget: 32768},
 	} {
