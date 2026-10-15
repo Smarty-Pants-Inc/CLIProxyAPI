@@ -160,6 +160,25 @@ func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 	}
 }
 
+// TestGetRequestDetails_ClaudeHaiku55RoutesToClaude registers the static Claude
+// catalog the way a Claude OAuth or API-key auth does and checks that
+// claude-haiku-5-5 no longer fails with "unknown provider for model".
+func TestGetRequestDetails_ClaudeHaiku55RoutesToClaude(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	const clientID = "test-request-details-claude-haiku-5-5"
+	modelRegistry.RegisterClient(clientID, "claude", registry.GetClaudeModels())
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	providers, model, errMsg := handler.getRequestDetails("claude-haiku-5-5")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails(claude-haiku-5-5) error = %v", errMsg.Error)
+	}
+	if !reflect.DeepEqual(providers, []string{"claude"}) || model != "claude-haiku-5-5" {
+		t.Fatalf("providers = %v, model = %q; want [claude], claude-haiku-5-5", providers, model)
+	}
+}
+
 func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
