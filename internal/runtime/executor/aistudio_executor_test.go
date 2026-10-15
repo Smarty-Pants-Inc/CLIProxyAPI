@@ -319,7 +319,7 @@ func TestAIStudioExecutorExecuteStartsTTFTBeforeRelayWait(t *testing.T) {
 		t.Fatal(errClient)
 	}
 
-	record := waitForAIStudioUsageRecord(t, plugin.records, "gemini-3.1-pro-preview")
+	record := waitForAIStudioUsageRecord(t, plugin.records, "gemini-3.1-pro-preview", authID)
 	if record.TTFT < delay {
 		t.Fatalf("ttft = %v, want >= %v", record.TTFT, delay)
 	}
@@ -339,13 +339,15 @@ func (p *captureAIStudioUsagePlugin) HandleUsage(_ context.Context, record usage
 	}
 }
 
-func waitForAIStudioUsageRecord(t *testing.T, records <-chan usage.Record, model string) usage.Record {
+// The usage plugin registry is global and executor tests run in parallel, so other AI Studio tests'
+// records for the same model arrive here too: match this test's auth, not just provider and model.
+func waitForAIStudioUsageRecord(t *testing.T, records <-chan usage.Record, model, authID string) usage.Record {
 	t.Helper()
 	timeout := time.After(2 * time.Second)
 	for {
 		select {
 		case record := <-records:
-			if record.Provider == "aistudio" && record.Model == model {
+			if record.Provider == "aistudio" && record.Model == model && record.AuthID == authID {
 				return record
 			}
 		case <-timeout:
