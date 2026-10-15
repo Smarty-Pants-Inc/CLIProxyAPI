@@ -16,6 +16,9 @@ func TestClaudeRequestSupportsEffort_Haiku55(t *testing.T) {
 		{"claude-haiku-5-5", true},
 		{"claude-haiku-5-5-20260928", true},
 		{"claude-haiku-4-5-20251001", false},
+		{"claude-haiku-5-4", false},
+		{"claude-haiku-5-6", false},
+		{"custom-haiku-5-proxy", false},
 		{"claude-3-5-haiku-20241022", false},
 		{"claude-sonnet-5-5", true},
 	}

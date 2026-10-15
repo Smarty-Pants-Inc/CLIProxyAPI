@@ -422,7 +422,7 @@ func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
 		model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
 		// Haiku 4.5 and older lack effort; Haiku 5.5 takes the same effort levels as
 		// the other 5.5 models (its catalog entry advertises them).
-		if isClaudeHaikuModel(model) && !strings.Contains(model, "haiku-5") {
+		if isClaudeHaikuModel(model) && model != "claude-haiku-5-5" && !strings.HasPrefix(model, "claude-haiku-5-5-") {
 			return false
 		}
 		thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
