@@ -192,9 +192,10 @@ func mergeProviderNames(existing, incoming []string) []string {
 	return merged
 }
 
-// keepEmbeddedClaudeModels appends embedded Claude models that the remote catalog lacks.
-// ponytail: the fork can ship a new Anthropic model before router-for-me/models lists it
-// (claude-sonnet-5-5, smarty-dev#1830); remote entries still win for IDs present in both.
+// keepEmbeddedClaudeModels appends embedded and builtin Claude models that the catalog lacks.
+// The fork can ship new Anthropic models before a compatible upstream catalog lists
+// them; catalog entries still win for IDs present in both. Go builtins also survive
+// CI replacing the embedded models.json from the pinned upstream catalog.
 func keepEmbeddedClaudeModels(remote []*ModelInfo) []*ModelInfo {
 	var embedded staticModelsJSON
 	if err := json.Unmarshal(embeddedModelsJSON, &embedded); err != nil {
@@ -206,12 +207,14 @@ func keepEmbeddedClaudeModels(remote []*ModelInfo) []*ModelInfo {
 			have[strings.ToLower(strings.TrimSpace(m.ID))] = struct{}{}
 		}
 	}
-	for _, m := range embedded.Claude {
+	for _, m := range append(embedded.Claude, builtinClaudeModels()...) {
 		if m == nil {
 			continue
 		}
-		if _, ok := have[strings.ToLower(strings.TrimSpace(m.ID))]; !ok {
+		id := strings.ToLower(strings.TrimSpace(m.ID))
+		if _, ok := have[id]; !ok {
 			remote = append(remote, m)
+			have[id] = struct{}{}
 		}
 	}
 	return remote
@@ -225,6 +228,7 @@ func loadModelsFromBytes(data []byte, source string) error {
 	if err := validateModelsCatalog(&parsed); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
+	parsed.Claude = keepEmbeddedClaudeModels(parsed.Claude)
 
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = &parsed
