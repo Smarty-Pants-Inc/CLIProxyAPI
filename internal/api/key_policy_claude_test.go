@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,9 +24,12 @@ import (
 const policyClaudeModel = "claude-opus-5-5"
 
 // fakeClaudeUpstream answers /v1/messages with usage input 4 + output 3 = 7.
-func fakeClaudeUpstream(t *testing.T, status int, calls *atomic.Int32, last *[]byte, mu *sync.Mutex, cred string) *httptest.Server {
+func fakeClaudeUpstream(t *testing.T, status int, calls *atomic.Int32, last *[]byte, mu *sync.Mutex, cred string, inspect ...func(*http.Request)) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		for _, check := range inspect {
+			check(r)
+		}
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		*last = body
@@ -248,6 +252,54 @@ func TestKeyPolicyClaudeResponsesReasoning(t *testing.T) {
 			}
 			t.Logf("upstream max_tokens+thinking+output_config: %s", got[true])
 		})
+	}
+}
+
+// A policy-selected compatible upstream must not receive Anthropic's effort
+// beta, while the caller's requested effort and the successful response survive.
+func TestKeyPolicyClaudeThirdPartyEffortBeta(t *testing.T) {
+	const effortBeta = "effort-2025-11-24"
+	for _, path := range []string{"/v1/responses", "/v1/messages"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", path, stream), func(t *testing.T) {
+				var calls atomic.Int32
+				var mu sync.Mutex
+				var last []byte
+				var lastBetas string
+				upstream := fakeClaudeUpstream(t, 200, &calls, &last, &mu, "verified-A", func(r *http.Request) {
+					mu.Lock()
+					lastBetas = r.Header.Get("Anthropic-Beta")
+					mu.Unlock()
+				})
+				defer upstream.Close()
+				tokenCap, requestCap := int64(100), int64(10)
+				cfg := policyClaudeConfig([]string{policyClaudeModel}, []string{"A"}, &tokenCap, &requestCap)
+				cfg.ClaudeKey = []config.ClaudeKey{{APIKey: "verified-A", BaseURL: upstream.URL, FingerprintProfile: config.ClaudeFingerprintProfileClaudeCodeCLI}}
+				server := newTestServerWithConfig(t, cfg)
+				server.handlers.AuthManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
+				registerPolicyClaudeAuths(t, server, upstream.URL, false, false)
+				body := fmt.Sprintf(`{"model":%q,"input":"hello","reasoning":{"effort":"high"},"max_output_tokens":40960,"stream":%t}`, policyClaudeModel, stream)
+				if path == "/v1/messages" {
+					body = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"max_tokens":40960,"stream":%t}`, policyClaudeModel, stream)
+				}
+				rr := sendPolicied(server, path, body)
+				if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "hi") {
+					t.Fatalf("status=%d, want 200 with upstream content: %s", rr.Code, rr.Body.String())
+				}
+				if calls.Load() != 1 {
+					t.Fatalf("upstream calls=%d, want 1", calls.Load())
+				}
+				mu.Lock()
+				upstreamBody, betas := last, lastBetas
+				mu.Unlock()
+				if slices.Contains(strings.Split(betas, ","), effortBeta) {
+					t.Errorf("policy-selected third-party Claude auth received %s: %s", effortBeta, betas)
+				}
+				if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != "high" {
+					t.Errorf("output_config.effort=%q, want caller's high effort preserved: %s", got, upstreamBody)
+				}
+			})
+		}
 	}
 }
 

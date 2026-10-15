@@ -88,7 +88,7 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 }
 
 func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
-	baseline := claudeCodeCLIBetas([]byte(`{"model":"claude-opus-5"}`), nil, false)
+	baseline := claudeCodeCLIBetas([]byte(`{"model":"claude-opus-5"}`), nil, false, true)
 	betasWithoutFastMode := baseline
 	betasWithFastMode := baseline + "," + claudeFastModeBeta
 
@@ -826,7 +826,7 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 	if got := seenHeaders.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
 	}
-	if want := claudeCodeCLIBetas(payload, nil, false); seenHeaders.Get("Anthropic-Beta") != want {
+	if want := claudeCodeCLIBetas(payload, nil, false, false); seenHeaders.Get("Anthropic-Beta") != want {
 		t.Fatalf("Anthropic-Beta = %q, want %q", seenHeaders.Get("Anthropic-Beta"), want)
 	}
 
@@ -920,8 +920,10 @@ func TestClaudeExecutor_ConfirmedNewerPatchClaudeCodeRequestPreservesInteractive
 	if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); got != userID {
 		t.Fatalf("metadata.user_id = %q, want preserved %q", got, userID)
 	}
-	if got := seenHeaders.Get("Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
-		t.Fatalf("Anthropic-Beta = %q, want preserved %q", got, incoming.Get("Anthropic-Beta"))
+	// The compatible upstream keeps caller betas except Anthropic-only effort.
+	wantBetas := strings.TrimSuffix(incoming.Get("Anthropic-Beta"), ","+claudeEffortBeta)
+	if got := seenHeaders.Get("Anthropic-Beta"); got != wantBetas {
+		t.Fatalf("Anthropic-Beta = %q, want preserved compatible betas %q", got, wantBetas)
 	}
 }
 
@@ -5629,7 +5631,7 @@ func TestApplyCloaking_FableInjectsFallbacksAndDisplayUpdates(t *testing.T) {
 		t.Fatalf("expected thinking.display=updates, got: %q", display)
 	}
 
-	betas := claudeCodeCLIBetas(out, nil, true)
+	betas := claudeCodeCLIBetas(out, nil, true, true)
 	if !strings.Contains(betas, "server-side-fallback-2026-06-01") {
 		t.Fatalf("expected server-side-fallback beta in betas, got: %s", betas)
 	}
@@ -8046,7 +8048,7 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("Messages User-Agent = %q, want CLI identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(payload, nil, true, false)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("Messages Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
@@ -8126,7 +8128,7 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("streaming User-Agent = %q, want CLI identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(payload, nil, true, false)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("streaming Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
@@ -8620,7 +8622,7 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth); got != tt.want {
+			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth, true); got != tt.want {
 				t.Fatalf("claudeCodeCLIBetas() = %q, want %q", got, tt.want)
 			}
 		})
