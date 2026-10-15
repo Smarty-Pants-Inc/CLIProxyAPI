@@ -22,7 +22,7 @@ func TestKeyPolicyCaps(t *testing.T) {
 		requests, tokens *int64
 		want             int32
 	}{
-		{"requests", policyInt(7), nil, 7}, {"tokens", nil, policyInt(10), 2}, {"zero", nil, policyInt(0), 0},
+		{"requests", policyInt(7), nil, 7}, {"tokens", nil, policyInt(14), 2}, {"zero", nil, policyInt(0), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewManager(nil, nil, nil)
@@ -49,7 +49,8 @@ func TestKeyPolicyCaps(t *testing.T) {
 			if accepted.Load() != tc.want {
 				t.Fatalf("accepted=%d want=%d", accepted.Load(), tc.want)
 			}
-			// Tokens total 14 for cap 10: one operation (7 tokens), not 30, bounds overshoot.
+			// Directly reported usage spends exactly 14; wire-bound admission is
+			// exercised by TestKeyPolicyDailyReservation.
 			now = now.Add(time.Second)
 			_, done, err := m.BeginKeyPolicy(context.Background(), p, "model")
 			if tc.want > 0 {
@@ -71,7 +72,7 @@ func TestKeyPolicyAdmissionFloorAndWireFence(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			m := NewManager(nil, nil, nil)
 			models := []string{"model"}
-			floor := config.APIKeyPolicy{KeySHA256: keyDigest("key"), AllowedAuths: []string{"A"}, AllowedModels: &models, DailyRequestCap: policyInt(1), DailyTokenCap: policyInt(10)}
+			floor := config.APIKeyPolicy{KeySHA256: keyDigest("key"), AllowedAuths: []string{"A"}, AllowedModels: &models, DailyRequestCap: policyInt(1), DailyTokenCap: policyInt(1000)}
 			m.SetConfig(&config.Config{SDKConfig: config.SDKConfig{APIKeyPolicies: []config.APIKeyPolicy{floor}}})
 			ctx, done, err := m.BeginKeyPolicy(context.Background(), []config.APIKeyPolicy{{KeySHA256: floor.KeySHA256, AllowedAuths: []string{"A", "B"}}}, "model")
 			if err != nil {
@@ -99,7 +100,7 @@ func TestKeyPolicyAdmissionFloorAndWireFence(t *testing.T) {
 			if _, _, err := op.selectExecutor(ex.Request{Model: "model"}, ex.Options{}); err != nil {
 				t.Fatal(err)
 			}
-			req := httptest.NewRequest("POST", "http://example/responses", strings.NewReader(`{"model":"model"}`)).WithContext(ctx)
+			req := httptest.NewRequest("POST", "http://example/responses", strings.NewReader(`{"model":"model","max_output_tokens":16}`)).WithContext(ctx)
 			req.Header.Set("Authorization", "Bearer A-token")
 			switch change {
 			case "replacement":
@@ -123,7 +124,7 @@ func TestKeyPolicyAdmissionFloorAndWireFence(t *testing.T) {
 			}
 			if change == "missing usage" {
 				done()
-				if _, next, err := m.BeginKeyPolicy(context.Background(), []config.APIKeyPolicy{{KeySHA256: keyDigest("key"), DailyTokenCap: policyInt(10)}}, "model"); err == nil {
+				if _, next, err := m.BeginKeyPolicy(context.Background(), []config.APIKeyPolicy{{KeySHA256: keyDigest("key"), DailyTokenCap: policyInt(1000)}}, "model"); err == nil {
 					next()
 					t.Fatal("unmetered send admitted another operation")
 				}
