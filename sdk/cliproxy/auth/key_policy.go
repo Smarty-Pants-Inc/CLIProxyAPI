@@ -186,9 +186,15 @@ func (m *Manager) BeginKeyPolicy(ctx context.Context, policies []config.APIKeyPo
 			if op.reservationDay == a.day {
 				a.reserved -= op.reservation
 			}
-			a.tokens = saturatingAdd(a.tokens, op.reported)
-			// Successful sends without trustworthy usage retain the existing
-			// fail-closed behavior. Errors/aborts charge any reported usage only.
+			// A send that reached the upstream but failed or was cancelled without complete usage may still
+			// have spent tokens: charge its reserved bound (or the reported usage, if larger), never zero.
+			// Only a request that never left the process releases its reservation.
+			charge := op.reported
+			if op.sent && !op.metered && (op.failed || ctx.Err() != nil) && op.reservation > charge {
+				charge = op.reservation
+			}
+			a.tokens = saturatingAdd(a.tokens, charge)
+			// Successful sends without trustworthy usage retain the existing fail-closed behavior.
 			if op.sent && !op.metered && !op.failed && ctx.Err() == nil {
 				a.tokens = math.MaxInt64
 			}

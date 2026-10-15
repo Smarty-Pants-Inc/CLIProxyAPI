@@ -140,19 +140,19 @@ func TestKeyPolicyDailyReservation(t *testing.T) {
 			t.Fatalf("upstream calls=%d want 1", calls.Load())
 		}
 	})
-	t.Run("upstream error releases", func(t *testing.T) {
+	t.Run("upstream error without usage charges its bound", func(t *testing.T) {
+		// A failed send may still have spent tokens upstream: it is charged its reserved bound, never
+		// released to zero, so failures cannot be used to bypass the daily cap.
 		m, p, upstream, calls := reservationManager(t, bound)
 		if err := reservationAttempt(m, p, upstream, 0, true); err != nil {
 			t.Fatal(err)
 		}
-		if err := reservationAttempt(m, p, upstream, 7, false); err != nil {
-			t.Fatalf("failed call retained reservation: %v", err)
+		requireTokenRefusal(t, reservationAttempt(m, p, upstream, 7, false))
+		if calls.Load() != 1 {
+			t.Fatalf("upstream calls=%d want 1", calls.Load())
 		}
-		if calls.Load() != 2 {
-			t.Fatalf("upstream calls=%d want 2", calls.Load())
-		}
-		if got := m.keyPolicyAccounts[p[0].KeySHA256].tokens; got != 7 {
-			t.Fatalf("charged=%d want 7", got)
+		if got := m.keyPolicyAccounts[p[0].KeySHA256].tokens; got != bound {
+			t.Fatalf("charged=%d want the bound %d", got, bound)
 		}
 	})
 }
@@ -236,9 +236,11 @@ func TestKeyPolicyReservationSettlement(t *testing.T) {
 			failed := outcome == "failure" || outcome == "partial failure"
 			partial := outcome == "partial failure" || outcome == "cancel"
 			wantTokens, wantRequests := int64(7), int64(1)
-			if outcome == "cancel without usage" {
-				wantTokens = 0
-			} else {
+			// Incomplete usage on a failed or cancelled send is charged at the reserved bound.
+			if outcome == "partial failure" || outcome == "cancel" || outcome == "cancel without usage" {
+				wantTokens = bound
+			}
+			if outcome != "cancel without usage" {
 				usage.PublishRecord(ctx, usage.Record{Failed: failed, Detail: usage.Detail{InputTokens: 4, Incomplete: partial}})
 				usage.PublishRecord(ctx, usage.Record{Failed: failed, Detail: usage.Detail{InputTokens: 7, Incomplete: partial}})
 				usage.PublishRecord(ctx, usage.Record{Detail: usage.Detail{InputTokens: 4, Incomplete: partial}})
