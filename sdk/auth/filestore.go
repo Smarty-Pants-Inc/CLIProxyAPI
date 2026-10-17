@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -111,33 +112,39 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		SetMetadata(map[string]any)
 	}
 
-	switch {
-	case auth.Storage != nil:
-		auth.SetMetadata("disabled", auth.Disabled)
-		if setter, ok := auth.Storage.(metadataSetter); ok {
-			setter.SetMetadata(auth.CloneMetadata())
+	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
+		if errCodex != nil {
+			return "", errCodex
 		}
-		if err = auth.Storage.SaveTokenToFile(path); err != nil {
-			return "", err
-		}
-	case auth.CloneMetadata() != nil:
-		auth.SetMetadata("disabled", auth.Disabled)
-		raw, errMarshal := json.Marshal(auth.CloneMetadata())
-		if errMarshal != nil {
-			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
-		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
-				break
+	} else {
+		switch {
+		case auth.Storage != nil:
+			auth.SetMetadata("disabled", auth.Disabled)
+			if setter, ok := auth.Storage.(metadataSetter); ok {
+				setter.SetMetadata(auth.CloneMetadata())
 			}
-		} else if !os.IsNotExist(errRead) {
-			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
+			if err = auth.Storage.SaveTokenToFile(path); err != nil {
+				return "", err
+			}
+		case auth.CloneMetadata() != nil:
+			auth.SetMetadata("disabled", auth.Disabled)
+			raw, errMarshal := json.Marshal(auth.CloneMetadata())
+			if errMarshal != nil {
+				return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
+			}
+			if existing, errRead := os.ReadFile(path); errRead == nil {
+				if jsonEqual(existing, raw) {
+					break
+				}
+			} else if !os.IsNotExist(errRead) {
+				return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
+			}
+			if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
+				return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
+			}
+		default:
+			return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 		}
-		if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
-			return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
-		}
-	default:
-		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 	}
 
 	if auth.Attributes == nil {
@@ -196,10 +203,12 @@ func (s *FileTokenStore) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("auth filestore: delete failed: %w", err)
-	}
-	return nil
+	return codexauth.WithFileLock(path, func() error {
+		if errRemove := os.Remove(path); errRemove != nil && !os.IsNotExist(errRemove) {
+			return fmt.Errorf("auth filestore: delete failed: %w", errRemove)
+		}
+		return nil
+	})
 }
 
 func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {

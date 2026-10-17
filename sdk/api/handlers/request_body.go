@@ -6,12 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 )
+
+// MaxRequestBodyBytesContextKey stores the configured request body size limit (in bytes) on the Gin context.
+const MaxRequestBodyBytesContextKey = "maxRequestBodyBytes"
 
 // ReadRequestBody reads the incoming request body and decodes supported
 // Content-Encoding values before handlers inspect JSON fields.
@@ -21,11 +25,20 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) { return ReadRequestBodyLim
 // exceeded the limit passed to ReadRequestBodyLimit. Callers should answer 413.
 var ErrRequestBodyTooLarge = errors.New("request body too large")
 
-// ReadRequestBodyLimit is ReadRequestBody with the encoded body and every
-// decoded layer capped at limit bytes while they are read; zero means no cap.
-// The cap is enforced on the wire reader, so at most limit+1 bytes are ever
-// buffered. Oversized bodies return an error wrapping ErrRequestBodyTooLarge.
+func requestBodyTooLarge(limit int64) error {
+	// Preserve both the fork sentinel and upstream's typed HTTP status mapping.
+	return fmt.Errorf("%w: %w", ErrRequestBodyTooLarge, &http.MaxBytesError{Limit: limit})
+}
+
+// ReadRequestBodyLimit caps the wire body and every decoded layer while reading.
+// The stricter of the caller's safety cap and the configured server cap applies;
+// a zero limit does not disable the configured cap.
 func ReadRequestBodyLimit(c *gin.Context, limit int64) ([]byte, error) {
+	if c != nil {
+		if configured := c.GetInt64(MaxRequestBodyBytesContextKey); configured > 0 && (limit <= 0 || configured < limit) {
+			limit = configured
+		}
+	}
 	var (
 		raw []byte
 		err error
@@ -33,14 +46,14 @@ func ReadRequestBodyLimit(c *gin.Context, limit int64) ([]byte, error) {
 	if limit > 0 && c != nil && c.Request != nil && c.Request.Body != nil {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 		raw, err = io.ReadAll(c.Request.Body)
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			return nil, fmt.Errorf("%w: request body exceeds %d bytes", ErrRequestBodyTooLarge, limit)
-		}
 	} else {
 		raw, err = c.GetRawData()
 	}
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return nil, requestBodyTooLarge(maxErr.Limit)
+		}
 		return nil, err
 	}
 
@@ -98,18 +111,18 @@ func decodeZstdRequestBody(raw []byte, limit int64) ([]byte, error) {
 	defer decoder.Close()
 
 	var src io.Reader = decoder
-	if limit > 0 {
+	if limit > 0 && limit < math.MaxInt64 {
 		src = io.LimitReader(decoder, limit+1)
 	}
 	decoded, err := io.ReadAll(src)
 	if err != nil {
 		if limit > 0 && (errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) || errors.Is(err, zstd.ErrFrameSizeExceeded)) {
-			return nil, fmt.Errorf("%w: decoded request body exceeds %d bytes", ErrRequestBodyTooLarge, limit)
+			return nil, requestBodyTooLarge(limit)
 		}
 		return nil, fmt.Errorf("failed to decode zstd request body: %w", err)
 	}
 	if limit > 0 && int64(len(decoded)) > limit {
-		return nil, fmt.Errorf("%w: decoded request body exceeds %d bytes", ErrRequestBodyTooLarge, limit)
+		return nil, requestBodyTooLarge(limit)
 	}
 	return decoded, nil
 }

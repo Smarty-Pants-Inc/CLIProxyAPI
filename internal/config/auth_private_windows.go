@@ -64,6 +64,12 @@ func RestrictAuthDir(path string) (err error) {
 	return nil
 }
 
+// OpenPrivateAuthLock opens a stable lock with validated current-user ownership
+// and a protected, current-user-only DACL before the handle is used.
+func OpenPrivateAuthLock(path string) (*os.File, error) {
+	return openPrivateConfigFile(path, windows.OPEN_ALWAYS)
+}
+
 // CreatePrivateAuthTemp creates an empty, exclusively allocated auth staging
 // file. Its current-user owner and protected exact DACL are validated before the
 // caller can write token bytes. The caller closes and removes the returned file.

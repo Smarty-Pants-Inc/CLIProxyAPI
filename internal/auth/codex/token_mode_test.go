@@ -24,6 +24,8 @@ func TestSaveTokenToFileOwnerOnly(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
+	// This is an intentional re-login, not a stale runtime snapshot save.
+	storage.ReplaceCredentials = true
 	storage.AccessToken = "fake-access-2"
 	if err := storage.SaveTokenToFile(path); err != nil {
 		t.Fatalf("second SaveTokenToFile: %v", err)
@@ -44,8 +46,12 @@ func TestSaveTokenToFileOwnerOnly(t *testing.T) {
 		t.Fatalf("created token dir mode = %#o, want 0700", got)
 	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("dir entries = %v, %v; want only the token file", entries, err)
+	if err != nil || len(entries) != 2 || entries[0].Name() != filepath.Base(path) || entries[1].Name() != filepath.Base(path)+".lock" {
+		t.Fatalf("dir entries = %v, %v; want token and persistent inter-process lock only", entries, err)
+	}
+	lockInfo, errLock := os.Stat(path + ".lock")
+	if errLock != nil || !lockInfo.Mode().IsRegular() || lockInfo.Size() != 0 || lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("lock file = %v, %v; want empty owner-only regular file", lockInfo, errLock)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

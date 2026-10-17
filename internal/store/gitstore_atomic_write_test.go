@@ -56,6 +56,13 @@ func TestGitTokenStoreSaveWritesAuthFileAtomically(t *testing.T) {
 		t.Fatalf("read auth dir: %v", errRead)
 	}
 	for _, entry := range entries {
+		if entry.Name() == "atomic.json.lock" {
+			info, errInfo := entry.Info()
+			if errInfo != nil || !info.Mode().IsRegular() || info.Size() != 0 || info.Mode().Perm() != 0o600 {
+				t.Fatalf("persistent lock = %v, %v; want empty owner-only regular file", info, errInfo)
+			}
+			continue
+		}
 		if name := entry.Name(); name != "atomic.json" && name != "atomic.json.tmp" && !entry.IsDir() {
 			t.Fatalf("unexpected leftover file %q in auth dir", name)
 		}
