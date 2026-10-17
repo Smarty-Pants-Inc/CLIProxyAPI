@@ -14,6 +14,7 @@ queue_rules:
     checks_timeout: 180 min
     merge_method: merge
     queue_conditions:
+      - -check-failure = review/security  # a failed security verdict refuses admission, label or not
       - base = main
       - -draft
       - -label = hold
@@ -32,6 +33,7 @@ queue_rules:
       # smarty-dev#4273: sessions compacted on the base build must still be served by the head build.
       - check-success = compaction-replay
     merge_conditions:
+      - -check-failure = review/security  # a failed security verdict refuses admission, label or not
       - check-success = build
       - check-success = compaction-replay
 
