@@ -159,8 +159,25 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) (bool, boo
 	oldCooldownStore := m.cooldownStore
 	m.mu.RUnlock()
 	previousCfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	cfg = internalconfig.PreserveAPIKeyPolicies(previousCfg, cfg)
-	if len(cfg.APIKeys) != 0 || len(cfg.PolicyReloadState) != 0 {
+	// NewManager's empty atomic placeholder is not an accepted config and must
+	// not freeze pools OFF. Reject malformed initial SDK pool snapshots closed.
+	poolRequested := cfg.AccountPools != nil
+	for _, policy := range cfg.APIKeyPolicies {
+		poolRequested = poolRequested || policy.Pool != ""
+	}
+	if poolRequested || m.PoolMode() {
+		if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil || (m.poolInvalid.Load() && cfg.AccountPools == nil) {
+			if !m.poolConfigInitialized {
+				m.poolInvalid.Store(true)
+			}
+			log.Warn("rejected invalid native account pool snapshot")
+			return false, false
+		}
+	}
+	if m.poolConfigInitialized {
+		cfg = internalconfig.PreserveAPIKeyPolicies(previousCfg, cfg)
+	}
+	if cfg.AccountPools != nil || len(cfg.APIKeys) != 0 || len(cfg.PolicyReloadState) != 0 {
 		if errValidate := cfg.ValidateAPIKeyPolicies(); errValidate != nil {
 			m.keyPolicyMu.Lock()
 			m.runtimeConfig.Store(internalconfig.RetainAPIKeyPolicyWarnings(previousCfg, cfg))
@@ -174,7 +191,10 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) (bool, boo
 	}
 	m.keyPolicyMu.Lock()
 	m.runtimeConfig.Store(cfg)
+	m.poolConfigInitialized = true
+	m.poolInvalid.Store(false)
 	m.keyPolicyMu.Unlock()
+	m.cancelRevokedPoolOperations(cfg)
 	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
 	if clearedCooldowns && oldCooldownStore != nil {
 		m.mu.Lock()
@@ -1601,6 +1621,9 @@ func resultErrorFromError(err error) *Error {
 // Connection lifecycle is intentionally separate from request_scoped so transport
 // drops do not also stop credential rotation via isRequestInvalidError.
 func shouldSkipCredentialCooldown(err *Error) bool {
+	if err != nil && (strings.HasPrefix(err.Code, "api_key_pool_") || err.Code == "api_key_model_forbidden") {
+		return true
+	}
 	if err != nil && err.Code == ErrorCodeForceCooldown {
 		return false
 	}

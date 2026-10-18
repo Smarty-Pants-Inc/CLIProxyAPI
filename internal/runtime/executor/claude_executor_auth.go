@@ -20,6 +20,14 @@ const (
 
 type claudeOAuthProfileFetcher func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error)
 
+func (e *ClaudeExecutor) AcquirePoolIdentity(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, cliproxyauth.NativePoolIdentity, error) {
+	token, _ := claudeCreds(auth)
+	if (token != "" && !isClaudeOAuthToken(token)) || isClaudeSetupToken(auth, token) || claudeauth.ReadMetadataBool(auth, "is_setup_token") || claudeauth.ReadMetadataBool(auth, "setup_token") || claudeauth.ReadMetadataBool(auth, "skip_account_profile") {
+		return nil, cliproxyauth.NativePoolIdentity{}, &cliproxyauth.Error{Code: "api_key_pool_identity_unverified", Message: "api_key_pool_identity_unverified", HTTPStatus: 503}
+	}
+	return helps.AcquireClaudePoolIdentity(ctx, e.cfg, auth)
+}
+
 func (e *ClaudeExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
 	apiKey, _ := claudeCreds(auth)
 	if !isClaudeOAuthToken(apiKey) || auth == nil {
@@ -149,6 +157,15 @@ func (e *ClaudeExecutor) fetchClaudeOAuthProfile(ctx context.Context, auth *clip
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("claude executor: refresh called")
+	if e.cfg != nil && e.cfg.AccountPools != nil {
+		if auth == nil {
+			return nil, fmt.Errorf("native Claude auth unavailable")
+		}
+		candidate := auth.Clone()
+		candidate.RejectedAccessToken = claudeauth.ReadMetadataString(candidate, "access_token")
+		updated, _, err := e.AcquirePoolIdentity(ctx, candidate)
+		return updated, err
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}

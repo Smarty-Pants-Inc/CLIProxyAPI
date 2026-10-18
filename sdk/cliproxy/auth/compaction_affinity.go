@@ -17,6 +17,7 @@ const (
 // Pick keeps every signed compaction input on its observed producing account.
 // Signer evidence is independent of mutable conversation routing aliases.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	provider = poolScopedProvider(ctx, provider)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
 	}
@@ -65,6 +66,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 // Selector.Pick. It runs before candidates are filtered, using the existing pin
 // that every execution retry path already honors.
 func (m *Manager) prepareSessionAffinitySelection(provider, model string, opts cliproxyexecutor.Options) error {
+	provider = poolScopedProvider(compactionContext(opts), provider)
 	origin, captured := opts.Metadata[compactionAffinityStoreMetadataKey]
 	if !captured {
 		affinity, _ := m.Selector().(*SessionAffinitySelector)

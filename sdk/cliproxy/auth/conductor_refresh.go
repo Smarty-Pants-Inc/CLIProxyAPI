@@ -559,6 +559,14 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if hasUnauthorizedAuthFailure(auth) {
 		return auth, false
 	}
+	if op := KeyPolicyFromContext(ctx); op.IsPoolOperation() {
+		// Pool rotation must come through the trusted native acquisition service,
+		// never through a generic executor refresh with an unchecked transport.
+		candidate := auth.Clone()
+		candidate.RejectedAccessToken = candidate.MetadataString("access_token")
+		refreshed, _, err := m.acquirePoolProof(ctx, candidate)
+		return refreshed, err == nil && refreshed != nil
+	}
 	logEntryWithRequestID(ctx).Debugf("unauthorized response for %s, refreshing credentials before fallback", formatAuthIdentity(auth, auth.Provider))
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
 	if errRefresh != nil || refreshed == nil {
