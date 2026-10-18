@@ -27,7 +27,7 @@ func TestClaudeRequestSupportsEffort_Haiku55(t *testing.T) {
 		if got := claudeRequestSupportsEffort(body, nil); got != tc.want {
 			t.Errorf("%s: claudeRequestSupportsEffort = %v, want %v", tc.model, got, tc.want)
 		}
-		betas := strings.Split(claudeCodeCLIBetas(body, nil, true), ",")
+		betas := strings.Split(claudeCodeCLIBetas(body, nil, true, true), ",")
 		if got := slices.Contains(betas, claudeEffortBeta); got != tc.want {
 			t.Errorf("%s: effort beta present = %v, want %v; betas=%v", tc.model, got, tc.want, betas)
 		}
