@@ -20,10 +20,12 @@ queue_rules:
       - -label = hold
       - -title ~= (?i)do not land
       - check-success = review/astra
-      # No security wait before merge (R-no-security-slips, smarty-dev#2264; org 10-18 02:28Z, chief-of-staff 02:41Z):
-      # neither upstream syncs nor needs-security-pass PRs wait for review/security. The pass runs
-      # after merge, within 24 h; the label only marks that it is owed. A failed review/security
-      # (now only a live credential or data exposure) still refuses admission.
+      # A PR that needs a named security pass waits for review/security, which
+      # CLIProxyAPI-security-astra posts on the exact head (smarty-dev#806, #855);
+      - or:
+          - -label = needs-security-pass
+          - check-success = review/security
+      # Upstream syncs (sync/upstream-*) queue like any PR; review/security runs after merge within 24 h (R-no-security-slips, smarty-dev#2264).
       - check-success = build
       # smarty-dev#4273: sessions compacted on the base build must still be served by the head build.
       - check-success = compaction-replay
