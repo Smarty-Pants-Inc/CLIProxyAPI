@@ -37,6 +37,7 @@ type routingRuntimeState struct {
 	legacyStatePath          string
 	statePathUnavailable     bool
 	sessionAffinitySubagents bool
+	sessionAffinityRebindOn  string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -44,6 +45,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		strategy:                 "round-robin",
 		sessionAffinityTTL:       coreauth.DefaultSessionAffinityTTL,
 		sessionAffinitySubagents: true,
+		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
 	}
 	if cfg == nil {
 		return state
@@ -84,6 +86,9 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
+	if state.sessionAffinity && strings.EqualFold(strings.TrimSpace(cfg.Routing.SessionAffinityRebindOn), coreauth.SessionAffinityRebindOnQuota) {
+		state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnQuota
+	}
 	return state
 }
 
@@ -122,6 +127,7 @@ func newRoutingSelector(state routingRuntimeState, cache ...*coreauth.SessionCac
 			InitializationError: initializationError,
 			SubagentAffinity:    &subagents,
 			Cache:               sharedCache,
+			RebindOn:            state.sessionAffinityRebindOn,
 		})
 	}
 	return selector

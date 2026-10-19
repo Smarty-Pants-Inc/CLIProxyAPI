@@ -49,6 +49,25 @@ func TestAuthKind(t *testing.T) {
 	}
 }
 
+func TestAuthKindConcurrentSIWCMetadata(t *testing.T) {
+	auth := &Auth{Provider: "codex", Metadata: map[string]any{"use_siwc": false, "siwc": map[string]any{"access_token": "test"}}}
+	start, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		<-start
+		for range 5000 {
+			auth.SetMetadata("siwc", map[string]any{"access_token": "test"})
+		}
+	}()
+	close(start)
+	for range 5000 {
+		if got := auth.AuthKind(); got != AuthKindOAuth {
+			t.Errorf("AuthKind() = %q, want oauth", got)
+		}
+	}
+	<-done
+}
+
 func TestAuthSourceKind(t *testing.T) {
 	tests := []struct {
 		name string

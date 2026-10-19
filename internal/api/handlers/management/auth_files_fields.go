@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -38,7 +39,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		Disabled  *bool  `json:"disabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), gin.H{"error": "invalid request body"})
 		return
 	}
 
@@ -212,33 +213,41 @@ func (h *Handler) invokePostAuthPersistHooks(ctx context.Context, auths []*corea
 }
 
 func setSourceAuthFileDisabled(path string, disabled bool) error {
+	return setSourceAuthFileDisabledWithReader(path, disabled, os.ReadFile)
+}
+
+func setSourceAuthFileDisabledWithReader(path string, disabled bool, readFile func(string) ([]byte, error)) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("source auth path is empty")
 	}
-	data, errRead := os.ReadFile(path)
-	if errRead != nil {
-		return errRead
-	}
-	metadata := make(map[string]any)
-	if len(bytes.TrimSpace(data)) > 0 {
-		if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
-			return fmt.Errorf("invalid auth file: %w", errUnmarshal)
+	return codex.WithFileLock(path, func() error {
+		data, errRead := readFile(path)
+		if errRead != nil {
+			return errRead
 		}
-	}
-	if metadata == nil {
-		metadata = make(map[string]any)
-	}
-	coreauth.NormalizeCredentialMetadata(metadata)
-	metadata["disabled"] = disabled
-	raw, errMarshal := json.Marshal(metadata)
-	if errMarshal != nil {
-		return fmt.Errorf("marshal auth file: %w", errMarshal)
-	}
-	if errWrite := misc.WriteAuthFileAtomic(path, raw); errWrite != nil {
-		return errWrite
-	}
-	return nil
+		metadata := make(map[string]any)
+		if len(bytes.TrimSpace(data)) > 0 {
+			if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+				return fmt.Errorf("invalid auth file: %w", errUnmarshal)
+			}
+		}
+		if metadata == nil {
+			metadata = make(map[string]any)
+		}
+		coreauth.NormalizeCredentialMetadata(metadata)
+		metadata["disabled"] = disabled
+		raw, errMarshal := json.Marshal(metadata)
+		if errMarshal != nil {
+			return fmt.Errorf("marshal auth file: %w", errMarshal)
+		}
+		// A status patch never creates credentials. Cooperating deletes share
+		// this lock; also reject an external deletion that won after our read.
+		if _, errStat := os.Stat(path); errStat != nil {
+			return errStat
+		}
+		return misc.WriteAuthFileAtomic(path, raw)
+	})
 }
 
 func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
@@ -271,7 +280,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.UseNumber()
 	if err := decoder.Decode(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), gin.H{"error": "invalid request body"})
 		return
 	}
 

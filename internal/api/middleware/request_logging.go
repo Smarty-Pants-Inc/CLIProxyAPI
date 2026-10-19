@@ -5,8 +5,10 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -56,6 +58,11 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		// Capture request information
 		requestInfo, err := captureRequestInfo(c, captureBody)
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+				return
+			}
 			// Log error but continue processing
 			// In a real implementation, you might want to use a proper logger here
 			c.Next()
@@ -353,6 +360,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 			body = []byte(fmt.Sprintf("[REQUEST BODY TOO LARGE: over %d bytes, not logged]", maxEagerCapturedRequestBodyBytes))
 		} else {
 			body = decodeCapturedRequestBodyForLogWithLimit(bodyBytes, c.Request.Header.Get("Content-Encoding"), maxEagerCapturedRequestBodyBytes)
+
 		}
 	}
 
@@ -408,7 +416,11 @@ func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bo
 	}
 	defer decoder.Close()
 
-	decoded, errRead := io.ReadAll(io.LimitReader(decoder, limit+1))
+	var reader io.Reader = decoder
+	if limit > 0 && limit < math.MaxInt64 {
+		reader = io.LimitReader(decoder, limit+1)
+	}
+	decoded, errRead := io.ReadAll(reader)
 	if errRead != nil {
 		return nil, false, fmt.Errorf("failed to decode zstd request body: %w", errRead)
 	}

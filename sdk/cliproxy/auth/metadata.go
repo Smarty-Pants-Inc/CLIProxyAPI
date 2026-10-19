@@ -66,6 +66,17 @@ func (a *Auth) CloneMetadata() map[string]any {
 	return metadata
 }
 
+// ReplaceMetadata publishes an independent metadata snapshot under the Auth-owned lock.
+// Nested values are copied so unpublished candidates cannot mutate a published section.
+func (a *Auth) ReplaceMetadata(metadata map[string]any) {
+	if a == nil {
+		return
+	}
+	a.metadataMu.Lock()
+	defer a.metadataMu.Unlock()
+	a.Metadata = cloneMetadataMap(metadata)
+}
+
 // NormalizeAuthMetadata canonicalizes credential keys under the Auth-owned lock
 // without initializing absent metadata (runtime-only credentials need no store).
 func NormalizeAuthMetadata(a *Auth) {

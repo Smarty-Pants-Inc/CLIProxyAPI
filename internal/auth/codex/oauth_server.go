@@ -41,6 +41,8 @@ type OAuthResult struct {
 	Code string
 	// State is the state parameter used to prevent CSRF attacks
 	State string
+	// ClientID is the dynamically issued client ID returned by Sign in with ChatGPT
+	ClientID string
 	// Error contains any error message if the OAuth flow failed
 	Error string
 }
@@ -184,6 +186,7 @@ func (s *OAuthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	code := query.Get("code")
 	state := query.Get("state")
+	clientID := strings.TrimSpace(query.Get("client_id"))
 	errorParam := query.Get("error")
 
 	s.mu.Lock()
@@ -227,8 +230,9 @@ func (s *OAuthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Send successful result
 	result := &OAuthResult{
-		Code:  code,
-		State: state,
+		Code:     code,
+		State:    state,
+		ClientID: clientID,
 	}
 	s.sendResult(result)
 

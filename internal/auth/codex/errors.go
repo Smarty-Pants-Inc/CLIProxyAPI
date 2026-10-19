@@ -6,6 +6,9 @@ import (
 	"net/http"
 )
 
+// ErrRefreshNotPersisted means the refresh source was deleted or its registration changed.
+var ErrRefreshNotPersisted = errors.New("codex refresh not persisted: credential deleted or registration changed")
+
 // OAuthError represents an OAuth-specific error.
 type OAuthError struct {
 	// Code is the OAuth error code.
