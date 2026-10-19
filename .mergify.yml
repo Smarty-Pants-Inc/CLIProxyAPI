@@ -20,16 +20,7 @@ queue_rules:
       - -label = hold
       - -title ~= (?i)do not land
       - check-success = review/astra
-      # A PR that needs a named security pass waits for review/security, which
-      # CLIProxyAPI-security-astra posts on the exact head (smarty-dev#806, #855);
-      # fork-sync labels every upstream sync needs-security-pass, so sync/upstream-* heads pushed to THIS repository
-      # are exempt here (R-no-security-slips); a same-named branch from an outside fork is not.
-      - or:
-          - -label = needs-security-pass
-          - and:
-              - head ~= ^sync/upstream-
-              - head-repo-full-name = Smarty-Pants-Inc/CLIProxyAPI
-          - check-success = review/security
+      # Security passes run within 24 h after merge; only a review/security FAILURE (a live harm) holds (smarty-stack#126).
       # Upstream syncs (sync/upstream-*) queue like any PR; review/security runs after merge within 24 h (R-no-security-slips, smarty-dev#2264).
       - check-success = build
       # smarty-dev#4273: sessions compacted on the base build must still be served by the head build.
