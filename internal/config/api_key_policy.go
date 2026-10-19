@@ -2,7 +2,6 @@ package config
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -22,6 +21,11 @@ type APIKeyPolicy struct {
 }
 
 func (cfg *Config) ValidateAPIKeyPolicies() error {
+	// Keep route validation on every existing SDK/startup/reload/save validation
+	// path, without applying policy-only restrictions to route-scoped keys.
+	if err := cfg.ValidateAPIKeyRoutes(); err != nil {
+		return err
+	}
 	if len(cfg.APIKeyPolicies) != 0 && (cfg.Home.Enabled || cfg.Plugins.Enabled) {
 		return fmt.Errorf("api-key-policies is unavailable with Home or plugins")
 	}
@@ -30,8 +34,7 @@ func (cfg *Config) ValidateAPIKeyPolicies() error {
 	}
 	keys := map[string]bool{}
 	for _, key := range cfg.APIKeys {
-		b := sha256.Sum256([]byte(strings.TrimSpace(key)))
-		keys[hex.EncodeToString(b[:])] = true
+		keys[APIKeyDigest(key)] = true
 	}
 	seen := map[string]bool{}
 	for _, p := range cfg.APIKeyPolicies {

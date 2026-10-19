@@ -113,7 +113,7 @@ func RetainAPIKeyPolicyWarnings(previous, effective *Config) *Config {
 	return retained.CloneForRuntime()
 }
 
-// APIKeyDigest uses the same normalized client identity as policy validation.
+// APIKeyDigest hashes the trimmed client identity used by policy and route validation.
 func APIKeyDigest(key string) string {
 	b := sha256.Sum256([]byte(strings.TrimSpace(key)))
 	return hex.EncodeToString(b[:])

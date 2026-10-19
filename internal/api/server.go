@@ -166,7 +166,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		}
 	}
 
-	engine.Use(corsMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -192,6 +191,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
+	engine.Use(corsMiddleware(s.preflightRouteDenied))
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)

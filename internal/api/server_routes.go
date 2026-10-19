@@ -549,7 +549,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
-// The handler is served as-is without additional middleware beyond the standard stack already configured.
+// Authentication is optional unless a route-scoped client key is supplied.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	if s == nil || s.engine == nil || handler == nil {
 		return
@@ -571,7 +571,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 
 	authMiddleware := AuthMiddleware(s.accessManager, s.handlers.AuthManager)
 	conditionalAuth := func(c *gin.Context) {
-		if !s.wsAuthEnabled.Load() {
+		if !s.wsAuthEnabled.Load() && !s.accessManager.RequestHasRouteKey(c.Request) {
 			c.Next()
 			return
 		}
