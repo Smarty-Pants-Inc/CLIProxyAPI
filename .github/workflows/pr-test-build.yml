@@ -10,10 +10,9 @@ permissions:
 jobs:
   build:
     needs: test
-    # Public fork on a self-hosted pool: never run an outside fork's PR code (smarty-dev#1246, Light 5941520806).
+    # Preserve the existing same-repository source admission.
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    # Mergify queue drafts and PRs labelled priority-ci use the reserved smarty-priority Forge pool (org 2026-10-02 15:38Z, smarty-dev#3257).
-    runs-on: ${{ (startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'smarty-priority' || 'smarty-linux-x64' }}  # our Forge ephemeral pools, not GitHub-hosted (smarty-dev#1246)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,10 +72,9 @@ jobs:
           rm -f test-output
 
   test:
-    # Match the existing PR trust boundary; outside forks must not run on our pool.
+    # Match the existing PR trust boundary.
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    # Use the same reserved pool as build; its needs: test must not wait in the general pool first.
-    runs-on: ${{ (startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'smarty-priority' || 'smarty-linux-x64' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -97,8 +95,7 @@ jobs:
   # answer 200. Loopback only, scratch config and auth, no real accounts.
   compaction-replay:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    # Every required queue check uses the existing reserved pool, including this parallel replay.
-    runs-on: ${{ (startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'smarty-priority' || 'smarty-linux-x64' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -124,7 +121,7 @@ jobs:
 
   artifact:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    runs-on: smarty-linux-x64  # our Forge ephemeral pool, not GitHub-hosted (smarty-dev#1246)
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
