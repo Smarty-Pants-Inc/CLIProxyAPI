@@ -40,7 +40,7 @@ func (r *issue6381ReadError) Read(p []byte) (int, error) {
 	return copy(p, chunk), nil
 }
 
-func TestOpenAICompatExecutorResponsesEOFAfterFinishReasonCompletesStream(t *testing.T) {
+func TestOpenAICompatExecutorResponsesEOFAfterFinishReasonFailsStream(t *testing.T) {
 	reply := strings.Join([]string{
 		`data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}`,
 		"",
@@ -62,22 +62,10 @@ func TestOpenAICompatExecutorResponsesEOFAfterFinishReasonCompletesStream(t *tes
 		t.Fatal(errExecuteStream)
 	}
 
-	var output bytes.Buffer
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("unexpected stream error after a completed finish_reason: %v", chunk.Err)
-		}
-		output.Write(chunk.Payload)
-	}
-	if got := strings.Count(output.String(), `"type":"response.completed"`); got != 1 {
-		t.Fatalf("response.completed count = %d, want 1; output = %q", got, output.String())
-	}
-	if !strings.Contains(output.String(), `"input_tokens":3`) || !strings.Contains(output.String(), `"output_tokens":1`) {
-		t.Fatalf("late usage was not preserved in response.completed: %q", output.String())
-	}
+	assertResponsesEOFIncomplete(t, result)
 }
 
-func TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonCompletesStream(t *testing.T) {
+func TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonFailsStream(t *testing.T) {
 	first, last := applyPatchTestFrames("chat", "apply_patch")
 	last = strings.Replace(last, "\ndata: [DONE]\n\n", "\n\n", 1)
 	exec, auth, _ := newApplyPatchCompatTestExecutor(t, first+last)
@@ -93,18 +81,26 @@ func TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonCompletesStr
 		t.Fatal(errExecuteStream)
 	}
 
+	assertResponsesEOFIncomplete(t, result)
+}
+
+// A finish_reason ends a choice, not the SSE stream. Even the former #6381
+// EOF fallback must not fabricate response.completed without upstream [DONE].
+func assertResponsesEOFIncomplete(t *testing.T, result *cliproxyexecutor.StreamResult) {
+	t.Helper()
 	var output bytes.Buffer
+	var streamErr error
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
-			t.Fatalf("unexpected apply_patch stream error after a completed finish_reason: %v", chunk.Err)
+			streamErr = chunk.Err
 		}
 		output.Write(chunk.Payload)
 	}
-	if got := strings.Count(output.String(), `"type":"response.completed"`); got != 1 {
-		t.Fatalf("response.completed count = %d, want 1; output = %q", got, output.String())
+	if streamErr == nil || !strings.Contains(streamErr.Error(), "upstream_stream_incomplete") {
+		t.Fatalf("missing incomplete-stream error: %v", streamErr)
 	}
-	if strings.Contains(output.String(), `"type":"response.failed"`) {
-		t.Fatalf("completed apply_patch stream emitted response.failed: %q", output.String())
+	if strings.Contains(output.String(), `"type":"response.completed"`) {
+		t.Fatalf("fabricated response.completed: %s", output.String())
 	}
 }
 

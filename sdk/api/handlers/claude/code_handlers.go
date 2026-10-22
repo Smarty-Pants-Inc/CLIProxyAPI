@@ -483,6 +483,9 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 		}
 	}
 
+	if errType == "upstream_stream_incomplete" {
+		errType = "api_error"
+	}
 	return errType, message
 }
 

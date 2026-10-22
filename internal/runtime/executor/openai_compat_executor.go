@@ -441,6 +441,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		var streamUsage helps.StreamUsageBuffer
+		var progress helps.StreamProgress
 		var seenDone bool
 		var streamFailed bool
 		var streamAborted bool
@@ -455,8 +456,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, loggedErr)
 			reporter.PublishFailure(ctx, loggedErr)
+			var clientErr error = streamErr
+			// Local translation validation failures retain their established classification.
+			if streamErr.msg != helps.ApplyPatchUpstreamErrorMessage {
+				clientErr = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", streamErr)
+			}
 			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case out <- cliproxyexecutor.StreamChunk{Err: clientErr}:
 			case <-ctx.Done():
 			}
 			streamFailed = true
@@ -508,6 +514,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					progress.Sent(chunks[i])
 				case <-ctx.Done():
 					streamAborted = true
 					return true
@@ -559,56 +566,24 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if !streamFailed && !streamAborted && helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
 		}
-		if !streamFailed && !streamAborted && !seenDone && errScan == nil && responseFormat == sdktranslator.FormatOpenAIResponse && ctx.Err() == nil && helps.CanFinalizeResponseStream(param) {
-			finalChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, []byte("data: [DONE]"), &param, claudeInputTokens)
-			for _, finalChunk := range finalChunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: finalChunk}:
-				case <-ctx.Done():
-					streamAborted = true
-				}
-				if streamAborted {
-					break
-				}
-			}
-			if len(finalChunks) > 0 && !streamAborted {
-				seenDone = true
-			}
-		}
 		if streamFailed || streamAborted {
+			if streamAborted && ctx.Err() != nil {
+				_ = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", ctx.Err())
+			}
 			return
 		}
-		if errScan != nil && !seenDone {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
-			}
-		} else if !seenDone {
-			// Without a translator-confirmed terminal state, a clean Responses EOF
-			// without [DONE] remains a failed stream instead of completing it.
-			if responseFormat == sdktranslator.FormatOpenAIResponse {
-				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
-				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-				reporter.PublishFailure(ctx, streamErr)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-				case <-ctx.Done():
-				}
+		if !seenDone {
+			streamErr := progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", errScan)
+			if ctx.Err() != nil {
 				return
 			}
-
-			// Other protocols retain compatibility with providers that omit [DONE].
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, []byte("data: [DONE]"), &param, claudeInputTokens)
-			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
-				}
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			reporter.PublishFailure(ctx, streamErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
 			}
+			return
 		}
 		// Ensure we record the request if no usage chunk was ever seen.
 		streamUsage.Publish(ctx, reporter)

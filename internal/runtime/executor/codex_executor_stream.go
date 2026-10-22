@@ -414,6 +414,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
 
+	var progress helps.StreamProgress
+	for _, chunk := range bufferedChunks {
+		progress.Sent(chunk)
+	}
+	for _, chunk := range initialChunks {
+		progress.Sent(chunk)
+	}
 	streamReplaySafe := replaySafe
 	emittedCount := 0
 	for _, chunk := range bufferedChunks {
@@ -515,6 +522,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					progress.Sent(chunks[i])
 					if len(chunks[i]) > 0 {
 						emittedCount++
 					}
@@ -526,11 +534,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		if ctx.Err() != nil {
+			_ = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", ctx.Err())
+			return
 		}
 		// An empty translation may hide server-tool work. Only a replay-safe
 		// empty stream can use the conductor's pre-output disconnect failover.
@@ -540,7 +546,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			reporter.PublishFailure(ctx, emptyErr)
 			return
 		}
-		streamErr := newCodexIncompleteStreamError()
+		cause := error(newCodexIncompleteStreamError())
+		if scanner.Err() != nil {
+			cause = errors.Join(cause, scanner.Err())
+		}
+		streamErr := progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
 		sendError(streamErr)

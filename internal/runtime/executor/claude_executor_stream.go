@@ -359,8 +359,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 		var streamUsage helps.StreamUsageBuffer
+		var progress helps.StreamProgress
 		defer streamUsage.Publish(ctx, reporter)
 		emitCancellation := func(cause error) bool {
+			if ctx.Err() != nil {
+				_ = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", cause)
+			}
 			cancelErr := newClaudeOAuthCancellationError(ctx, fp.OAuthCancellation, cause)
 			if cancelErr == nil {
 				return false
@@ -441,6 +445,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				event.Reset()
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+					progress.Sent(cloned)
 					return true
 				case <-ctx.Done():
 					return false
@@ -478,16 +483,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if emitCancellation(scanner.Err()) {
 					return
 				}
-				if errScan := scanner.Err(); errScan != nil {
-					errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
-					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-					streamUsage.PublishFailure(ctx, reporter, errScan)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-					case <-ctx.Done():
-					}
-					return
-				}
+				emitResponseError(progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", scanner.Err()))
+				return
 			}
 			if upstreamCompleted {
 				commitClaudeContinuity(diagnosticsState, upstreamMessageID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
@@ -534,6 +531,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					progress.Sent(chunks[i])
 				case <-ctx.Done():
 					emitCancellation(ctx.Err())
 					return
@@ -553,16 +551,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if emitCancellation(scanner.Err()) {
 				return
 			}
-			if errScan := scanner.Err(); errScan != nil {
-				errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
-				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				streamUsage.PublishFailure(ctx, reporter, errScan)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-				case <-ctx.Done():
-				}
-				return
-			}
+			emitResponseError(progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", scanner.Err()))
+			return
 		}
 		if upstreamCompleted {
 			commitClaudeContinuity(diagnosticsState, upstreamMessageID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
