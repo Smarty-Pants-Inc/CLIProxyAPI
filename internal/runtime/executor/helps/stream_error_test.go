@@ -17,21 +17,21 @@ func TestStreamProgressUpstreamError(t *testing.T) {
 	hook := logtest.NewGlobal()
 	defer hook.Reset()
 	for _, test := range []struct {
-		name, payload, code, kind string
-		retryable                 bool
+		name, payload, code, kind, message string
+		retryable                          bool
 	}{
-		{"server code only", `{"type":"error","code":"server_error","message":"busy"}`, "server_error", "server_error", true},
-		{"overload", `{"error":{"type":"overloaded_error","code":"overloaded","message":"busy"}}`, "overloaded", "overloaded_error", true},
-		{"rate limit", `{"error":{"type":"rate_limit_error","code":429,"message":"slow down"}}`, "429", "rate_limit_error", true},
-		{"5xx", `{"error":{"type":"api_error","code":"fixture","status":503,"message":"busy"}}`, "fixture", "api_error", true},
-		{"invalid", `{"response":{"error":{"type":"invalid_request_error","code":"cyber_policy","message":"not allowed"}}}`, "cyber_policy", "invalid_request_error", false},
+		{"server code only", `{"type":"error","code":"server_error","message":"busy"}`, "server_error", "server_error", "upstream server error: server_error", true},
+		{"overload", `{"error":{"type":"overloaded_error","code":"overloaded","message":"busy"}}`, "overloaded", "overloaded_error", "upstream overloaded: overloaded", true},
+		{"rate limit", `{"error":{"type":"rate_limit_error","code":429,"message":"slow down"}}`, "429", "rate_limit_error", "upstream rate limited: 429", true},
+		{"5xx", `{"error":{"type":"api_error","code":"fixture","status":503,"message":"busy"}}`, "fixture", "api_error", "upstream server error: fixture", true},
+		{"invalid", `{"response":{"error":{"type":"invalid_request_error","code":"cyber_policy","message":"not allowed"}}}`, "cyber_policy", "invalid_request_error", "upstream request rejected: cyber_policy", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			p := StreamProgress{Bytes: 123, Chunks: 2}
 			cause := errors.New("private original failure")
 			err := p.UpstreamError(context.Background(), "codex", "gpt-test", "fixture label", 502, []byte(test.payload), cause)
 			node := gjson.Get(err.Error(), "error")
-			if node.Get("code").String() != test.code || node.Get("type").String() != test.kind || node.Get("retryable").Bool() != test.retryable {
+			if node.Get("code").String() != test.code || node.Get("type").String() != test.kind || node.Get("retryable").Bool() != test.retryable || node.Get("message").String() != test.message {
 				t.Fatalf("bad diagnostic: %v", err)
 			}
 			if !errors.Is(err, cause) {
@@ -80,10 +80,10 @@ func TestStreamProgressUpstreamError(t *testing.T) {
 	}
 }
 
-func TestStreamSSEData(t *testing.T) {
-	var state StreamSSEData
+func TestStreamSSEEventError(t *testing.T) {
+	var state StreamSSEEvent
 	readyCount := 0
-	for _, line := range []string{"event: error", `data: {"error":`, `data: {"code":"server_error","message":"busy"}}`} {
+	for _, line := range []string{"event: error", `data: {"error":`, `data: {"code":"server_error","message":"busy"}}`, ""} {
 		data, ready := state.Observe([]byte(line))
 		if ready {
 			readyCount++
@@ -99,7 +99,10 @@ func TestStreamSSEData(t *testing.T) {
 		t.Fatal("lost SSE event name")
 	}
 	state.Observe(nil)
-	data, ready := state.Observe([]byte(`data: {"type":"message_stop"}`))
+	if _, ready := state.Observe([]byte(`data: {"type":"message_stop"}`)); ready {
+		t.Fatal("dispatched before SSE event boundary")
+	}
+	data, ready := state.Flush()
 	if !ready || IsStreamErrorFrame(data, state.Event) {
 		t.Fatalf("error state leaked across frame boundary: %s", data)
 	}

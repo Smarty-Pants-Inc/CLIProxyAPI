@@ -13,9 +13,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// StreamSSEData joins multiline data fields before inspecting an error. Event is
-// retained until the blank separator (SSE event names need not appear in JSON).
-// One instance belongs to one stream, including its bootstrap phase.
+// StreamSSEData joins multiline JSON data before inspection. Codex also accepts
+// delimiterless JSON records, so it emits as soon as the joined JSON is valid.
+// Native SSE passthrough uses StreamSSEEvent to wait for the event boundary.
 type StreamSSEData struct {
 	Event   string
 	pending []byte
@@ -47,7 +47,16 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		data = s.pending
 	}
 	if bytes.Equal(data, []byte("[DONE]")) || json.Valid(data) {
+		multiline := len(s.pending) > 0
 		s.pending = nil
+		if multiline {
+			// Line-oriented native translators must not emit a joined JSON
+			// newline as a bare SSE line without the required data: prefix.
+			var compact bytes.Buffer
+			if errCompact := json.Compact(&compact, data); errCompact == nil {
+				data = compact.Bytes()
+			}
+		}
 		return data, true
 	}
 	s.pending = append(s.pending[:0], data...)
@@ -153,17 +162,25 @@ func (p *StreamProgress) UpstreamError(ctx context.Context, provider, model, aut
 	if code == "" {
 		code = errType
 	}
-	if message == "" {
-		message = "upstream stream failed: " + code
+	// Never forward upstream prose across the client trust boundary. Code/type
+	// retain the upstream classification; only the message is gateway-authored.
+	clientMessage := "upstream request rejected"
+	switch {
+	case status == http.StatusTooManyRequests:
+		clientMessage = "upstream rate limited"
+	case strings.Contains(class, "overloaded") || strings.Contains(class, "at_capacity"):
+		clientMessage = "upstream overloaded"
+	case status >= 500:
+		clientMessage = "upstream server error"
 	}
 	safe := logging.SafeDiagnosticForLog
-	detail := map[string]any{"code": safe(code), "type": safe(errType), "message": safe(message), "retryable": retryable, "provider": safe(provider), "model": safe(model), "upstream_status": status, "partial_bytes": p.Bytes, "partial_chunks": p.Chunks}
+	detail := map[string]any{"code": code, "type": errType, "message": clientMessage + ": " + code, "retryable": retryable, "provider": safe(provider), "model": safe(model), "upstream_status": status, "partial_bytes": p.Bytes, "partial_chunks": p.Chunks}
 	body := map[string]any{"error": detail}
 	if seq := root.Get("sequence_number"); seq.Exists() {
 		body["sequence_number"] = seq.Int()
 	}
 	encoded, _ := json.Marshal(body)
-	LogWithRequestID(ctx).WithFields(logrus.Fields{"provider": safe(provider), "model": safe(model), "auth_label": safe(authLabel), "code": detail["code"], "type": detail["type"], "upstream_status": status, "partial_bytes": p.Bytes, "partial_chunks": p.Chunks}).Warn("upstream stream error")
+	LogWithRequestID(ctx).WithFields(logrus.Fields{"provider": safe(provider), "model": safe(model), "auth_label": safe(authLabel), "code": detail["code"], "type": detail["type"], "message": logging.SafeUpstreamDiagnosticForLog(message), "upstream_status": status, "partial_bytes": p.Bytes, "partial_chunks": p.Chunks}).Warn("upstream stream error")
 	if failureStatus < 400 || failureStatus > 599 {
 		failureStatus = status
 	}

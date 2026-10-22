@@ -55,6 +55,15 @@ func TestUpstreamErrorFrameHTTP(t *testing.T) {
 						code, errType = "fixture_down", "api_error"
 					}
 					message := "fixture upstream failure"
+					clientMessage := "upstream server error: " + code
+					switch kind {
+					case "invalid":
+						clientMessage = "upstream request rejected: " + code
+					case "overloaded":
+						clientMessage = "upstream overloaded: " + code
+					case "rate_limit":
+						clientMessage = "upstream rate limited: " + code
+					}
 					detail := fmt.Sprintf(`{"code":%q,"type":%q,"message":%q,"api_key":"nested-secret","extra":{"token":"nested-token"}}`, code, errType, message+" api_key=sk-test-secret-123456789 token=token-secret owner@example.com")
 					if kind == "status" {
 						detail = strings.TrimSuffix(detail, "}") + `,"status_code":503}`
@@ -163,7 +172,7 @@ func TestUpstreamErrorFrameHTTP(t *testing.T) {
 						}
 						return
 					}
-					if detailResult.Get("code").String() != code || detailResult.Get("type").String() != errType || !strings.HasPrefix(detailResult.Get("message").String(), message) || !detailResult.Get("retryable").IsBool() || detailResult.Get("retryable").Bool() != retryable {
+					if detailResult.Get("code").String() != code || detailResult.Get("type").String() != errType || detailResult.Get("message").String() != clientMessage || !detailResult.Get("retryable").IsBool() || detailResult.Get("retryable").Bool() != retryable {
 						t.Fatalf("lost error classification: %s", body)
 					}
 					if client == "messages" && !strings.Contains(body, "event: error\n") {

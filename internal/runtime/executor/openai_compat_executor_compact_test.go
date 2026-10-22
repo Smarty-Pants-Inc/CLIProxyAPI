@@ -863,7 +863,7 @@ func TestOpenAICompatExecutorStreamRejectsPlainJSONAfterBlankLines(t *testing.T)
 	if status, ok := gotErr.(interface{ StatusCode() int }); !ok || status.StatusCode() != http.StatusBadGateway {
 		t.Fatalf("stream error status = %v, want %d", gotErr, http.StatusBadGateway)
 	}
-	if !strings.Contains(gotErr.Error(), "upstream failed") {
+	if gjson.Get(gotErr.Error(), "error.message").String() != "upstream server error: server_error" {
 		t.Fatalf("stream error = %v", gotErr)
 	}
 }
@@ -999,8 +999,8 @@ func TestOpenAICompatExecutorResponsesStreamPreservesUpstreamDataError(t *testin
 			if strings.Contains(streamed.String(), "response.completed") {
 				t.Fatalf("upstream data error was finalized as response.completed: %q", streamed.String())
 			}
-			if streamErr == nil || !strings.Contains(streamErr.Error(), "upstream failed") {
-				t.Fatalf("terminal stream error = %v, want original upstream failure", streamErr)
+			if streamErr == nil || gjson.Get(streamErr.Error(), "error.message").String() != "upstream server error: upstream_failed" || gjson.Get(streamErr.Error(), "error.code").String() != "upstream_failed" {
+				t.Fatalf("terminal stream error = %v, want classified upstream failure", streamErr)
 			}
 		})
 	}
@@ -1047,8 +1047,8 @@ func TestOpenAICompatExecutorResponsesStreamPreservesNamedErrorEvent(t *testing.
 	if strings.Contains(streamed.String(), "response.completed") {
 		t.Fatalf("named upstream error event was finalized as response.completed: %q", streamed.String())
 	}
-	if streamErr == nil || !strings.Contains(streamErr.Error(), "upstream failed") {
-		t.Fatalf("terminal stream error = %v, want named upstream failure", streamErr)
+	if streamErr == nil || gjson.Get(streamErr.Error(), "error.message").String() != "upstream server error: upstream_failed" || gjson.Get(streamErr.Error(), "error.code").String() != "upstream_failed" {
+		t.Fatalf("terminal stream error = %v, want classified named upstream failure", streamErr)
 	}
 }
 
@@ -1064,7 +1064,7 @@ func TestOpenAICompatExecutorResponsesStreamHandlesAdditionalErrorShapes(t *test
 				`data: {"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_failed","message":"response failed upstream"}}}` + "\n\n",
 				"data: [DONE]\n\n",
 			},
-			wantErr: "response failed upstream",
+			wantErr: "upstream server error: upstream_failed",
 		},
 		{
 			name: "data before named error",
@@ -1073,7 +1073,7 @@ func TestOpenAICompatExecutorResponsesStreamHandlesAdditionalErrorShapes(t *test
 				"event: error\n\n",
 				"data: [DONE]\n\n",
 			},
-			wantErr: "data before event failure",
+			wantErr: "upstream server error: server_error",
 		},
 		{
 			name: "done after incomplete error data",

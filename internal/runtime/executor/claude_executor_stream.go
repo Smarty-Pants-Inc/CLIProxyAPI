@@ -430,7 +430,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return
 		}
 
-		var sseData helps.StreamSSEData
 		// Like router-for-me/CLIProxyAPI#4980, inspect errors before direct
 		// passthrough. Also cover other error classes and translated clients.
 		// If the response target is Claude, directly forward complete SSE events without translation.
@@ -438,8 +437,19 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			scanner := bufio.NewScanner(guardedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			var event bytes.Buffer
+			var sseData helps.StreamSSEEvent
 			var upstreamMessageID string
 			upstreamCompleted := false
+			observeEvent := func(data []byte) bool {
+				if helps.IsStreamErrorFrame(data, sseData.Event) {
+					if ctx.Err() == nil {
+						emitResponseError(progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, httpResp.StatusCode, data, nil))
+					}
+					return false
+				}
+				observeClaudeStreamEvent(data, sseData.Event, &upstreamMessageID, &upstreamCompleted)
+				return true
+			}
 			flushEvent := func() bool {
 				if event.Len() == 0 {
 					return true
@@ -456,14 +466,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			for scanner.Scan() {
 				line := scanner.Bytes()
-				if data, complete := sseData.Observe(line); complete && helps.IsStreamErrorFrame(data, sseData.Event) {
-					if ctx.Err() != nil {
-						return
-					}
-					emitResponseError(progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, httpResp.StatusCode, data, nil))
+				if data, complete := sseData.Observe(line); complete && !observeEvent(data) {
 					return
 				}
-				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				reporter.ObserveResponseModel(line)
 				streamUsage.ObserveClaudeStream(line)
@@ -485,6 +490,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					}
 				}
 			}
+			if scanner.Err() == nil {
+				if data, complete := sseData.Flush(); complete && !observeEvent(data) {
+					return
+				}
+			}
 			if !flushEvent() {
 				emitCancellation(ctx.Err())
 				return
@@ -503,7 +513,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return
 		}
 
-		// For other formats, use translation
+		// For other formats, use translation of reconstructed JSON data.
+		var sseData helps.StreamSSEData
 		scanner := bufio.NewScanner(guardedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
@@ -525,8 +536,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					continue
 				}
 				line = append([]byte("data: "), data...)
+				observeClaudeStreamEvent(data, sseData.Event, &upstreamMessageID, &upstreamCompleted)
 			}
-			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)

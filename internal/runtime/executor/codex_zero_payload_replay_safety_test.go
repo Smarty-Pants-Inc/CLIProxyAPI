@@ -104,8 +104,8 @@ func TestCodexZeroTranslatedReplaySafety(t *testing.T) {
 						if err == nil {
 							t.Error("unsafe zero-translated stream lost synchronous quota error")
 						} else {
-							if !strings.Contains(err.Error(), quota) || !strings.Contains(err.Error(), "fixture quota exhausted") {
-								t.Errorf("original quota refusal lost: %T %v", err, err)
+							if !strings.Contains(err.Error(), quota) || !strings.Contains(err.Error(), "upstream rate limited: "+quota) || strings.Contains(err.Error(), "fixture quota exhausted") {
+								t.Errorf("classified quota refusal lost or upstream prose leaked: %T %v", err, err)
 							}
 							retryAfter := time.Duration(0)
 							if quota == "usage_limit_reached" {
