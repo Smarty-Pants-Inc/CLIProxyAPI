@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -508,7 +509,14 @@ func TestCodexExecutorExecuteStreamSurfacesTerminalStreamError(t *testing.T) {
 	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadRequest {
 		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadRequest, streamErr)
 	}
-	assertCodexErrorCode(t, streamErr.Error(), "invalid_request_error", "context_too_large")
+	// Mid-stream clients get the original upstream code, while the wrapped
+	// cause retains the executor's canonical classification for internal policy.
+	assertCodexErrorCode(t, streamErr.Error(), "invalid_request_error", "context_length_exceeded")
+	var frameErr *helps.UpstreamStreamError
+	if !errors.As(streamErr, &frameErr) {
+		t.Fatalf("missing upstream frame error: %v", streamErr)
+	}
+	assertCodexErrorCode(t, frameErr.Unwrap().Error(), "invalid_request_error", "context_too_large")
 }
 
 func TestCodexTerminalStreamContextLengthErrFromResponseFailed(t *testing.T) {

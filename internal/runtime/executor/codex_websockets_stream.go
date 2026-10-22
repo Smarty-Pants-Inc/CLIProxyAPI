@@ -279,6 +279,20 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	bufferedFrames := 0
 	bufferedBytes := 0
 	var initialChunks [][]byte
+	bootstrapFrameError := func(payload []byte, cause error) error {
+		// A setup refusal before model verification is not an established stream.
+		if !modelGuard.Authoritative() {
+			return cause
+		}
+		var progress helps.StreamProgress
+		for _, chunk := range bufferedChunks {
+			progress.Sent(chunk)
+		}
+		for _, chunk := range initialChunks {
+			progress.Sent(chunk)
+		}
+		return progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, http.StatusBadGateway, applyCodexIdentityExposeResponsePayload(payload, identityState), cause)
+	}
 	immediateTerminal := false
 	// bootstrapTerminalErr holds a non-overload terminal failure seen while buffering. It is
 	// delivered as an in-stream chunk after the buffered handshake so downstream behaviour stays
@@ -420,7 +434,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				reporter.PublishFailure(ctx, wsErr)
 				if timeoutReached || !replaySafe {
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, timeout=%t replay_safe=%t; delivering in-stream", bufferedFrames, timeSinceStart, timeoutReached, replaySafe)
-					bootstrapTerminalErr = markCodexQuotaRefusal(wsErr, payload)
+					bootstrapTerminalErr = markCodexQuotaRefusal(bootstrapFrameError(payload, wsErr), payload)
 					break
 				}
 				if isCodexUsageLimitError(payload) {
@@ -464,7 +478,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					}
 					return nil, newCodexBootstrapOverloadErr(terminalBody)
 				}
-				bootstrapTerminalErr = markCodexQuotaRefusal(streamErr, terminalBody)
+				bootstrapTerminalErr = markCodexQuotaRefusal(bootstrapFrameError(payload, streamErr), terminalBody)
 				break
 			}
 
@@ -646,6 +660,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	streamReplaySafe := replaySafe
+	var progress helps.StreamProgress
+	for _, chunk := range bufferedChunks {
+		progress.Sent(chunk)
+	}
+	for _, chunk := range initialChunks {
+		progress.Sent(chunk)
+	}
 	go func() {
 		terminateReason := "response_abandoned"
 		var terminateErr error
@@ -658,10 +679,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			if ctx == nil {
 				out <- chunk
+				progress.Sent(chunk.Payload)
 				return true
 			}
 			select {
 			case out <- chunk:
+				progress.Sent(chunk.Payload)
 				return true
 			case <-ctx.Done():
 				return false
@@ -747,7 +770,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
-				_ = send(cliproxyexecutor.StreamChunk{Err: markCodexQuotaRefusal(wsErr, payload)})
+				clientErr := progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, http.StatusBadGateway, applyCodexIdentityExposeResponsePayload(payload, identityState), wsErr)
+				terminateErr = clientErr
+				_ = send(cliproxyexecutor.StreamChunk{Err: markCodexQuotaRefusal(clientErr, payload)})
 				return
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(payload, identityState), e.modelLevelCooling()); ok {
@@ -767,7 +792,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
 				reporter.PublishFailure(ctx, streamErr)
-				_ = send(cliproxyexecutor.StreamChunk{Err: markCodexQuotaRefusal(streamErr, terminalBody)})
+				clientErr := progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, streamErr.StatusCode(), applyCodexIdentityExposeResponsePayload(payload, identityState), streamErr)
+				terminateErr = clientErr
+				_ = send(cliproxyexecutor.StreamChunk{Err: markCodexQuotaRefusal(clientErr, terminalBody)})
 				return
 			}
 

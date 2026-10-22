@@ -458,7 +458,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			reporter.PublishFailure(ctx, loggedErr)
 			var clientErr error = streamErr
 			// Local translation validation failures retain their established classification.
-			if streamErr.msg != helps.ApplyPatchUpstreamErrorMessage {
+			if containsPayload {
+				clientErr = progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, streamErr.StatusCode(), []byte(streamErr.msg), streamErr)
+			} else if streamErr.msg != helps.ApplyPatchUpstreamErrorMessage {
 				clientErr = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", streamErr)
 			}
 			select {

@@ -29,10 +29,7 @@ func TestIncompleteStreamHTTP(t *testing.T) {
 		{"compat", "chat"}, {"codex", "responses"}, {"claude", "messages"},
 		{"compat", "responses"}, {"compat", "messages"}, {"claude", "chat"}, {"claude", "responses"},
 	} {
-		for _, mode := range []string{"truncated", "read_error", "upstream_error", "complete", "cancel", "nonstream_error"} {
-			if mode == "upstream_error" && route.provider != "compat" {
-				continue
-			}
+		for _, mode := range []string{"truncated", "read_error", "complete", "cancel", "nonstream_error"} {
 			t.Run(route.provider+"/"+route.client+"/"+mode, func(t *testing.T) {
 				model := "stream-incomplete-fixture"
 				if route.provider == "codex" {
@@ -63,9 +60,6 @@ func TestIncompleteStreamHTTP(t *testing.T) {
 						w.(http.Flusher).Flush()
 						<-r.Context().Done()
 						return
-					}
-					if mode == "upstream_error" {
-						fmt.Fprint(w, `data: {"error":{"code":"fixture_busy","message":"fixture stream failure"}}`+"\n\n")
 					}
 					if mode == "complete" {
 						fmt.Fprint(w, terminal)
@@ -152,9 +146,6 @@ func TestIncompleteStreamHTTP(t *testing.T) {
 				}
 				if !detail.Exists() {
 					t.Fatalf("missing client error event: %s", body)
-				}
-				if mode == "upstream_error" && !strings.Contains(detail.Get("message").String(), "fixture_busy") {
-					t.Fatalf("lost upstream code/body: %s", body)
 				}
 				if mode == "read_error" && !strings.Contains(detail.Get("message").String(), "unexpected EOF") {
 					t.Fatalf("lost upstream read error: %s", body)

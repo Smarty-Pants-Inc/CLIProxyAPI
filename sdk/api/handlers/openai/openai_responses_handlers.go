@@ -1105,7 +1105,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		if origSeq := gjson.Get(errText, "sequence_number"); origSeq.Exists() {
 			seq = int(origSeq.Int())
 		}
-		if isCodexResponsesClientRequest(c) {
+		// Port the terminal response.failed pattern from upstream #4683 for
+		// classified upstream frames regardless of User-Agent. Responses clients
+		// (including Pi) read response.error, not a nested generic error event.
+		var upstreamFrame interface{ IsUpstreamStreamError() bool }
+		isUpstreamFrame := errors.As(errMsg.Error, &upstreamFrame) && upstreamFrame.IsUpstreamStreamError()
+		if isCodexResponsesClientRequest(c) || isUpstreamFrame {
 			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
 			_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
 			return
