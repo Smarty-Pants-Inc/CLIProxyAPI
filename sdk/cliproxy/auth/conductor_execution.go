@@ -1207,6 +1207,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		releaseAttempt := func() {}
+		streamOwnsAttempt := false
 		if selection != nil {
 			var errBind error
 			execCtx, releaseAttempt, errBind = homeExecutionAttemptContext(ctx, selection)
@@ -1216,10 +1217,20 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			releaseTerminal := selection.holdStreamTerminalDelivery()
 			releaseBoundAttempt := releaseAttempt
-			releaseAttempt = func() {
+			releaseAttempt = sync.OnceFunc(func() {
 				releaseBoundAttempt()
 				releaseTerminal()
-			}
+			})
+			defer func() {
+				if panicValue := recover(); panicValue != nil {
+					releaseAttempt()
+					selection.End("execution_panicked")
+					panic(panicValue)
+				}
+				if !streamOwnsAttempt {
+					releaseAttempt()
+				}
+			}()
 		}
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -1411,10 +1422,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		if selection != nil {
+			streamSelection := selection
 			if m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
-				return wrapHomeStream(ctx, streamResult, nil, releaseAttempt), nil
+				streamSelection = nil
 			}
-			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
+			wrapped := wrapHomeStream(ctx, streamResult, streamSelection, releaseAttempt)
+			// The stream consumer now owns terminal delivery and attempt release.
+			streamOwnsAttempt = true
+			return wrapped, nil
 		}
 		return streamResult, nil
 	}

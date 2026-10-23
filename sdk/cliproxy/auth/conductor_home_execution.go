@@ -133,10 +133,18 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		// and Home result are recorded (non-stream twin of the stream hold).
 		releaseTerminal := selection.holdStreamTerminalDelivery()
 		releaseBoundAttempt := releaseAttempt
-		releaseAttempt = func() {
+		releaseAttempt = sync.OnceFunc(func() {
 			releaseBoundAttempt()
 			releaseTerminal()
-		}
+		})
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				releaseAttempt()
+				selection.End("execution_panicked")
+				panic(panicValue)
+			}
+			releaseAttempt()
+		}()
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = newUpstreamAttemptContext(execCtx)
