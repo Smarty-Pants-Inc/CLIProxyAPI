@@ -22,6 +22,9 @@ func TestStreamProgressIncompleteDiagnostics(t *testing.T) {
 	if detail.Get("type").String() != "upstream_stream_incomplete" || detail.Get("code").String() != "upstream_stream_incomplete" {
 		t.Fatal(err)
 	}
+	if retryable := detail.Get("retryable"); !retryable.IsBool() || !retryable.Bool() {
+		t.Fatalf("missing retryable:true for transient upstream EOF: %v", err)
+	}
 	if !errors.Is(err, cause) {
 		t.Fatal("lost upstream cause")
 	}

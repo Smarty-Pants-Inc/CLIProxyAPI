@@ -220,6 +220,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
 				continue
 			}
+			if completeData {
+				// Inspection completed a record, not necessarily this Scanner
+				// fragment. Logging, keepalive detection and budgets need it whole.
+				line = append([]byte("data: "), dataPayload...)
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			isHandshake := false
@@ -486,6 +491,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			dataPayload, completeData := sseData.Observe(line)
 			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
 				continue
+			}
+			if completeData {
+				line = append([]byte("data: "), dataPayload...)
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte

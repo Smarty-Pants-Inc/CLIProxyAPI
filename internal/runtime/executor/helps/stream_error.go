@@ -30,6 +30,8 @@ type StreamSSEData struct {
 	depth         int
 	inString      bool
 	escaped       bool
+	closed        bool
+	poisoned      bool
 	compact       bytes.Buffer
 }
 
@@ -39,6 +41,8 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		s.Lines = s.Lines[:0]
 		s.ready = false
 		s.wireBytes = 0
+		s.closed = false
+		s.poisoned = false
 	}
 	originalLine := line
 	line = bytes.TrimSpace(line)
@@ -49,6 +53,8 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		s.depth = 0
 		s.inString = false
 		s.escaped = false
+		s.closed = false
+		s.poisoned = false
 		clear(s.Lines)
 		s.Lines = s.Lines[:0]
 		s.wireBytes = 0
@@ -77,9 +83,21 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 	}
 	multiline := s.hasData
 	// Visit only the new bytes. Validating every accumulated prefix makes a
-	// large event split into short Scanner units quadratic. This checkpoint
-	// only detects a possible end; json.Valid still owns syntax validation.
+	// large event split into short Scanner units quadratic. Once a top-level
+	// value closes, trailing data or invalid syntax cannot be repaired by later
+	// lines. Poison it until the blank boundary, so json.Valid scans at most
+	// once per record. Lexical balance alone does not imply valid JSON.
 	for _, b := range data {
+		if s.poisoned {
+			break
+		}
+		if s.closed {
+			if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+				s.poisoned = true
+				break
+			}
+			continue
+		}
 		if s.inString {
 			if s.escaped {
 				s.escaped = false
@@ -87,6 +105,9 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 				s.escaped = true
 			} else if b == '"' {
 				s.inString = false
+				if s.depth == 0 {
+					s.closed = true
+				}
 			}
 			continue
 		}
@@ -97,6 +118,11 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 			s.depth++
 		case '}', ']':
 			s.depth--
+			if s.depth < 0 {
+				s.poisoned = true
+			} else if s.depth == 0 {
+				s.closed = true
+			}
 		}
 	}
 	if multiline {
@@ -104,7 +130,7 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		s.pending = append(s.pending, data...)
 		data = s.pending
 	}
-	if !s.inString && s.depth == 0 && (bytes.Equal(data, []byte("[DONE]")) || json.Valid(data)) {
+	if !s.poisoned && !s.inString && s.depth == 0 && (bytes.Equal(data, []byte("[DONE]")) || json.Valid(data)) {
 		s.pending = s.pending[:0]
 		s.hasData = false
 		s.ready = true
@@ -116,6 +142,9 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 			}
 		}
 		return data, true
+	}
+	if !s.inString && s.depth == 0 && len(data) > 0 {
+		s.poisoned = true
 	}
 	s.hasData = true
 	if !multiline {
@@ -134,6 +163,11 @@ func (s *StreamSSEData) overflow() ([]byte, bool) {
 	s.depth = 0
 	s.inString = false
 	s.escaped = false
+	s.closed = false
+	s.poisoned = false
+	clear(s.Lines)
+	s.Lines = s.Lines[:0]
+	s.wireBytes = 0
 	s.ready = true
 	return []byte(`{"type":"error","error":{"code":"upstream_stream_invalid","type":"server_error","message":"upstream SSE event exceeds buffering limit"}}`), true
 }

@@ -29,7 +29,8 @@ func (p *StreamProgress) Sent(payload []byte) {
 
 // Incomplete reports EOF/read failure before a protocol terminal. The upstream
 // handshake status is diagnostic metadata, separate from the proxy failure status.
-// Keep these errors request-scoped so a broken connection never cools credentials.
+// Missing the terminal event is transient: let clients retry the turn. Keep
+// these errors request-scoped so a broken connection never cools credentials.
 func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string, status int, terminal string, cause error) error {
 	fields := logrus.Fields{"provider": provider, "model": model, "upstream_status": status, "partial_bytes": p.Bytes, "partial_chunks": p.Chunks}
 	if ctx != nil && ctx.Err() != nil {
@@ -37,7 +38,7 @@ func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string,
 		return ctx.Err()
 	}
 	message := fmt.Sprintf("upstream stream closed before %s (provider=%s, model=%s, upstream_status=%d, partial_bytes=%d, partial_chunks=%d)", terminal, provider, model, status, p.Bytes, p.Chunks)
-	detail := map[string]any{"message": message, "type": "upstream_stream_incomplete", "code": "upstream_stream_incomplete"}
+	detail := map[string]any{"message": message, "type": "upstream_stream_incomplete", "code": "upstream_stream_incomplete", "retryable": true}
 	for key, value := range fields {
 		detail[key] = value
 	}

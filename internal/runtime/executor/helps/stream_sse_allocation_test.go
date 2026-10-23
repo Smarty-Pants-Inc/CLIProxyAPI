@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Recorded catch: PR #174 CI. Inspection buffers must be reused across events;
@@ -105,19 +106,58 @@ func TestStreamSSEDataNativeBufferBounds(t *testing.T) {
 		} else {
 			state.wireBytes = 52_428_800
 		}
-		count := len(state.Lines)
 		data, ready := state.Observe([]byte(": comment"))
 		if !ready || !IsStreamErrorFrame(data, "") {
 			t.Fatalf("units=%t: native buffering overflow was not an error: %s", units, data)
 		}
-		if len(state.Lines) != count {
-			t.Fatal("retained a unit after exceeding the buffering bound")
+		if len(state.Lines) != 0 {
+			t.Fatal("overflow retained native units instead of releasing them")
 		}
 		state.Observe(nil)
 		data, ready = state.Observe([]byte(`data: {"type":"response.done"}`))
 		if !ready || !json.Valid(data) || len(state.Lines) != 0 || state.wireBytes != 0 {
 			t.Fatal("overflow state leaked into the next event")
 		}
+	}
+}
+
+// Recorded catch: PR #174 S2. A corrupt 1 MB record followed by neutral lines
+// must not revalidate its entire pending prefix on each line.
+func TestStreamSSEDataPoisonedRecordLinear(t *testing.T) {
+	for _, tail := range []string{"0]]", "0] 0", `0] "`, "0,]"} {
+		t.Run(tail, func(t *testing.T) {
+			var state StreamSSEData
+			for _, line := range []string{"data: [", "data: " + strings.Repeat("0,", 1<<19), "data: " + tail, "data: ["} {
+				if _, ready := state.Observe([]byte(line)); ready {
+					t.Fatal("dispatched corrupt JSON")
+				}
+			}
+			// Measure revalidation on an already-pending 1 MB record, not
+			// fixture generation or the initial megabyte's linear scan.
+			start := time.Now()
+			for i := 0; i < 1000; i++ {
+				if _, ready := state.Observe([]byte("data: 0")); ready {
+					t.Fatal("dispatched poisoned record")
+				}
+			}
+			elapsed := time.Since(start)
+			t.Logf("1 MB pending + 1000 lines: %v", elapsed)
+			if elapsed >= 50*time.Millisecond {
+				t.Fatalf("poisoned record revalidation exceeded 50 ms: %v", elapsed)
+			}
+			// Neither a later valid value nor a closing bracket can repair a
+			// poisoned record; only its blank-line boundary resets inspection.
+			for _, line := range []string{"data: ]", `data: {"ok":true}`} {
+				if _, ready := state.Observe([]byte(line)); ready {
+					t.Fatal("poisoned record recovered before blank line")
+				}
+			}
+			state.Observe(nil)
+			data, ready := state.Observe([]byte(`data: {"ok":true}`))
+			if !ready || !json.Valid(data) {
+				t.Fatal("blank line did not reset poisoned record")
+			}
+		})
 	}
 }
 

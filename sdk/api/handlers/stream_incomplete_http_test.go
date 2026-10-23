@@ -26,7 +26,7 @@ import (
 func TestIncompleteStreamHTTP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, route := range []struct{ provider, client string }{
-		{"compat", "chat"}, {"codex", "responses"}, {"claude", "messages"},
+		{"compat", "chat"}, {"codex", "responses"}, {"codex", "chat"}, {"codex", "messages"}, {"claude", "messages"},
 		{"compat", "responses"}, {"compat", "messages"}, {"claude", "chat"}, {"claude", "responses"},
 	} {
 		for _, mode := range []string{"truncated", "read_error", "complete", "cancel", "nonstream_error"} {
@@ -111,6 +111,9 @@ func TestIncompleteStreamHTTP(t *testing.T) {
 				}
 				request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload)).WithContext(ctx)
 				request.Header.Set("Content-Type", "application/json")
+				if route.provider == "codex" && route.client == "responses" {
+					request.Header.Set("Originator", "codex_cli_rs")
+				}
 				router.ServeHTTP(writer, request)
 				body := writer.Body.String()
 				t.Logf("client response: %s", body)
@@ -142,10 +145,18 @@ func TestIncompleteStreamHTTP(t *testing.T) {
 					candidate := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 					if candidate.Get("error").Exists() {
 						detail = candidate.Get("error")
+					} else if candidate.Get("response.error").Exists() {
+						detail = candidate.Get("response.error")
 					}
 				}
 				if !detail.Exists() {
 					t.Fatalf("missing client error event: %s", body)
+				}
+				if retryable := detail.Get("retryable"); !retryable.IsBool() || !retryable.Bool() {
+					t.Fatalf("missing retryable:true for incomplete stream: %s", body)
+				}
+				if route.provider == "codex" && route.client == "responses" && (!strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, `"status":"failed"`)) {
+					t.Fatalf("missing response.failed with failed status: %s", body)
 				}
 				if mode == "read_error" && !strings.Contains(detail.Get("message").String(), "unexpected EOF") {
 					t.Fatalf("lost upstream read error: %s", body)
@@ -199,7 +210,7 @@ func incompleteStreamFixture(provider, model string) (string, string, string) {
 			frame(`{"id":"chat-proof","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`) + frame("[DONE]")
 	case "codex":
 		return frame(fmt.Sprintf(`{"type":"response.created","response":{"id":"resp-proof","model":%q}}`, model)),
-			frame(`{"type":"response.output_text.delta","item_id":"msg-proof","output_index":0,"content_index":0,"delta":"partial-two"}`),
+			frame(`{"type":"response.output_text.delta","item_id":"msg-proof","output_index":0,"content_index":0,"delta":"partial-two"}`) + frame(`{"type":"response.output_text.delta","item_id":"msg-proof","output_index":0,"content_index":0,"delta":"partial-three"}`),
 			frame(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-proof","model":%q,"status":"completed","output":[]}}`, model))
 	default:
 		return frame(fmt.Sprintf(`{"type":"message_start","message":{"id":"msg-proof","model":%q,"role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`, model)),

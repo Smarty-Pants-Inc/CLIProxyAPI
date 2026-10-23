@@ -25,9 +25,9 @@ import (
 //
 // The emitted terminal frame must not claim the client's request was invalid.
 // PR #174 deliberately replaces request_timeout/server_error after partial output
-// with upstream_stream_incomplete and progress metadata. This identifies the
-// interrupted upstream stream without promising that replaying a partial tool
-// call is safe; it must remain distinct from invalid_request_error.
+// with upstream_stream_incomplete, retryable:true and progress metadata. Missing
+// the terminal event is a transient upstream failure: allow the client to retry
+// the turn rather than kill a long agent session. It is not invalid_request_error.
 func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	const model = "gpt-5.4"
 	events := []string{
@@ -74,11 +74,38 @@ func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses",
 		strings.NewReader(fmt.Sprintf(`{"model":%q,"input":"hello","stream":true}`, model)))
 	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("Originator", "codex_cli_rs")
 
 	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
 	openaihandlers.NewOpenAIResponsesAPIHandler(base).Responses(c)
 
-	detail := terminalStreamErrorDetail(t, recorder.Body.String())
+	body := recorder.Body.String()
+	failed := false
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var payload struct {
+			Type     string `json:"type"`
+			Response struct {
+				Status string `json:"status"`
+			} `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &payload) == nil && payload.Type == "response.failed" {
+			if payload.Response.Status != "failed" {
+				t.Fatalf("response.failed status = %q, want failed", payload.Response.Status)
+			}
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("missing response.failed terminal: %s", body)
+	}
+	detail := terminalStreamErrorDetail(t, body)
+	if detail["retryable"] != true {
+		t.Fatalf("error.retryable = %v, want true for transient upstream EOF", detail["retryable"])
+	}
 	if got := detail["code"]; got != "upstream_stream_incomplete" {
 		t.Fatalf("error.code = %v, want %q (the stream was cut in transit)", got, "upstream_stream_incomplete")
 	}
