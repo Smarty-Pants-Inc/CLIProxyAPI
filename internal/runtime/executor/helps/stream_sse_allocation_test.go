@@ -124,10 +124,23 @@ func TestStreamSSEDataNativeBufferBounds(t *testing.T) {
 // Recorded catch: PR #174 S2. A corrupt 1 MB record followed by neutral lines
 // must not revalidate its entire pending prefix on each line.
 func TestStreamSSEDataPoisonedRecordLinear(t *testing.T) {
-	for _, tail := range []string{"0]]", "0] 0", `0] "`, "0,]"} {
-		t.Run(tail, func(t *testing.T) {
+	for _, fixture := range []struct {
+		tail   string
+		reopen bool
+	}{
+		{tail: "0]]", reopen: true},
+		{tail: "0] 0"},
+		{tail: "0,]"},
+	} {
+		t.Run(fixture.tail, func(t *testing.T) {
 			var state StreamSSEData
-			for _, line := range []string{"data: [", "data: " + strings.Repeat("0,", 1<<19), "data: " + tail, "data: ["} {
+			lines := []string{"data: [", "data: " + strings.Repeat("0,", 1<<19), "data: " + fixture.tail}
+			// Only the negative-depth fixture needs an opening bracket to
+			// return the old checkpoint to depth zero. The others stay there.
+			if fixture.reopen {
+				lines = append(lines, "data: [")
+			}
+			for _, line := range lines {
 				if _, ready := state.Observe([]byte(line)); ready {
 					t.Fatal("dispatched corrupt JSON")
 				}

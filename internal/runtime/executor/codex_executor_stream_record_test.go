@@ -21,7 +21,9 @@ func TestCodexStreamMultilineRecordLoggingAndKeepalive(t *testing.T) {
 			t.Run(fmt.Sprintf("buffered=%t/%s", buffered, format), func(t *testing.T) {
 				const keepalive = "data: {\"type\":\"keepalive\",\ndata: \"sequence_number\":1}\n\n"
 				const delta = "data: {\"type\":\"response.output_text.delta\",\ndata: \"output_index\":0,\"content_index\":0,\"delta\":\"whole-record\"}\n\n"
-				body := "data: " + codexCreatedEvent + "\n\n" + keepalive + delta + "data: " + codexCompletedEventBody + "\n\n"
+				createdLine := "data:\t  " + codexCreatedEvent
+				const singleLine = "data:\t {\"type\":\"response.output_text.delta\", \"output_index\":0,\"content_index\":0,\"delta\":\"single-line\"}"
+				body := createdLine + "\n\n" + keepalive + delta + singleLine + "\n\n" + "data: " + codexCompletedEventBody + "\n\n"
 				cfg := codexBufferingConfig(buffered)
 				cfg.RequestLog = true
 				ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -47,11 +49,13 @@ func TestCodexStreamMultilineRecordLoggingAndKeepalive(t *testing.T) {
 					t.Fatalf("API_RESPONSE = %#v, want captured bytes", logged)
 				}
 				for _, record := range []string{
+					createdLine + "\n",
+					singleLine + "\n",
 					`data: {"type":"keepalive","sequence_number":1}`,
 					`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"whole-record"}`,
 				} {
 					if !strings.Contains(string(logBytes), record) {
-						t.Errorf("log lost assembled record %s: %s", record, logBytes)
+						t.Errorf("log lost or rewrote record %q: %s", record, logBytes)
 					}
 				}
 			})

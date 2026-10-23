@@ -22,17 +22,20 @@ type StreamSSEData struct {
 	// is nonempty only for a multiline record, including intervening controls.
 	PreserveLines bool
 	Lines         [][]byte
-	ready         bool
-	wireBytes     int
-	Event         string
-	pending       []byte
-	hasData       bool
-	depth         int
-	inString      bool
-	escaped       bool
-	closed        bool
-	poisoned      bool
-	compact       bytes.Buffer
+	// Multiline reports whether the completed record joined multiple data lines.
+	Multiline bool
+	ready     bool
+	wireBytes int
+	Event     string
+	pending   []byte
+	hasData   bool
+	started   bool
+	depth     int
+	inString  bool
+	escaped   bool
+	closed    bool
+	poisoned  bool
+	compact   bytes.Buffer
 }
 
 func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
@@ -40,6 +43,8 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		clear(s.Lines)
 		s.Lines = s.Lines[:0]
 		s.ready = false
+		s.Multiline = false
+		s.started = false
 		s.wireBytes = 0
 		s.closed = false
 		s.poisoned = false
@@ -50,6 +55,8 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		s.Event = ""
 		s.pending = s.pending[:0]
 		s.hasData = false
+		s.Multiline = false
+		s.started = false
 		s.depth = 0
 		s.inString = false
 		s.escaped = false
@@ -88,6 +95,9 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 	// lines. Poison it until the blank boundary, so json.Valid scans at most
 	// once per record. Lexical balance alone does not imply valid JSON.
 	for _, b := range data {
+		if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+			s.started = true
+		}
 		if s.poisoned {
 			break
 		}
@@ -130,10 +140,11 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		s.pending = append(s.pending, data...)
 		data = s.pending
 	}
-	if !s.poisoned && !s.inString && s.depth == 0 && (bytes.Equal(data, []byte("[DONE]")) || json.Valid(data)) {
+	if s.started && !s.poisoned && !s.inString && s.depth == 0 && (bytes.Equal(data, []byte("[DONE]")) || json.Valid(data)) {
 		s.pending = s.pending[:0]
 		s.hasData = false
 		s.ready = true
+		s.Multiline = multiline
 		if multiline {
 			// Reuse storage: translated SSE must not contain bare JSON newlines.
 			s.compact.Reset()
@@ -143,7 +154,9 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 		}
 		return data, true
 	}
-	if !s.inString && s.depth == 0 && len(data) > 0 {
+	// Joined empty data lines contain separators, not a JSON value. Only
+	// poison after seeing a non-space data byte, keeping empty prefixes linear.
+	if s.started && !s.inString && s.depth == 0 {
 		s.poisoned = true
 	}
 	s.hasData = true
@@ -160,6 +173,8 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 func (s *StreamSSEData) overflow() ([]byte, bool) {
 	s.pending = s.pending[:0]
 	s.hasData = false
+	s.Multiline = false
+	s.started = false
 	s.depth = 0
 	s.inString = false
 	s.escaped = false

@@ -220,9 +220,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
 				continue
 			}
-			if completeData {
-				// Inspection completed a record, not necessarily this Scanner
-				// fragment. Logging, keepalive detection and budgets need it whole.
+			if completeData && sseData.Multiline {
+				// Assemble only split records for logging, keepalive and budgets.
+				// Single-line records retain their original bytes without a copy.
 				line = append([]byte("data: "), dataPayload...)
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -492,7 +492,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
 				continue
 			}
-			if completeData {
+			if completeData && sseData.Multiline {
 				line = append([]byte("data: "), dataPayload...)
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)

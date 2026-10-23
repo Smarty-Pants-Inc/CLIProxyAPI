@@ -25,12 +25,17 @@ import (
 // the real HTTP upstream -> executor -> auth manager -> client SSE boundary.
 func TestIncompleteStreamHTTP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, route := range []struct{ provider, client string }{
-		{"compat", "chat"}, {"codex", "responses"}, {"codex", "chat"}, {"codex", "messages"}, {"claude", "messages"},
-		{"compat", "responses"}, {"compat", "messages"}, {"claude", "chat"}, {"claude", "responses"},
+	for _, route := range []struct{ provider, client, originator string }{
+		{"compat", "chat", ""}, {"codex", "responses", "codex_cli_rs"}, {"codex", "chat", ""}, {"codex", "messages", ""}, {"claude", "messages", ""},
+		{"compat", "responses", ""}, {"compat", "messages", ""}, {"claude", "chat", ""}, {"claude", "responses", ""},
+		{"codex", "responses", "third_party_client"}, {"codex", "responses", ""},
 	} {
+		name := route.provider + "/" + route.client
+		if route.provider == "codex" && route.client == "responses" {
+			name += "/originator=" + route.originator
+		}
 		for _, mode := range []string{"truncated", "read_error", "complete", "cancel", "nonstream_error"} {
-			t.Run(route.provider+"/"+route.client+"/"+mode, func(t *testing.T) {
+			t.Run(name+"/"+mode, func(t *testing.T) {
 				model := "stream-incomplete-fixture"
 				if route.provider == "codex" {
 					model = "gpt-6-astra"
@@ -111,8 +116,8 @@ func TestIncompleteStreamHTTP(t *testing.T) {
 				}
 				request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload)).WithContext(ctx)
 				request.Header.Set("Content-Type", "application/json")
-				if route.provider == "codex" && route.client == "responses" {
-					request.Header.Set("Originator", "codex_cli_rs")
+				if route.originator != "" {
+					request.Header.Set("Originator", route.originator)
 				}
 				router.ServeHTTP(writer, request)
 				body := writer.Body.String()
@@ -155,7 +160,7 @@ func TestIncompleteStreamHTTP(t *testing.T) {
 				if retryable := detail.Get("retryable"); !retryable.IsBool() || !retryable.Bool() {
 					t.Fatalf("missing retryable:true for incomplete stream: %s", body)
 				}
-				if route.provider == "codex" && route.client == "responses" && (!strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, `"status":"failed"`)) {
+				if route.originator == "codex_cli_rs" && route.client == "responses" && (!strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, `"status":"failed"`)) {
 					t.Fatalf("missing response.failed with failed status: %s", body)
 				}
 				if mode == "read_error" && !strings.Contains(detail.Get("message").String(), "unexpected EOF") {

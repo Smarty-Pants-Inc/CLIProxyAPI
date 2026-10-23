@@ -38,6 +38,8 @@ func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string,
 		return ctx.Err()
 	}
 	message := fmt.Sprintf("upstream stream closed before %s (provider=%s, model=%s, upstream_status=%d, partial_bytes=%d, partial_chunks=%d)", terminal, provider, model, status, p.Bytes, p.Chunks)
+	// Retryable is a client hint, not permission for proxy replay:
+	// after partial output, a client retry may repeat an already-completed tool call; clients that execute tools must dedupe.
 	detail := map[string]any{"message": message, "type": "upstream_stream_incomplete", "code": "upstream_stream_incomplete", "retryable": true}
 	for key, value := range fields {
 		detail[key] = value
