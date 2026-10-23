@@ -322,7 +322,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			continue
 		}
 		// Latch before identity checks, translation, or observer callbacks.
-		if codexFrameCommitsUpstreamWork(gjson.GetBytes(payload, "type").String(), payload) {
+		if codexNonStreamFrameCommitsUpstreamWork(gjson.GetBytes(payload, "type").String(), payload) {
 			replaySafe = false
 		}
 		observeCodexTokenEvent(reporter, payload)

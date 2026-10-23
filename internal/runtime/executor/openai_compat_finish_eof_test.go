@@ -37,6 +37,7 @@ func TestOpenAICompatStreamFinishReasonEOF(t *testing.T) {
 			{name: "one_choice_unfinished", wire: first + second + finish},
 			{name: "later_choice_unfinished", wire: first + finish + second},
 			{name: "null_finish", wire: first},
+			{name: "empty_string_finish", wire: first + chunk(`[{"index":0,"delta":{},"finish_reason":""}]`)},
 			{name: "absent_finish", wire: chunk(`[{"index":0,"delta":{"content":"hello"}}]`)},
 			{name: "usage_only", wire: usage},
 			{name: "empty", wire: ""},

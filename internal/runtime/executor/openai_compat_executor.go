@@ -451,7 +451,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 		var seenDone bool
 		// Some compatible providers omit [DONE]. EOF is complete only when every
-		// observed choice has supplied a non-null finish_reason. Usage-only chunks
+		// observed choice has supplied a non-empty finish_reason. Usage-only chunks
 		// do not introduce a choice or erase its finish state.
 		finishedChoices := make(map[int64]bool)
 		var streamFailed bool
@@ -523,7 +523,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			for _, choice := range gjson.GetBytes(dataPayload, "choices").Array() {
 				index := choice.Get("index").Int()
 				finish := choice.Get("finish_reason")
-				finishedChoices[index] = finishedChoices[index] || (finish.Exists() && finish.Type != gjson.Null)
+				finishedChoices[index] = finishedChoices[index] || (finish.Exists() && finish.Type != gjson.Null && finish.String() != "")
 				if len(choice.Get("delta.tool_calls").Array()) > 0 || choice.Get("delta.function_call").Exists() {
 					upstreamWork = true
 				}

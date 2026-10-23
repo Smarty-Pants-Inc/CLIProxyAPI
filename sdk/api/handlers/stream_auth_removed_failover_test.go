@@ -121,7 +121,7 @@ func TestStreamCredentialRemovedMidRequestFailover(t *testing.T) {
 			ctx := context.Background()
 			if provider == "codex" {
 				resp, err := manager.Execute(ctx, []string{provider}, req, opts)
-				if work != "" {
+				if work != "" && work != "function_call" && work != "custom_tool_call" {
 					var stop interface{ IsRequestStop() bool }
 					if err == nil || !errors.As(err, &stop) || !stop.IsRequestStop() || len(resp.Payload) != 0 {
 						t.Fatalf("upstream work replayed or lost stop marker: err=%v body=%s", err, resp.Payload)
@@ -149,7 +149,7 @@ func TestStreamCredentialRemovedMidRequestFailover(t *testing.T) {
 			got := append([]string(nil), attempts...)
 			mu.Unlock()
 			want := []string{"account-a", "account-b"}
-			if work != "" {
+			if work != "" && work != "function_call" && work != "custom_tool_call" {
 				want = []string{"account-a"}
 			}
 			t.Logf("REMOVAL provider=%s work=%s attempts=%v", provider, work, got)
