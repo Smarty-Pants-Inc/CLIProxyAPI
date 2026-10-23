@@ -92,17 +92,16 @@ func claudeMessageIDFromResponse(data []byte) string {
 	return strings.TrimSpace(gjson.GetBytes(data, "id").String())
 }
 
-func observeClaudeStreamLine(line []byte, messageID *string, completed *bool) {
-	line = bytes.TrimSpace(line)
-	if !bytes.HasPrefix(line, []byte("data:")) {
-		return
-	}
-	payload := bytes.TrimSpace(line[len("data:"):])
+func observeClaudeStreamEvent(payload []byte, event string, messageID *string, completed *bool) {
 	if !gjson.ValidBytes(payload) {
 		return
 	}
 	root := gjson.ParseBytes(payload)
-	switch root.Get("type").String() {
+	kind := root.Get("type").String()
+	if kind == "" {
+		kind = event
+	}
+	switch kind {
 	case "message_start":
 		if id := strings.TrimSpace(root.Get("message.id").String()); id != "" {
 			*messageID = id
@@ -115,8 +114,14 @@ func observeClaudeStreamLine(line []byte, messageID *string, completed *bool) {
 func claudeMessageIDFromSSE(data []byte) string {
 	var messageID string
 	completed := false
+	var state helps.StreamSSEEvent
 	for _, line := range bytes.Split(data, []byte("\n")) {
-		observeClaudeStreamLine(line, &messageID, &completed)
+		if payload, ready := state.Observe(line); ready {
+			observeClaudeStreamEvent(payload, state.Event, &messageID, &completed)
+		}
+	}
+	if payload, ready := state.Flush(); ready {
+		observeClaudeStreamEvent(payload, state.Event, &messageID, &completed)
 	}
 	if !completed {
 		return ""

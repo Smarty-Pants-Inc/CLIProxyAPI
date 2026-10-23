@@ -305,8 +305,12 @@ func TestCodexWebsocketCloseArbitrationFinalRefusal(t *testing.T) {
 					break
 				}
 			}
-			if err != nil || !strings.Contains(string(payload), "original refusal") || !strings.Contains(string(payload), strings.TrimPrefix(code, "explicit:")) {
-				t.Fatalf("original refusal before close = %s, %v", payload, err)
+			wantMessage := "original refusal"
+			if code == "invalid_request_error" {
+				wantMessage = "upstream request rejected: invalid_request_error"
+			}
+			if err != nil || !strings.Contains(string(payload), wantMessage) || !strings.Contains(string(payload), strings.TrimPrefix(code, "explicit:")) {
+				t.Fatalf("classified refusal before close = %s, %v", payload, err)
 			}
 			if _, _, err := c.ReadMessage(); err == nil {
 				t.Fatal("final refusal did not close downstream")
@@ -529,7 +533,7 @@ func TestCodexWebsocketHTTPFallbackOutputQuotaRefusal(t *testing.T) {
 				if !sawOutput {
 					t.Error("fallback output did not reach the client before the refusal")
 				}
-				if err != nil || !strings.Contains(string(payload), code) || !strings.Contains(string(payload), "fallback refusal") {
+				if err != nil || gjson.GetBytes(payload, "error.code").String() != code || gjson.GetBytes(payload, "error.message").String() != "upstream rate limited: "+code || !gjson.GetBytes(payload, "error.retryable").Bool() {
 					t.Fatalf("fallback refusal before close = %s, %v", payload, err)
 				}
 				if _, _, err := c.ReadMessage(); err == nil {

@@ -23,10 +23,11 @@ import (
 // handler against an upstream that stops mid function-call arguments without ever
 // sending response.completed, which is the failure Codex clients see in the wild.
 //
-// The emitted terminal frame must not claim the client's request was invalid. The
-// stream was cut in transit, so the request may be replayed, and every downstream
-// consumer keys retry off the OpenAI error taxonomy: "invalid_request_error" means
-// "do not retry", which turns a recoverable transport fault into a hard failure.
+// The emitted terminal frame must not claim the client's request was invalid.
+// PR #174 deliberately replaces request_timeout/server_error after partial output
+// with upstream_stream_incomplete, retryable:true and progress metadata. Missing
+// the terminal event is a transient upstream failure: allow the client to retry
+// the turn rather than kill a long agent session. It is not invalid_request_error.
 func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	const model = "gpt-5.4"
 	events := []string{
@@ -73,19 +74,54 @@ func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses",
 		strings.NewReader(fmt.Sprintf(`{"model":%q,"input":"hello","stream":true}`, model)))
 	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("Originator", "codex_cli_rs")
 
 	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
 	openaihandlers.NewOpenAIResponsesAPIHandler(base).Responses(c)
 
-	detail := terminalStreamErrorDetail(t, recorder.Body.String())
-	if got := detail["code"]; got != "request_timeout" {
-		t.Fatalf("error.code = %v, want %q (the stream was cut in transit)", got, "request_timeout")
+	body := recorder.Body.String()
+	failed := false
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var payload struct {
+			Type     string `json:"type"`
+			Response struct {
+				Status string `json:"status"`
+			} `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &payload) == nil && payload.Type == "response.failed" {
+			if payload.Response.Status != "failed" {
+				t.Fatalf("response.failed status = %q, want failed", payload.Response.Status)
+			}
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("missing response.failed terminal: %s", body)
+	}
+	detail := terminalStreamErrorDetail(t, body)
+	if detail["retryable"] != true {
+		t.Fatalf("error.retryable = %v, want true for transient upstream EOF", detail["retryable"])
+	}
+	if got := detail["code"]; got != "upstream_stream_incomplete" {
+		t.Fatalf("error.code = %v, want %q (the stream was cut in transit)", got, "upstream_stream_incomplete")
 	}
 	if got := detail["type"]; got == "invalid_request_error" {
 		t.Fatalf("error.type = %q for a truncated stream: the request was well formed, and this type tells every downstream client not to retry", got)
 	}
-	if got := detail["type"]; got != "server_error" {
-		t.Fatalf("error.type = %v, want %q so the failure is classified as retryable", got, "server_error")
+	if got := detail["type"]; got != "upstream_stream_incomplete" {
+		t.Fatalf("error.type = %v, want %q for an interrupted upstream stream", got, "upstream_stream_incomplete")
+	}
+	if detail["provider"] != "codex" || detail["model"] != model || detail["upstream_status"] != float64(http.StatusOK) {
+		t.Fatalf("lost upstream identity/status: %v", detail)
+	}
+	for _, key := range []string{"partial_bytes", "partial_chunks"} {
+		if got, ok := detail[key].(float64); !ok || got <= 0 {
+			t.Fatalf("error.%s = %v, want positive partial-output progress", key, detail[key])
+		}
 	}
 }
 

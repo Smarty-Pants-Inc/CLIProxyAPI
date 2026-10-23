@@ -42,12 +42,28 @@ var (
 	secretFieldLogPattern  = regexp.MustCompile(`(?i)((?:key|sig|signature|auth|session)["']?\s*[:=]\s*["']?)[A-Za-z0-9+/_.~-]{16,}={0,2}`)
 	opaqueBase64LogPattern = regexp.MustCompile(`[A-Za-z0-9+/_-]{32,}={0,2}`)
 	hexRequestIDLogPattern = regexp.MustCompile(`^[0-9A-Fa-f]{32}$`)
+
+	upstreamURLLogPattern      = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
+	upstreamIdentityLogPattern = regexp.MustCompile(`(?i)\b(?:acct_|org_|sk-|proj_)[a-z0-9_-]+`)
+	upstreamKeyLogPattern      = regexp.MustCompile(`[A-Za-z0-9+/_-]{20,}={0,2}`)
 )
 
 // SafeDiagnosticForLog returns a bounded, single-line diagnostic suitable for
 // ordinary application logs. It preserves the access-token-expired signal while
 // redacting credential values and URL userinfo.
 func SafeDiagnosticForLog(message string) string {
+	return safeDiagnosticForLog(message, false)
+}
+
+// SafeUpstreamDiagnosticForLog is for server-only upstream prose. In addition
+// to ordinary redaction, it removes whole URLs, prose identities and opaque
+// 20+ character keys, without the ordinary diagnostic request-ID exemption.
+// Neither diagnostic helper is a public client-message security boundary.
+func SafeUpstreamDiagnosticForLog(message string) string {
+	return safeDiagnosticForLog(message, true)
+}
+
+func safeDiagnosticForLog(message string, upstream bool) string {
 	excerpt, sourceTruncated := diagnosticRunePrefix(message, diagnosticLogScanRuneLimit)
 	if sourceTruncated && !accessTokenExpiredLogPattern.MatchString(excerpt) {
 		if marker := accessTokenExpiredLogPattern.FindString(message); marker != "" {
@@ -60,6 +76,13 @@ func SafeDiagnosticForLog(message string) string {
 		return ""
 	}
 	excerpt = decodeDiagnosticEscapes(excerpt)
+	if upstream {
+		// Redact after decoding but before truncation or ordinary redaction
+		// can obscure a URL's scheme or shorten a token below its threshold.
+		for _, pattern := range []*regexp.Regexp{upstreamURLLogPattern, emailLogPattern, upstreamIdentityLogPattern} {
+			excerpt = pattern.ReplaceAllString(excerpt, "[REDACTED]")
+		}
+	}
 	excerpt = urlUserinfoLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]@`)
 	excerpt = sensitiveLogAssignmentPattern.ReplaceAllString(excerpt, `${1}"[REDACTED]"`)
 	excerpt = authorizationLogPattern.ReplaceAllString(excerpt, `${1} [REDACTED]`)
@@ -69,6 +92,9 @@ func SafeDiagnosticForLog(message string) string {
 	}
 	excerpt = secretFieldLogPattern.ReplaceAllString(excerpt, `${1}[REDACTED]`)
 	excerpt = opaqueBase64LogPattern.ReplaceAllStringFunc(excerpt, redactOpaqueBase64)
+	if upstream {
+		excerpt = upstreamKeyLogPattern.ReplaceAllString(excerpt, "[REDACTED]")
+	}
 
 	return truncateDiagnosticLogExcerpt(excerpt, sourceTruncated)
 }

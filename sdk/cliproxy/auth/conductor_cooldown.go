@@ -1613,6 +1613,13 @@ func isConnectionLifecycleError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Executors may explicitly identify replay-safe, pre-output transport cuts.
+	// Unlike the message fallback below, this typed signal is safe with a proxy
+	// HTTP status (e.g. 502) and does not stop credential rotation.
+	var lifecycle interface{ IsConnectionLifecycle() bool }
+	if errors.As(err, &lifecycle) && lifecycle.IsConnectionLifecycle() {
+		return true
+	}
 	// Typed WebSocket close codes are an unambiguous connection lifecycle signal.
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) && closeErr != nil {

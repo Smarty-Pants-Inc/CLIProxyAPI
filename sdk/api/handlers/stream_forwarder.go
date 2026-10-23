@@ -108,11 +108,20 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 
 	var terminalErr *interfaces.ErrorMessage
 	for {
+		// Cancellation wins over a simultaneously ready close/error channel.
+		if err := c.Request.Context().Err(); err != nil {
+			cancel(err)
+			return
+		}
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return
 		case chunk, ok := <-data:
+			if err := c.Request.Context().Err(); err != nil {
+				cancel(err)
+				return
+			}
 			if !ok {
 				// Prefer surfacing a terminal error if one is pending.
 				if terminalErr == nil {
@@ -168,6 +177,10 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				return
 			}
 		case errMsg, ok := <-errs:
+			if err := c.Request.Context().Err(); err != nil {
+				cancel(err)
+				return
+			}
 			if !ok {
 				errs = nil
 				continue

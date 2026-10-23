@@ -748,7 +748,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
+				// A non-replayable stop must not refresh and retry the same request.
+				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized || isRequestStopError(errExec)); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
@@ -789,6 +790,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					m.MarkResult(execCtx, result)
+				}
+				// Record normal cooling before stopping; a stop need not be request-scoped.
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1202,6 +1207,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		releaseAttempt := func() {}
+		streamOwnsAttempt := false
 		if selection != nil {
 			var errBind error
 			execCtx, releaseAttempt, errBind = homeExecutionAttemptContext(ctx, selection)
@@ -1209,6 +1215,22 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				selection.End("attempt_bind_failed")
 				return nil, errBind
 			}
+			releaseTerminal := selection.holdStreamTerminalDelivery()
+			releaseBoundAttempt := releaseAttempt
+			releaseAttempt = sync.OnceFunc(func() {
+				releaseBoundAttempt()
+				releaseTerminal()
+			})
+			defer func() {
+				if panicValue := recover(); panicValue != nil {
+					releaseAttempt()
+					selection.End("execution_panicked")
+					panic(panicValue)
+				}
+				if !streamOwnsAttempt {
+					releaseAttempt()
+				}
+			}()
 		}
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -1400,10 +1422,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		if selection != nil {
+			streamSelection := selection
 			if m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
-				return wrapHomeStream(ctx, streamResult, nil, releaseAttempt), nil
+				streamSelection = nil
 			}
-			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
+			wrapped := wrapHomeStream(ctx, streamResult, streamSelection, releaseAttempt)
+			// The stream consumer now owns terminal delivery and attempt release.
+			streamOwnsAttempt = true
+			return wrapped, nil
 		}
 		return streamResult, nil
 	}

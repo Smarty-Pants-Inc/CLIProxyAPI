@@ -129,6 +129,22 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			selection.End("attempt_bind_failed")
 			return cliproxyexecutor.Response{}, errBind
 		}
+		// Socket retirement must not cancel the attempt before its terminal error
+		// and Home result are recorded (non-stream twin of the stream hold).
+		releaseTerminal := selection.holdStreamTerminalDelivery()
+		releaseBoundAttempt := releaseAttempt
+		releaseAttempt = sync.OnceFunc(func() {
+			releaseBoundAttempt()
+			releaseTerminal()
+		})
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				releaseAttempt()
+				selection.End("execution_panicked")
+				panic(panicValue)
+			}
+			releaseAttempt()
+		}()
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = newUpstreamAttemptContext(execCtx)
@@ -283,6 +299,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
+			// Report normal cooling before stopping; a stop need not be request-scoped.
+			if isRequestStopError(errExecute) {
+				releaseAttempt()
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, errExecute
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					releaseAttempt()

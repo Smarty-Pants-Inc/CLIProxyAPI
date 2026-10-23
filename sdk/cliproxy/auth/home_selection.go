@@ -146,6 +146,12 @@ type HomeDispatchSelection struct {
 	modelInfo                  *registry.ModelInfo
 	configurationUpdateSupport *bool
 
+	// Socket retirement must not cancel an active stream's terminal delivery.
+	// External scope drains and explicit request stops still end immediately.
+	streamEndMu     sync.Mutex
+	streamEndHolds  int
+	streamEndReason string
+
 	authMu           sync.RWMutex
 	scope            *executionregistry.Scope
 	accountedModel   string
@@ -236,7 +242,50 @@ func (s *HomeDispatchSelection) Active() bool {
 
 // End closes all bound resources and releases the Home execution scope once.
 func (s *HomeDispatchSelection) End(reason string) {
+	if s != nil {
+		s.streamEndMu.Lock()
+		if s.streamEndHolds > 0 && isHomeStreamSocketEnd(reason) {
+			s.streamEndReason = reason
+			s.streamEndMu.Unlock()
+			return
+		}
+		s.streamEndMu.Unlock()
+	}
 	_ = s.EndWithRelease(reason)
+}
+
+func isHomeStreamSocketEnd(reason string) bool {
+	switch reason {
+	case "upstream_disconnected", "read_error", "unexpected_binary", "terminal_failure", "upstream_error", "terminal_empty_incomplete", "model_integrity":
+		return true
+	}
+	return false
+}
+
+// holdStreamTerminalDelivery delays only executor socket-retirement End calls.
+// The socket itself is already closed; keep the attempt alive until the
+// conductor has recorded and delivered its terminal error. Registry drains
+// bypass End and still cancel all selection resources immediately.
+func (s *HomeDispatchSelection) holdStreamTerminalDelivery() func() {
+	s.streamEndMu.Lock()
+	s.streamEndHolds++
+	s.streamEndMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.streamEndMu.Lock()
+			s.streamEndHolds--
+			reason := ""
+			if s.streamEndHolds == 0 {
+				reason = s.streamEndReason
+				s.streamEndReason = ""
+			}
+			s.streamEndMu.Unlock()
+			if reason != "" {
+				s.End(reason)
+			}
+		})
+	}
 }
 
 // EndWithRelease closes all bound resources and returns the Home release ticket.
