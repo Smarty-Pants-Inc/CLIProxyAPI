@@ -75,7 +75,7 @@ func buildV8Paths() []configPath {
 		{"github-token", "server.github-token"},
 		{"tls", "server.tls"}, {"commercial-mode", "server.commercial-mode"}, {"discovery", "server.discovery"},
 		{"remote-management", "management"}, {"api-keys", "access.api-keys"},
-		{"api-key-policies", "access.api-key-policies"},
+		{"api-key-policies", "access.api-key-policies"}, {"api-key-routes", "access.api-key-routes"},
 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
 		{"force-model-prefix", "routing.force-model-prefix"},
 		{"request-retry", "routing.retry.request-retry"}, {"max-retry-credentials", "routing.retry.max-retry-credentials"},
@@ -916,6 +916,9 @@ func ValidateV8Config(data []byte) error {
 	var cfg legacyConfig
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
 		return errDecode
+	}
+	if errValidate := (*Config)(&cfg).ValidateAPIKeyRoutes(); errValidate != nil {
+		return errValidate
 	}
 	return cfg.Models.Validate()
 }

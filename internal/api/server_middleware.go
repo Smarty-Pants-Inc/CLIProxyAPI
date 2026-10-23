@@ -131,20 +131,78 @@ func isExampleAPIKeySafeModeProxyPath(path string) bool {
 //
 // Returns:
 //   - gin.HandlerFunc: The CORS middleware handler
-func corsMiddleware() gin.HandlerFunc {
+func corsMiddleware(preflightRouteDenied func(*gin.Context) bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")
 		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
 
-		if c.Request.Method == "OPTIONS" {
+		if c.Request.Method == http.MethodOptions {
+			if preflightRouteDenied != nil && preflightRouteDenied(c) {
+				return
+			}
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 
 		c.Next()
 	}
+}
+
+// preflightRouteDenied performs only authentication and route authorization.
+// CORS still terminates every other preflight without handlers or quota admission.
+func (s *Server) preflightRouteDenied(c *gin.Context) bool {
+	path := c.Request.URL.Path
+	if !isExampleAPIKeySafeModeProxyPath(path) {
+		attached := false
+		normalizedPath := strings.TrimRight(path, "/")
+		s.wsRouteMu.Lock()
+		for wsPath := range s.wsRoutes {
+			if strings.TrimRight(wsPath, "/") == normalizedPath {
+				attached = true
+				break
+			}
+		}
+		s.wsRouteMu.Unlock()
+		if !attached {
+			return false
+		}
+	}
+	if isRealtimeClientSecretPath(path) {
+		authorization, matched, errAuthenticate := s.codexLiveHandler.AuthenticateClientSecret(c.Request)
+		if matched {
+			return errAuthenticate == nil && abortAPIKeyRouteDenied(c, authorizeClientSecretRoutes(s.accessManager, authorization, c.Request))
+		}
+	}
+	if !s.accessManager.RequestHasRouteKey(c.Request) {
+		return false
+	}
+	_, errAuthenticate := s.accessManager.Authenticate(c.Request.Context(), c.Request)
+	return abortAPIKeyRouteDenied(c, errAuthenticate)
+}
+
+// Only these realtime paths accept derived credentials, rather than client keys only.
+func isRealtimeClientSecretPath(path string) bool {
+	path = strings.TrimRight(path, "/")
+	switch path {
+	case "/v1/realtime", "/v1/realtime/calls", "/v1/realtime/translations":
+		return true
+	}
+	callID, isCall := strings.CutPrefix(path, "/v1/realtime/calls/")
+	return isCall && callID != "" && !strings.Contains(callID, "/")
+}
+
+func authorizeClientSecretRoutes(manager *sdkaccess.Manager, authorization codexlive.ClientSecretAuthorization, request *http.Request) *sdkaccess.AuthError {
+	if authorization.IssuerRouteKeyAttributionKnown || len(authorization.IssuerRouteKeyDigests) != 0 {
+		return manager.AuthorizeRouteKeyDigests(authorization.IssuerRouteKeyDigests, request)
+	}
+	// Only native legacy issuers are known to use a raw key as their principal.
+	// In particular, a plugin's mapped account is not fallback key attribution.
+	if coreusage.IsNativeAccessProvider(authorization.IssuerProvider) {
+		return manager.AuthorizeAPIKeyRoutes(authorization.IssuerPrincipal, request)
+	}
+	return nil
 }
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
@@ -170,6 +228,7 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core .
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
+				c.Set(sdkaccess.RouteKeyDigestsContextKey, result.RouteKeyDigests)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
@@ -187,6 +246,9 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core .
 			return
 		}
 
+		if abortAPIKeyRouteDenied(c, err) {
+			return
+		}
 		statusCode := err.HTTPStatusCode()
 		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)
@@ -210,6 +272,20 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core .
 	}
 }
 
+// Route denials have the same structured error on normal and realtime surfaces.
+func abortAPIKeyRouteDenied(c *gin.Context, err *sdkaccess.AuthError) bool {
+	if !sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeAPIKeyRouteDenied) {
+		return false
+	}
+	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{
+		"message": err.Message,
+		"type":    "permission_error",
+		"param":   nil,
+		"code":    string(err.Code),
+	}})
+	return true
+}
+
 func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler, core ...*auth.Manager) gin.HandlerFunc {
 	fallback := realtimeStandardAuthMiddleware(manager, core...)
 	return func(c *gin.Context) {
@@ -230,6 +306,9 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		principal := authorization.IssuerPrincipal
 		if principal == "" {
 			principal = authorization.Principal
+		}
+		if abortAPIKeyRouteDenied(c, authorizeClientSecretRoutes(manager, authorization, c.Request)) {
+			return
 		}
 		provider := authorization.IssuerProvider
 		if provider == "" {
