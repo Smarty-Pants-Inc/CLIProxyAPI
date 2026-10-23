@@ -1214,6 +1214,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				selection.End("attempt_bind_failed")
 				return nil, errBind
 			}
+			releaseTerminal := selection.holdStreamTerminalDelivery()
+			releaseBoundAttempt := releaseAttempt
+			releaseAttempt = func() {
+				releaseBoundAttempt()
+				releaseTerminal()
+			}
 		}
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)

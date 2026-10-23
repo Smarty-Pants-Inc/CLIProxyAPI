@@ -283,6 +283,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
+			// Report normal cooling before stopping; a stop need not be request-scoped.
+			if isRequestStopError(errExecute) {
+				releaseAttempt()
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, errExecute
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					releaseAttempt()
