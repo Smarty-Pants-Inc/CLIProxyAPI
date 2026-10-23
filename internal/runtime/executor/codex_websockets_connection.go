@@ -113,6 +113,8 @@ func mapCodexWebsocketReadError(err error) error {
 	if err == nil {
 		return nil
 	}
+	// Credential removal closes a local session too, but is repairable by
+	// rotating credentials. Only a genuine size limit is request-scoped.
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) && closeErr.Code == websocket.CloseMessageTooBig {
 		return codexWebsocketMessageTooBigError{statusErr: statusErr{
@@ -168,7 +170,7 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 			return 0, nil, ctx.Err()
 		case ev, ok := <-readCh:
 			if !ok {
-				return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
+				return 0, nil, helps.ErrCodexWebsocketSessionClosed
 			}
 			if ev.conn != conn {
 				continue

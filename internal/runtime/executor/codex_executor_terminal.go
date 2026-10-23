@@ -228,6 +228,19 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	return body, true
 }
 
+// Ported from router-for-me/CLIProxyAPI#6033: SSE event names are also
+// authoritative for typeless error payloads.
+func codexSSETerminalFailureErrWithCooling(eventData []byte, sseEventType string, modelLevelCooling bool) (statusErr, []byte, bool) {
+	if gjson.GetBytes(eventData, "type").String() == "" && strings.EqualFold(strings.TrimSpace(sseEventType), "error") {
+		var errSet error
+		eventData, errSet = sjson.SetBytes(eventData, "type", "error")
+		if errSet != nil {
+			return statusErr{}, nil, false
+		}
+	}
+	return codexTerminalFailureErrWithCooling(eventData, modelLevelCooling)
+}
+
 func codexTerminalStreamErrShouldHandle(body []byte) bool {
 	if codexTerminalErrorIsContextLength(body) {
 		return true
@@ -562,6 +575,51 @@ func codexFrameCommitsUpstreamWork(eventType string, payload []byte) bool {
 	}
 }
 
+// codexNonStreamFrameCommitsUpstreamWork is separate from the stream replay latch:
+// non-stream model output has not reached the client, and function/custom-tool calls
+// execute on the client only after completion. Neither can have side effects yet.
+// Unknown events/items remain non-replayable, including future server-side tools.
+func codexNonStreamFrameCommitsUpstreamWork(eventType string, payload []byte) bool {
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return false
+	}
+	switch eventType {
+	case "error", "codex.rate_limits", "codex.response.metadata", "keepalive",
+		"response.output_text.delta", "response.output_text.done", "response.output_text.annotation.added",
+		"response.refusal.delta", "response.refusal.done",
+		"response.reasoning_text.delta", "response.reasoning_text.done",
+		"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+		"response.function_call_arguments.delta", "response.function_call_arguments.done",
+		"response.custom_tool_call_input.delta", "response.custom_tool_call_input.done":
+		return false
+	case "response.created", "response.in_progress", "response.completed", "response.done", "response.incomplete", "response.failed":
+		for _, item := range gjson.GetBytes(payload, "response.output").Array() {
+			if !isCodexNonStreamModelOnlyItem(item) {
+				return true
+			}
+		}
+		return false
+	case "response.output_item.added", "response.output_item.done":
+		return !isCodexNonStreamModelOnlyItem(gjson.GetBytes(payload, "item"))
+	case "response.content_part.added", "response.content_part.done",
+		"response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+		switch gjson.GetBytes(payload, "part.type").String() {
+		case "output_text", "summary_text", "text", "reasoning_text", "refusal":
+			return false
+		}
+	}
+	return true
+}
+
+func isCodexNonStreamModelOnlyItem(item gjson.Result) bool {
+	switch item.Get("type").String() {
+	case "message", "reasoning", "function_call", "custom_tool_call":
+		return true
+	default:
+		return false
+	}
+}
+
 // isCodexBufferableOutputItem reports whether an announced output item is one the model produces by
 // itself and has not started producing, so nothing is running upstream yet. The emptiness checks
 // follow the ones IsResponsesTokenEvent applies to response.output_item.done, extended to the
@@ -579,10 +637,6 @@ func isCodexBufferableOutputItem(item gjson.Result) bool {
 			return false
 		}
 		return isCodexEmptyContentList(item.Get("summary")) && isCodexEmptyContentList(item.Get("content"))
-	case "function_call":
-		return item.Get("arguments").String() == ""
-	case "custom_tool_call":
-		return item.Get("input").String() == ""
 	default:
 		return false
 	}

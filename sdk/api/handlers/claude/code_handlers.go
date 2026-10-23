@@ -332,9 +332,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 }
 
 type claudeErrorDetail struct {
-	Type    string              `json:"type"`
-	Message string              `json:"message"`
-	Details *claudeErrorDetails `json:"details,omitempty"`
+	Type      string              `json:"type"`
+	Code      string              `json:"code,omitempty"`
+	Message   string              `json:"message"`
+	Retryable *bool               `json:"retryable,omitempty"`
+	Details   *claudeErrorDetails `json:"details,omitempty"`
 }
 
 type claudeErrorDetails struct {
@@ -367,6 +369,12 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 			Type:    errType,
 			Message: message,
 		},
+	}
+	detail := gjson.Get(errText, "error")
+	response.Error.Code = detail.Get("code").String()
+	if retryable := detail.Get("retryable"); retryable.IsBool() {
+		value := retryable.Bool()
+		response.Error.Retryable = &value
 	}
 	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
 		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
@@ -483,6 +491,9 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 		}
 	}
 
+	if errType == "upstream_stream_incomplete" {
+		errType = "api_error"
+	}
 	return errType, message
 }
 

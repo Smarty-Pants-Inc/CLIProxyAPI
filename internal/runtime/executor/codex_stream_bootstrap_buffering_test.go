@@ -934,8 +934,6 @@ func TestIsCodexBootstrapBufferableEvent(t *testing.T) {
 		codexKeepaliveEvent,
 		codexOutputAddedEvent,
 		`{"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`,
-		`{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","arguments":""}}`,
-		`{"type":"response.output_item.added","item":{"id":"ct_1","type":"custom_tool_call","input":""}}`,
 		`{"type":"response.output_item.added","item":{"id":"msg_2","type":"message","content":[{"type":"output_text","text":""}]}}`,
 		`{"type":"response.output_item.added","item":{"id":"msg_3","type":"message","content":[{"type":"refusal","refusal":""}]}}`,
 		`{"type":"response.output_item.added","item":{"id":"rs_2","type":"reasoning","summary":[{"type":"summary_text","text":""}]}}`,
@@ -955,6 +953,8 @@ func TestIsCodexBootstrapBufferableEvent(t *testing.T) {
 	}
 
 	release := []string{
+		`{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","arguments":""}}`,
+		`{"type":"response.output_item.added","item":{"id":"ct_1","type":"custom_tool_call","input":""}}`,
 		`{"type":"response.output_text.delta","delta":"hi"}`,
 		`{"type":"response.reasoning_summary_text.delta","delta":"x"}`,
 		`{"type":"response.shell_call_command.delta","delta":"ls"}`,

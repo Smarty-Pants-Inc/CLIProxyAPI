@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -366,7 +367,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		responseBody, err = helps.GuardClaudeModelStream(decodedBody, gjson.GetBytes(bodyForUpstream, "model").String())
 		if err != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
-			if _, identityFailure := err.(*helps.ClaudeModelMismatchError); identityFailure {
+			var mismatch *helps.ClaudeModelMismatchError
+			if errors.As(err, &mismatch) {
 				return resp, err
 			}
 			status := httpResp.StatusCode
@@ -379,7 +381,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	data, err := io.ReadAll(responseBody)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		if _, identityFailure := err.(*helps.ClaudeModelMismatchError); identityFailure {
+		var mismatch *helps.ClaudeModelMismatchError
+		if errors.As(err, &mismatch) {
 			return resp, err
 		}
 		return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)

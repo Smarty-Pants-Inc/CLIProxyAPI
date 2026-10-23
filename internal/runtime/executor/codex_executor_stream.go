@@ -198,9 +198,33 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	sawOutputDelta := false
+	// Native Responses retain the original Scanner units when inspection does
+	// not change the payload. Assembling for inspection must not rewrite them.
+	nativeResponses := responseFormat == sdktranslator.FormatOpenAIResponse
+	sseData := helps.StreamSSEData{PreserveLines: nativeResponses}
+	translateLine := func(line, dataPayload []byte) [][]byte {
+		if nativeResponses && len(sseData.Lines) > 0 && bytes.HasPrefix(line, dataTag) && bytes.Equal(bytes.TrimSpace(line[5:]), dataPayload) {
+			var chunks [][]byte
+			for _, original := range sseData.Lines {
+				original = applyCodexIdentityExposeResponsePayload(original, identityState)
+				chunks = append(chunks, helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, original, &param, claudeInputTokens)...)
+			}
+			return chunks
+		}
+		return helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, line, &param, claudeInputTokens)
+	}
 	if buffering || !modelGuard.Authoritative() {
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+			dataPayload, completeData := sseData.Observe(line)
+			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
+				continue
+			}
+			if completeData && sseData.Multiline {
+				// Assemble only split records for logging, keepalive and budgets.
+				// Single-line records retain their original bytes without a copy.
+				line = append([]byte("data: "), dataPayload...)
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			isHandshake := false
@@ -209,8 +233,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
 				isHandshake = true
-			} else if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
+			} else if completeData {
+				data := dataPayload
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				eventType := gjson.GetBytes(data, "type").String()
@@ -223,7 +247,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return nil, modelErr
 				}
 				translatedLine = append([]byte("data: "), data...)
-				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling()); ok {
+				if streamErr, terminalBody, ok := codexSSETerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(data, identityState), sseData.Event, e.modelLevelCooling()); ok {
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -253,7 +277,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						}
 						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}
-					bootstrapTerminalErr = markCodexQuotaRefusal(streamErr, terminalBody)
+					var progress helps.StreamProgress
+					for _, chunk := range bufferedChunks {
+						progress.Sent(chunk)
+					}
+					var clientErr error = streamErr
+					if modelGuard.Authoritative() {
+						clientErr = progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, streamErr.StatusCode(), applyCodexIdentityExposeResponsePayload(data, identityState), streamErr)
+					}
+					bootstrapTerminalErr = markCodexQuotaRefusal(clientErr, terminalBody)
 					break
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
@@ -304,11 +336,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				// the frame they belong to. They spend the same budgets.
 				// Non-data lines also need owned storage before translation can retain them.
 				translatedLine = bytes.Clone(line)
+				// Separate event fields from delimiterless records, without
+				// inventing blank payload units between ordinary data lines.
+				if bytes.HasPrefix(line, []byte("event:")) {
+					translatedLine = append([]byte("\n\n"), line...)
+				}
 				isHandshake = true
 			}
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			chunks := translateLine(translatedLine, dataPayload)
 			if (!modelGuard.Authoritative() || (buffering && isHandshake)) && !terminalSuccess {
 				frameBytes := len(line)
 				for i := range chunks {
@@ -345,28 +382,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 		if !streamStarted && bootstrapTerminalErr == nil {
 			closeBootstrapBody()
-			if errScan := scanner.Err(); errScan != nil {
-				// A cancelled downstream request must not be recorded as an upstream failure or
-				// penalise the credential; mirror the unbuffered goroutine's guard.
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx, errScan)
-				return nil, errScan
-			}
+			// Held chunks have not reached the downstream relay. EOF/read failure
+			// before release is still incomplete, even if translation produced nothing.
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if replaySafe && len(bufferedChunks) == 0 && len(initialChunks) == 0 {
-				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
-				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
-				reporter.PublishFailure(ctx, emptyErr)
-				closedCh := make(chan cliproxyexecutor.StreamChunk)
-				close(closedCh)
-				return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: closedCh}, nil
-			}
-			streamErr := newCodexIncompleteStreamError()
+			var progress helps.StreamProgress
+			cause := errors.Join(newCodexIncompleteStreamError(), scanner.Err())
+			streamErr := progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
 			return nil, streamErr
@@ -414,18 +437,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
 
-	streamReplaySafe := replaySafe
-	emittedCount := 0
+	var progress helps.StreamProgress
 	for _, chunk := range bufferedChunks {
-		if len(chunk) > 0 {
-			emittedCount++
-		}
+		progress.Sent(chunk)
 	}
 	for _, chunk := range initialChunks {
-		if len(chunk) > 0 {
-			emittedCount++
-		}
+		progress.Sent(chunk)
 	}
+	streamReplaySafe := replaySafe
 	go func() {
 		defer close(out)
 		sendError := func(err error) {
@@ -444,14 +463,21 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}()
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+			dataPayload, completeData := sseData.Observe(line)
+			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
+				continue
+			}
+			if completeData && sseData.Multiline {
+				line = append([]byte("data: "), dataPayload...)
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			terminalSuccess := false
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
-			} else if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
+			} else if completeData {
+				data := dataPayload
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				eventType := gjson.GetBytes(data, "type").String()
@@ -464,7 +490,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return
 				}
 				translatedLine = append([]byte("data: "), data...)
-				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(data, identityState), e.modelLevelCooling()); ok {
+				if streamErr, terminalBody, ok := codexSSETerminalFailureErrWithCooling(applyCodexIdentityExposeResponsePayload(data, identityState), sseData.Event, e.modelLevelCooling()); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -473,7 +499,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					sendError(markCodexQuotaRefusal(streamErr, terminalBody))
+					clientErr := progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, streamErr.StatusCode(), applyCodexIdentityExposeResponsePayload(data, identityState), streamErr)
+					sendError(markCodexQuotaRefusal(clientErr, terminalBody))
 					return
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
@@ -508,16 +535,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			} else {
 				translatedLine = bytes.Clone(line)
+				if bytes.HasPrefix(line, []byte("event:")) {
+					translatedLine = append([]byte("\n\n"), line...)
+				}
 			}
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			chunks := translateLine(translatedLine, dataPayload)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-					if len(chunks[i]) > 0 {
-						emittedCount++
-					}
+					progress.Sent(chunks[i])
 				case <-ctx.Done():
 					return
 				}
@@ -526,21 +554,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-		}
-		// An empty translation may hide server-tool work. Only a replay-safe
-		// empty stream can use the conductor's pre-output disconnect failover.
-		if emittedCount == 0 && streamReplaySafe {
-			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
-			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
-			reporter.PublishFailure(ctx, emptyErr)
+		if ctx.Err() != nil {
+			_ = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", ctx.Err())
 			return
 		}
-		streamErr := newCodexIncompleteStreamError()
+		cause := error(newCodexIncompleteStreamError())
+		if scanner.Err() != nil {
+			cause = errors.Join(cause, scanner.Err())
+		}
+		streamErr := progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
 		sendError(streamErr)

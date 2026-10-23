@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -210,7 +211,7 @@ func TestCodexExecutorExecuteMissingCompletionIsRequestScoped(t *testing.T) {
 	assertRequestScopedTestError(t, err)
 }
 
-func TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped(t *testing.T) {
+func TestCodexExecutorExecuteStreamMissingCompletionBeforeOutputCanFailOver(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n"))
@@ -233,10 +234,10 @@ func TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped(t *testing.T
 	if streamErr == nil || result != nil {
 		t.Fatalf("expected call-time missing-completion error without a stream, got result=%v err=%v", result, streamErr)
 	}
-	if got := statusCodeFromTestError(t, streamErr); got != http.StatusRequestTimeout {
-		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, streamErr)
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadGateway, streamErr)
 	}
-	assertRequestScopedTestError(t, streamErr)
+	assertNotRequestScopedTestError(t, streamErr)
 }
 
 func TestCodexExecutorExecuteStreamExplicitTerminalFailureIsNotSuccessful(t *testing.T) {
@@ -389,8 +390,12 @@ func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T
 			if terminalErr == nil {
 				t.Fatal("expected transport failure before terminal event")
 			}
-			if got := statusCodeFromTestError(t, terminalErr); got != http.StatusRequestTimeout {
-				t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, terminalErr)
+			wantStatus := http.StatusRequestTimeout
+			if tc.stream {
+				wantStatus = http.StatusBadGateway
+			}
+			if got := statusCodeFromTestError(t, terminalErr); got != wantStatus {
+				t.Fatalf("status code = %d, want %d; err=%v", got, wantStatus, terminalErr)
 			}
 			assertRequestScopedTestError(t, terminalErr)
 		})
@@ -508,7 +513,14 @@ func TestCodexExecutorExecuteStreamSurfacesTerminalStreamError(t *testing.T) {
 	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadRequest {
 		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadRequest, streamErr)
 	}
-	assertCodexErrorCode(t, streamErr.Error(), "invalid_request_error", "context_too_large")
+	// Mid-stream clients get the original upstream code, while the wrapped
+	// cause retains the executor's canonical classification for internal policy.
+	assertCodexErrorCode(t, streamErr.Error(), "invalid_request_error", "context_length_exceeded")
+	var frameErr *helps.UpstreamStreamError
+	if !errors.As(streamErr, &frameErr) {
+		t.Fatalf("missing upstream frame error: %v", streamErr)
+	}
+	assertCodexErrorCode(t, frameErr.Unwrap().Error(), "invalid_request_error", "context_too_large")
 }
 
 func TestCodexTerminalStreamContextLengthErrFromResponseFailed(t *testing.T) {

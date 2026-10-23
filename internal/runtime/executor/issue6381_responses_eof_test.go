@@ -62,18 +62,9 @@ func TestOpenAICompatExecutorResponsesEOFAfterFinishReasonCompletesStream(t *tes
 		t.Fatal(errExecuteStream)
 	}
 
-	var output bytes.Buffer
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("unexpected stream error after a completed finish_reason: %v", chunk.Err)
-		}
-		output.Write(chunk.Payload)
-	}
-	if got := strings.Count(output.String(), `"type":"response.completed"`); got != 1 {
-		t.Fatalf("response.completed count = %d, want 1; output = %q", got, output.String())
-	}
-	if !strings.Contains(output.String(), `"input_tokens":3`) || !strings.Contains(output.String(), `"output_tokens":1`) {
-		t.Fatalf("late usage was not preserved in response.completed: %q", output.String())
+	output := assertResponsesEOFComplete(t, result)
+	if !strings.Contains(output, `"total_tokens":4`) {
+		t.Fatalf("lost trailing usage: %s", output)
 	}
 }
 
@@ -93,19 +84,31 @@ func TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonCompletesStr
 		t.Fatal(errExecuteStream)
 	}
 
+	output := assertResponsesEOFComplete(t, result)
+	if !strings.Contains(output, `"type":"custom_tool_call"`) || !strings.Contains(output, "*** End Patch") {
+		t.Fatalf("lost apply_patch output: %s", output)
+	}
+}
+
+// Providers may omit [DONE]. After all choices finish, clean EOF finalizes
+// Responses once, preserving late usage and completed apply_patch calls (#6381).
+func assertResponsesEOFComplete(t *testing.T, result *cliproxyexecutor.StreamResult) string {
+	t.Helper()
 	var output bytes.Buffer
+	var streamErr error
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
-			t.Fatalf("unexpected apply_patch stream error after a completed finish_reason: %v", chunk.Err)
+			streamErr = chunk.Err
 		}
 		output.Write(chunk.Payload)
 	}
-	if got := strings.Count(output.String(), `"type":"response.completed"`); got != 1 {
-		t.Fatalf("response.completed count = %d, want 1; output = %q", got, output.String())
+	if streamErr != nil {
+		t.Fatalf("finished choices failed on clean EOF: %v", streamErr)
 	}
-	if strings.Contains(output.String(), `"type":"response.failed"`) {
-		t.Fatalf("completed apply_patch stream emitted response.failed: %q", output.String())
+	if strings.Count(output.String(), `"type":"response.completed"`) != 1 {
+		t.Fatalf("expected exactly one response.completed: %s", output.String())
 	}
+	return output.String()
 }
 
 func TestOpenAICompatExecutorResponsesScannerErrorDoesNotSynthesizeCompletion(t *testing.T) {
