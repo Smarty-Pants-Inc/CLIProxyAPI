@@ -361,6 +361,21 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}()
 		var streamUsage helps.StreamUsageBuffer
 		var progress helps.StreamProgress
+		var upstreamWork bool
+		observeWork := func(data []byte) {
+			if gjson.GetBytes(data, "type").String() == "content_block_start" {
+				switch gjson.GetBytes(data, "content_block.type").String() {
+				case "tool_use", "server_tool_use":
+					upstreamWork = true
+				}
+			}
+		}
+		incomplete := func(cause error) error {
+			if upstreamWork {
+				return progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", cause)
+			}
+			return progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", cause)
+		}
 		defer streamUsage.Publish(ctx, reporter)
 		emitCancellation := func(cause error) bool {
 			if ctx.Err() != nil {
@@ -455,6 +470,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					}
 					return false
 				}
+				observeWork(data)
 				observeClaudeStreamEvent(data, sseData.Event, &upstreamMessageID, &upstreamCompleted)
 				return true
 			}
@@ -511,7 +527,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if emitCancellation(scanner.Err()) {
 					return
 				}
-				emitResponseError(progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", scanner.Err()))
+				emitResponseError(incomplete(scanner.Err()))
 				return
 			}
 			if upstreamCompleted {
@@ -544,6 +560,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					continue
 				}
 				line = append([]byte("data: "), data...)
+				observeWork(data)
 				observeClaudeStreamEvent(data, sseData.Event, &upstreamMessageID, &upstreamCompleted)
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -594,7 +611,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if emitCancellation(scanner.Err()) {
 				return
 			}
-			emitResponseError(progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", scanner.Err()))
+			emitResponseError(incomplete(scanner.Err()))
 			return
 		}
 		if upstreamCompleted {

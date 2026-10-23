@@ -113,9 +113,8 @@ func mapCodexWebsocketReadError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, helps.ErrCodexWebsocketSessionClosed) || errors.Is(err, net.ErrClosed) {
-		return helps.NewInvalidStreamError(err)
-	}
+	// Credential removal closes a local session too, but is repairable by
+	// rotating credentials. Only a genuine size limit is request-scoped.
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) && closeErr.Code == websocket.CloseMessageTooBig {
 		return codexWebsocketMessageTooBigError{statusErr: statusErr{

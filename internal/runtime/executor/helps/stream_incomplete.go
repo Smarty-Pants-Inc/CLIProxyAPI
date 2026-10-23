@@ -40,6 +40,10 @@ func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string,
 		return ctx.Err()
 	}
 	if errors.Is(cause, bufio.ErrTooLong) {
+		fields["type"] = "upstream_stream_invalid"
+		fields["code"] = "upstream_stream_invalid"
+		fields["upstream_error"] = logging.SafeDiagnosticForLog(cause.Error())
+		LogWithRequestID(ctx).WithFields(fields).Warn("upstream stream invalid")
 		return NewInvalidStreamError(cause)
 	}
 	message := fmt.Sprintf("upstream stream closed before %s (provider=%s, model=%s, upstream_status=%d, partial_bytes=%d, partial_chunks=%d)", terminal, provider, model, status, p.Bytes, p.Chunks)

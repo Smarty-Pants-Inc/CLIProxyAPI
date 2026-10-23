@@ -442,6 +442,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		var streamUsage helps.StreamUsageBuffer
 		var progress helps.StreamProgress
+		var upstreamWork bool
+		incomplete := func(cause error) error {
+			if upstreamWork {
+				return progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", cause)
+			}
+			return progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", cause)
+		}
 		var seenDone bool
 		var streamFailed bool
 		var streamAborted bool
@@ -461,7 +468,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if containsPayload {
 				clientErr = progress.UpstreamError(ctx, e.Identifier(), req.Model, authLabel, streamErr.StatusCode(), []byte(streamErr.msg), streamErr)
 			} else if streamErr.msg != helps.ApplyPatchUpstreamErrorMessage {
-				clientErr = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", streamErr)
+				clientErr = incomplete(streamErr)
 			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: clientErr}:
@@ -508,6 +515,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				}
 			}
 
+			// Even a tool call withheld by translation must not be replayed.
+			for _, choice := range gjson.GetBytes(dataPayload, "choices").Array() {
+				if len(choice.Get("delta.tool_calls").Array()) > 0 || choice.Get("delta.function_call").Exists() {
+					upstreamWork = true
+				}
+			}
 			// Observe complete upstream frames before translation or downstream backpressure.
 			helps.ObserveChatTokenEvent(reporter, dataPayload)
 			streamLine := append([]byte("data: "), dataPayload...)
@@ -575,7 +588,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			return
 		}
 		if !seenDone {
-			streamErr := progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", errScan)
+			streamErr := incomplete(errScan)
 			if ctx.Err() != nil {
 				return
 			}

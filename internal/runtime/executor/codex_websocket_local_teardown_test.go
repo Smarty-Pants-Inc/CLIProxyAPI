@@ -9,15 +9,14 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-	"github.com/tidwall/gjson"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-// Failure path: local session shutdown must not be advertised as a retryable
-// upstream cut, regardless of whether it occurs before or after client output.
-func TestCodexWebsocketLocalTeardownNotIncomplete(t *testing.T) {
+// Failure path: auth removal closes local sessions mid-request, but a different
+// credential can repair the failure. Size-limit failures are tested separately.
+func TestCodexWebsocketLocalTeardownCanRetry(t *testing.T) {
 	readCh := make(chan codexWebsocketRead)
 	close(readCh)
-	// A non-nil connection is enough: the closed local channel is read without I/O.
 	conn := &websocket.Conn{}
 	_, _, closedErr := readCodexWebsocketMessage(context.Background(), &codexWebsocketSession{}, conn, readCh)
 	if !errors.Is(closedErr, helps.ErrCodexWebsocketSessionClosed) {
@@ -25,9 +24,9 @@ func TestCodexWebsocketLocalTeardownNotIncomplete(t *testing.T) {
 	}
 	for _, cause := range []error{closedErr, fmt.Errorf("local close: %w", net.ErrClosed)} {
 		err := mapCodexWebsocketReadError(cause)
-		var invalid *helps.InvalidStreamError
-		if !errors.As(err, &invalid) || !errors.Is(err, cause) || !invalid.IsRequestScoped() || gjson.Get(err.Error(), "error.retryable").Bool() {
-			t.Fatalf("local teardown misclassified: %v", err)
+		var scoped cliproxyexecutor.RequestScopedError
+		if !errors.Is(err, cause) || errors.As(err, &scoped) && scoped.IsRequestScoped() || !shouldRetryCodexWebsocketSend(err) {
+			t.Fatalf("credential teardown cannot retry: %v", err)
 		}
 	}
 }
