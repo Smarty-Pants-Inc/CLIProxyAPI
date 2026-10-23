@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -35,6 +36,14 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	modelGuard := helps.NewCodexModelGuard(baseModel)
+	// Non-stream responses still must not replay work already dispatched upstream.
+	replaySafe := true
+	defer func() {
+		var stop interface{ IsRequestStop() bool }
+		if err != nil && !replaySafe && !errors.As(err, &stop) {
+			err = helps.WrapCodexNonReplayableError(err)
+		}
+	}()
 	var unverifiedObserverEvents codexUnverifiedObserverEvents
 
 	from := opts.SourceFormat
@@ -311,6 +320,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		payload = bytes.TrimSpace(payload)
 		if len(payload) == 0 {
 			continue
+		}
+		// Latch before identity checks, translation, or observer callbacks.
+		if codexFrameCommitsUpstreamWork(gjson.GetBytes(payload, "type").String(), payload) {
+			replaySafe = false
 		}
 		observeCodexTokenEvent(reporter, payload)
 		payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)

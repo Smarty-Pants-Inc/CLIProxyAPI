@@ -365,7 +365,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		observeWork := func(data []byte) {
 			if gjson.GetBytes(data, "type").String() == "content_block_start" {
 				switch gjson.GetBytes(data, "content_block.type").String() {
-				case "tool_use", "server_tool_use":
+				case "text", "thinking", "redacted_thinking":
+					// These blocks are model-only output; translation may withhold them.
+				default:
+					// MCP and future server-side blocks may already have side effects.
 					upstreamWork = true
 				}
 			}

@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -22,8 +23,19 @@ import (
 // Recorded catch: PR #174 round-5 N2. Remove A only after its WS request
 // reaches upstream, close its live session, then require the conductor to use B.
 func TestStreamCredentialRemovedMidRequestFailover(t *testing.T) {
-	for _, provider := range []string{"codex", "xai"} {
-		t.Run(provider, func(t *testing.T) {
+	for _, scenario := range []struct{ provider, work string }{
+		{provider: "codex"}, {provider: "xai"},
+		{provider: "codex", work: "web_search_call"},
+		{provider: "codex", work: "file_search_call"},
+		{provider: "codex", work: "code_interpreter_call"},
+		{provider: "codex", work: "mcp_call"},
+		{provider: "codex", work: "computer_call"},
+		{provider: "codex", work: "function_call"},
+		{provider: "codex", work: "custom_tool_call"},
+		{provider: "codex", work: "future_server_call"},
+	} {
+		provider, work := scenario.provider, scenario.work
+		t.Run(provider+"/"+work, func(t *testing.T) {
 			cfg := &config.Config{}
 			manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
 			manager.SetRetryConfig(0, 0, 2)
@@ -45,6 +57,20 @@ func TestStreamCredentialRemovedMidRequestFailover(t *testing.T) {
 				mu.Lock()
 				attempts = append(attempts, account)
 				mu.Unlock()
+				if account == "account-a" && work != "" {
+					for _, frame := range []string{
+						`{"type":"response.created","response":{"id":"resp-work","model":"gpt-6-astra"}}`,
+						fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":%q,"id":"work-1","arguments":"","input":""}}`, work),
+					} {
+						if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+					// The observer removes A only once Execute has consumed the work frame.
+					_, _, _ = conn.ReadMessage()
+					return
+				}
 				if account == "account-a" {
 					manager.Remove(context.Background(), firstID)
 					if provider == "codex" {
@@ -84,10 +110,23 @@ func TestStreamCredentialRemovedMidRequestFailover(t *testing.T) {
 			}
 			req := coreexecutor.Request{Model: model, Payload: []byte(fmt.Sprintf(`{"model":%q,"input":"proof"}`, model))}
 			opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, Metadata: map[string]any{coreexecutor.ExecutionSessionMetadataKey: t.Name()}}
+			if work != "" {
+				opts.WebSocketResponseObserver = func(_ context.Context, event coreexecutor.WebSocketResponseEvent) {
+					if event.EventType == "response.output_item.added" {
+						manager.Remove(context.Background(), firstID)
+						runtimeexecutor.CloseCodexWebsocketSessionsForAuthID(firstID, "auth_removed")
+					}
+				}
+			}
 			ctx := context.Background()
 			if provider == "codex" {
 				resp, err := manager.Execute(ctx, []string{provider}, req, opts)
-				if err != nil || !strings.Contains(string(resp.Payload), "resp-healthy") {
+				if work != "" {
+					var stop interface{ IsRequestStop() bool }
+					if err == nil || !errors.As(err, &stop) || !stop.IsRequestStop() || len(resp.Payload) != 0 {
+						t.Fatalf("upstream work replayed or lost stop marker: err=%v body=%s", err, resp.Payload)
+					}
+				} else if err != nil || !strings.Contains(string(resp.Payload), "resp-healthy") {
 					t.Fatalf("nonstream failed: %v body=%s", err, resp.Payload)
 				}
 			} else {
@@ -109,7 +148,12 @@ func TestStreamCredentialRemovedMidRequestFailover(t *testing.T) {
 			mu.Lock()
 			got := append([]string(nil), attempts...)
 			mu.Unlock()
-			if !reflect.DeepEqual(got, []string{"account-a", "account-b"}) {
+			want := []string{"account-a", "account-b"}
+			if work != "" {
+				want = []string{"account-a"}
+			}
+			t.Logf("REMOVAL provider=%s work=%s attempts=%v", provider, work, got)
+			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("attempts=%v", got)
 			}
 			if _, exists := manager.GetByID(firstID); exists {

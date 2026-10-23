@@ -29,21 +29,39 @@ func TestStreamPreOutputCredentialFailoverHTTP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, client := range []string{"chat", "responses", "messages", "gemini"} {
 		for _, transport := range []string{"codex", "codex-ws", "claude", "compat"} {
+			cuts := []string{"empty", "read-error", "preidentity", "partial-line", "output"}
+			switch transport {
+			case "codex", "codex-ws":
+				cuts = append(cuts, "created", "item-web_search_call", "item-file_search_call",
+					"item-code_interpreter_call", "item-mcp_call", "item-computer_call",
+					"item-function_call", "item-custom_tool_call", "item-future_server_call")
+			case "claude":
+				cuts = append(cuts, "created", "after-start-ping", "after-start-text", "tool",
+					"block-thinking", "block-redacted_thinking", "block-tool_use",
+					"block-mcp_tool_use", "block-mcp_tool_result", "block-future_server_block")
+			case "compat":
+				// The old compat "created" fixture already carried assistant content.
+				cuts = append(cuts, "content-first", "role-only", "usage-only", "error-event", "tool")
+			}
 			for _, buffering := range []bool{false, true} {
 				for _, allCut := range []bool{false, true} {
-					for _, cut := range []string{"empty", "read-error", "preidentity", "partial-line", "created", "after-start-ping", "after-start-text", "tool", "output"} {
-						if strings.HasPrefix(cut, "after-start-") && transport != "claude" || cut == "tool" && transport != "claude" && transport != "compat" {
-							continue
-						}
+					for _, cut := range cuts {
 						// Replay is determined by downstream output and upstream work, not
 						// merely by an upstream identity/created event.
-						replay := cut != "output" && cut != "tool"
+						work := cut == "tool" || strings.HasPrefix(cut, "item-") || strings.HasPrefix(cut, "block-") && cut != "block-thinking" && cut != "block-redacted_thinking"
+						replay := cut != "output" && cut != "content-first" && !work
+						if cut == "role-only" {
+							replay = client == "gemini"
+						}
+						if cut == "usage-only" {
+							replay = client == "messages"
+						}
+						if cut == "block-thinking" || cut == "block-redacted_thinking" {
+							replay = client == "gemini"
+						}
 						if cut == "created" || strings.HasPrefix(cut, "after-start-") {
 							if transport == "claude" {
 								replay = client == "gemini"
-							}
-							if transport == "compat" {
-								replay = false
 							}
 							if strings.HasPrefix(transport, "codex") {
 								replay = buffering || client == "chat"
@@ -83,17 +101,28 @@ func TestStreamPreOutputCredentialFailoverHTTP(t *testing.T) {
 										}
 									case "partial-line":
 										wire = "data: {\"type\":\"message_st"
-									case "created":
+									case "created", "content-first":
 										wire = first
 									case "after-start-ping":
 										wire = first + "data: {\"type\":\"ping\"}\n\n"
 									case "after-start-text":
 										wire = first + "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+									case "role-only":
+										wire = "data: {\"id\":\"chat-role\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+									case "usage-only":
+										wire = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":0}}\n\n"
+									case "error-event":
+										wire = "event: error\n\n"
 									case "tool":
 										wire = first + "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"tool-1\",\"name\":\"web_search\",\"input\":{}}}\n\n"
 										if provider == "compat" {
 											wire = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tool-1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]}}]}\n\n"
 										}
+									case "block-thinking", "block-redacted_thinking", "block-tool_use", "block-mcp_tool_use", "block-mcp_tool_result", "block-future_server_block":
+										wire = first + fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":%q,\"id\":\"tool-1\",\"name\":\"search\",\"input\":{}}}\n\n", strings.TrimPrefix(cut, "block-"))
+									case "item-web_search_call", "item-file_search_call", "item-code_interpreter_call", "item-mcp_call", "item-computer_call", "item-function_call", "item-custom_tool_call", "item-future_server_call":
+										// No identity means no client output, even without bootstrap buffering.
+										wire = fmt.Sprintf("data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":%q,\"id\":\"tool-1\",\"name\":\"search\",\"arguments\":\"\",\"input\":\"\"}}\n\n", strings.TrimPrefix(cut, "item-"))
 									case "output":
 										wire = first + delta
 									}
@@ -183,7 +212,7 @@ func TestStreamPreOutputCredentialFailoverHTTP(t *testing.T) {
 							}
 							if !replay {
 								wantStatus := http.StatusOK
-								if cut == "tool" && client == "gemini" {
+								if strings.HasPrefix(cut, "item-") || work && client == "gemini" {
 									wantStatus = http.StatusBadGateway
 								}
 								if writer.Code != wantStatus || !strings.Contains(body, "upstream_stream_incomplete") {
@@ -192,6 +221,9 @@ func TestStreamPreOutputCredentialFailoverHTTP(t *testing.T) {
 							} else if allCut {
 								if writer.Code != http.StatusBadGateway || gjson.Get(body, "error.code").String() != "upstream_stream_incomplete" || !gjson.Get(body, "error.retryable").Bool() {
 									t.Fatalf("exhaustion: status=%d body=%s", writer.Code, body)
+								}
+								if client == "messages" {
+									t.Logf("MESSAGES_BOTH_CUT code=%s retryable=%t body=%s", gjson.Get(body, "error.code").String(), gjson.Get(body, "error.retryable").Bool(), body)
 								}
 							} else if writer.Code != http.StatusOK || !strings.Contains(body, map[string]string{"chat": "[DONE]", "responses": "response.completed", "messages": "message_stop", "gemini": "candidates"}[client]) || strings.Contains(body, "upstream_stream_incomplete") {
 								t.Fatalf("failover: status=%d body=%s", writer.Code, body)

@@ -592,10 +592,6 @@ func isCodexBufferableOutputItem(item gjson.Result) bool {
 			return false
 		}
 		return isCodexEmptyContentList(item.Get("summary")) && isCodexEmptyContentList(item.Get("content"))
-	case "function_call":
-		return item.Get("arguments").String() == ""
-	case "custom_tool_call":
-		return item.Get("input").String() == ""
 	default:
 		return false
 	}

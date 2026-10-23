@@ -450,6 +450,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			return progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "[DONE]", cause)
 		}
 		var seenDone bool
+		// Some compatible providers omit [DONE]. EOF is complete only when every
+		// observed choice has supplied a non-null finish_reason. Usage-only chunks
+		// do not introduce a choice or erase its finish state.
+		finishedChoices := make(map[int64]bool)
 		var streamFailed bool
 		var streamAborted bool
 		var upstreamEvent string
@@ -517,6 +521,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			// Even a tool call withheld by translation must not be replayed.
 			for _, choice := range gjson.GetBytes(dataPayload, "choices").Array() {
+				index := choice.Get("index").Int()
+				finish := choice.Get("finish_reason")
+				finishedChoices[index] = finishedChoices[index] || (finish.Exists() && finish.Type != gjson.Null)
 				if len(choice.Get("delta.tool_calls").Array()) > 0 || choice.Get("delta.function_call").Exists() {
 					upstreamWork = true
 				}
@@ -577,6 +584,18 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		errScan := scanner.Err()
 		if errScan == nil && !seenDone && !streamFailed && !streamAborted && len(frameData) > 0 {
 			_ = processFrame()
+		}
+		if errScan == nil && !seenDone && !streamFailed && !streamAborted && len(finishedChoices) > 0 {
+			allFinished := true
+			for _, finished := range finishedChoices {
+				allFinished = allFinished && finished
+			}
+			if allFinished {
+				// Use the normal terminal translation so Responses and other clients
+				// finalize once, including any late usage-only chunk.
+				frameData = [][]byte{[]byte("[DONE]")}
+				_ = processFrame()
+			}
 		}
 		if !streamFailed && !streamAborted && helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return

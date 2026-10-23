@@ -40,7 +40,7 @@ func (r *issue6381ReadError) Read(p []byte) (int, error) {
 	return copy(p, chunk), nil
 }
 
-func TestOpenAICompatExecutorResponsesEOFAfterFinishReasonFailsStream(t *testing.T) {
+func TestOpenAICompatExecutorResponsesEOFAfterFinishReasonCompletesStream(t *testing.T) {
 	reply := strings.Join([]string{
 		`data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}`,
 		"",
@@ -62,10 +62,13 @@ func TestOpenAICompatExecutorResponsesEOFAfterFinishReasonFailsStream(t *testing
 		t.Fatal(errExecuteStream)
 	}
 
-	assertResponsesEOFIncomplete(t, result)
+	output := assertResponsesEOFComplete(t, result)
+	if !strings.Contains(output, `"total_tokens":4`) {
+		t.Fatalf("lost trailing usage: %s", output)
+	}
 }
 
-func TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonFailsStream(t *testing.T) {
+func TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonCompletesStream(t *testing.T) {
 	first, last := applyPatchTestFrames("chat", "apply_patch")
 	last = strings.Replace(last, "\ndata: [DONE]\n\n", "\n\n", 1)
 	exec, auth, _ := newApplyPatchCompatTestExecutor(t, first+last)
@@ -81,12 +84,15 @@ func TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonFailsStream(
 		t.Fatal(errExecuteStream)
 	}
 
-	assertResponsesEOFIncomplete(t, result)
+	output := assertResponsesEOFComplete(t, result)
+	if !strings.Contains(output, `"type":"custom_tool_call"`) || !strings.Contains(output, "*** End Patch") {
+		t.Fatalf("lost apply_patch output: %s", output)
+	}
 }
 
-// A finish_reason ends a choice, not the SSE stream. Even the former #6381
-// EOF fallback must not fabricate response.completed without upstream [DONE].
-func assertResponsesEOFIncomplete(t *testing.T, result *cliproxyexecutor.StreamResult) {
+// Providers may omit [DONE]. After all choices finish, clean EOF finalizes
+// Responses once, preserving late usage and completed apply_patch calls (#6381).
+func assertResponsesEOFComplete(t *testing.T, result *cliproxyexecutor.StreamResult) string {
 	t.Helper()
 	var output bytes.Buffer
 	var streamErr error
@@ -96,12 +102,13 @@ func assertResponsesEOFIncomplete(t *testing.T, result *cliproxyexecutor.StreamR
 		}
 		output.Write(chunk.Payload)
 	}
-	if streamErr == nil || !strings.Contains(streamErr.Error(), "upstream_stream_incomplete") {
-		t.Fatalf("missing incomplete-stream error: %v", streamErr)
+	if streamErr != nil {
+		t.Fatalf("finished choices failed on clean EOF: %v", streamErr)
 	}
-	if strings.Contains(output.String(), `"type":"response.completed"`) {
-		t.Fatalf("fabricated response.completed: %s", output.String())
+	if strings.Count(output.String(), `"type":"response.completed"`) != 1 {
+		t.Fatalf("expected exactly one response.completed: %s", output.String())
 	}
+	return output.String()
 }
 
 func TestOpenAICompatExecutorResponsesScannerErrorDoesNotSynthesizeCompletion(t *testing.T) {
