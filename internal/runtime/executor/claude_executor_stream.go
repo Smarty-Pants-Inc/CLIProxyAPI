@@ -400,9 +400,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				var mismatch *helps.ClaudeModelMismatchError
 				var refusal *cliproxyauth.Error
 				if errors.Is(errIdentity, io.ErrUnexpectedEOF) {
-					errIdentity = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", io.ErrUnexpectedEOF)
+					errIdentity = progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", io.ErrUnexpectedEOF)
 				} else if !errors.As(errIdentity, &mismatch) && !errors.As(errIdentity, &refusal) {
-					errIdentity = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", errIdentity)
+					errIdentity = progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", errIdentity)
 				}
 				emitResponseError(errIdentity)
 			}

@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,12 +31,16 @@ func (p *StreamProgress) Sent(payload []byte) {
 // Incomplete reports EOF/read failure before a protocol terminal. The upstream
 // handshake status is diagnostic metadata, separate from the proxy failure status.
 // Missing the terminal event is transient: let clients retry the turn. Keep
-// these errors request-scoped so a broken connection never cools credentials.
+// these errors request-scoped after output; replay-safe pre-output cuts instead
+// use ReplaySafeIncomplete so credential rotation remains possible without cooling.
 func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string, status int, terminal string, cause error) error {
 	fields := logrus.Fields{"provider": provider, "model": model, "upstream_status": status, "partial_bytes": p.Bytes, "partial_chunks": p.Chunks}
 	if ctx != nil && ctx.Err() != nil {
 		LogWithRequestID(ctx).WithFields(fields).Debug("upstream stream canceled")
 		return ctx.Err()
+	}
+	if errors.Is(cause, bufio.ErrTooLong) {
+		return NewInvalidStreamError(cause)
 	}
 	message := fmt.Sprintf("upstream stream closed before %s (provider=%s, model=%s, upstream_status=%d, partial_bytes=%d, partial_chunks=%d)", terminal, provider, model, status, p.Bytes, p.Chunks)
 	// Retryable is a client hint, not permission for proxy replay:
@@ -66,18 +71,27 @@ func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string,
 	return &IncompleteStreamError{body: string(body), cause: cause}
 }
 
-type IncompleteStreamError struct {
-	body  string
-	cause error
+// ReplaySafeIncomplete permits proxy failover only before any translated payload
+// was handed downstream. Callers must separately enforce upstream replay safety
+// (for example, a withheld tool call still forbids replay).
+func (p *StreamProgress) ReplaySafeIncomplete(ctx context.Context, provider, model string, status int, terminal string, cause error) error {
+	err := p.Incomplete(ctx, provider, model, status, terminal, cause)
+	if incomplete, ok := err.(*IncompleteStreamError); ok && p.Bytes == 0 {
+		incomplete.replaySafe = true
+	}
+	return err
 }
 
-func (e *IncompleteStreamError) Error() string { return e.body }
-func (e *IncompleteStreamError) Unwrap() error { return e.cause }
-func (e *IncompleteStreamError) StatusCode() int {
-	var status interface{ StatusCode() int }
-	if errors.As(e.cause, &status) && status.StatusCode() >= 400 {
-		return status.StatusCode()
-	}
-	return http.StatusBadGateway
+type IncompleteStreamError struct {
+	body       string
+	cause      error
+	replaySafe bool
 }
-func (*IncompleteStreamError) IsRequestScoped() bool { return true }
+
+func (e *IncompleteStreamError) Error() string         { return e.body }
+func (e *IncompleteStreamError) Unwrap() error         { return e.cause }
+func (*IncompleteStreamError) StatusCode() int         { return http.StatusBadGateway }
+func (e *IncompleteStreamError) IsRequestScoped() bool { return !e.replaySafe }
+
+// IsConnectionLifecycle preserves no-cooling semantics without stopping failover.
+func (e *IncompleteStreamError) IsConnectionLifecycle() bool { return e.replaySafe }

@@ -47,6 +47,13 @@ func ValidateClaudeResponseModel(data []byte, expected string) error {
 func GuardClaudeModelStream(source io.Reader, expected string) (io.Reader, error) {
 	g := &claudeModelStream{scanner: bufio.NewScanner(source), expected: expected}
 	g.scanner.Buffer(nil, claudeModelStreamLimit)
+	// Preserve whether the final token ended in a newline: ScanLines otherwise
+	// returns an unterminated EOF token indistinguishably from a complete line.
+	g.scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		advance, token, err := bufio.ScanLines(data, atEOF)
+		g.unterminated = token != nil && advance > 0 && data[advance-1] != '\n'
+		return advance, token, err
+	})
 	var prefix bytes.Buffer
 	for !g.verified {
 		line, err := g.next()
@@ -64,10 +71,11 @@ func GuardClaudeModelStream(source io.Reader, expected string) (io.Reader, error
 const claudeModelStreamLimit = 52_428_800 // Match the executor's existing 50 MB scan bound.
 
 type claudeModelStream struct {
-	scanner  *bufio.Scanner
-	expected string
-	verified bool
-	pending  []byte
+	scanner      *bufio.Scanner
+	expected     string
+	verified     bool
+	pending      []byte
+	unterminated bool
 }
 
 func (g *claudeModelStream) next() ([]byte, error) {
@@ -87,6 +95,9 @@ func (g *claudeModelStream) next() ([]byte, error) {
 	if bytes.HasPrefix(trimmed, []byte("data:")) {
 		payload := bytes.TrimSpace(trimmed[len("data:"):])
 		if !g.verified && !gjson.ValidBytes(payload) {
+			if g.unterminated {
+				return nil, &claudeModelStreamEOFError{claudeModelMismatch()}
+			}
 			return nil, claudeModelMismatch()
 		}
 		switch gjson.GetBytes(payload, "type").String() {

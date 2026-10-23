@@ -389,7 +389,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			var progress helps.StreamProgress
 			cause := errors.Join(newCodexIncompleteStreamError(), scanner.Err())
-			streamErr := progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
+			streamErr := progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
 			return nil, streamErr
@@ -562,7 +562,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if scanner.Err() != nil {
 			cause = errors.Join(cause, scanner.Err())
 		}
-		streamErr := progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
+		streamErr := progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
 		sendError(streamErr)

@@ -331,11 +331,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
 				mappedErr := mapCodexWebsocketReadError(errRead)
-				var tooBig codexWebsocketMessageTooBigError
-				if !errors.As(mappedErr, &tooBig) {
+				var scoped cliproxyexecutor.RequestScopedError
+				if !errors.As(mappedErr, &scoped) {
 					// Buffered frames have not reached the downstream relay yet.
 					var progress helps.StreamProgress
-					mappedErr = progress.Incomplete(ctx, e.Identifier(), req.Model, http.StatusSwitchingProtocols, "response.completed", mappedErr)
+					mappedErr = progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, http.StatusSwitchingProtocols, "response.completed", mappedErr)
 				}
 				if sess != nil {
 					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "read_error", mappedErr)
@@ -716,9 +716,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 				mappedErr := mapCodexWebsocketReadError(errRead)
-				var tooBig codexWebsocketMessageTooBigError
-				if !errors.As(mappedErr, &tooBig) {
-					mappedErr = progress.Incomplete(ctx, e.Identifier(), req.Model, http.StatusSwitchingProtocols, "response.completed", mappedErr)
+				var scoped cliproxyexecutor.RequestScopedError
+				if !errors.As(mappedErr, &scoped) {
+					mappedErr = progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, http.StatusSwitchingProtocols, "response.completed", mappedErr)
 				}
 				terminateReason = "read_error"
 				terminateErr = mappedErr

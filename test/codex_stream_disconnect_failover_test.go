@@ -196,8 +196,8 @@ func TestCodexStreamDisconnectExhaustionNotInvalidRequestError(t *testing.T) {
 	if errorResp.Error.Type == "invalid_request_error" {
 		t.Fatalf("error.type = %q for pre-output disconnect: must not claim well-formed request is invalid", errorResp.Error.Type)
 	}
-	if errorResp.Error.Type != "server_error" {
-		t.Fatalf("error.type = %q, want server_error", errorResp.Error.Type)
+	if errorResp.Error.Type != "upstream_stream_incomplete" || errorResp.Error.Code != "upstream_stream_incomplete" {
+		t.Fatalf("error = %+v, want upstream_stream_incomplete", errorResp.Error)
 	}
 }
 

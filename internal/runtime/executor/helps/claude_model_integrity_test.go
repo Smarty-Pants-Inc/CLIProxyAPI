@@ -63,6 +63,9 @@ func TestClaudeModelStreamIdentity(t *testing.T) {
 		{"ping-before-start", ping + start + content, true},
 		{"empty", "", false},
 		{"ping-only", ping, false},
+		{"partial-line", `data: {"type":"message_st`, false},
+		{"partial-start", `data: {"type":"message_start","message":{"model":"expected"`, false},
+		{"unterminated-valid-wrong-model", `data: {"type":"message_start","message":{"model":"wrong"}}`, false},
 		{"missing-start", content, false},
 		{"content-before-start", content + start, false},
 		{"wrong", strings.Replace(start, "expected", "wrong", 1) + content, false},
@@ -80,7 +83,7 @@ func TestClaudeModelStreamIdentity(t *testing.T) {
 				if strings.Contains(err.Error(), "MUST_NOT_LEAK") {
 					t.Fatal("upstream payload escaped in error")
 				}
-				if got, want := errors.Is(err, io.ErrUnexpectedEOF), tc.name == "empty" || tc.name == "ping-only"; got != want {
+				if got, want := errors.Is(err, io.ErrUnexpectedEOF), tc.name == "empty" || tc.name == "ping-only" || tc.name == "partial-line" || tc.name == "partial-start"; got != want {
 					t.Fatalf("EOF classification = %t, want %t: %v", got, want, err)
 				}
 				return

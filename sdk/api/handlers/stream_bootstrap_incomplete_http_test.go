@@ -31,7 +31,10 @@ func TestBootstrapIncompleteStreamHTTP(t *testing.T) {
 	defer hook.Reset()
 	for _, transport := range []string{"compat", "claude", "codex", "codex-ws"} {
 		for _, client := range []string{"chat", "responses", "messages"} {
-			for _, mode := range []string{"empty", "nonterminal", "preidentity", "empty_read_error", "read_error", "complete"} {
+			for _, mode := range []string{"empty", "nonterminal", "preidentity", "partial-line", "empty_read_error", "read_error", "complete"} {
+				if mode == "partial-line" && transport != "claude" {
+					continue
+				}
 				t.Run(transport+"/"+client+"/"+mode, func(t *testing.T) {
 					hook.Reset()
 					provider, model := transport, "bootstrap-fixture"
@@ -56,6 +59,8 @@ func TestBootstrapIncompleteStreamHTTP(t *testing.T) {
 						} else if provider == "codex" {
 							wire = "data: {\"type\":\"keepalive\"}\n\n"
 						}
+					case "partial-line":
+						wire = `data: {"type":"message_st`
 					case "complete":
 						// Responses translation requires a message item as well as [DONE].
 						if provider == "compat" {
@@ -153,9 +158,7 @@ func TestBootstrapIncompleteStreamHTTP(t *testing.T) {
 					if writer.Code >= 400 {
 						detail = gjson.Get(body, "error")
 						wantStatus := http.StatusBadGateway
-						if transport == "codex" {
-							wantStatus = http.StatusRequestTimeout // Same as post-bootstrap Codex EOF.
-						}
+
 						if writer.Code != wantStatus {
 							t.Errorf("status=%d, want %d", writer.Code, wantStatus)
 						}
