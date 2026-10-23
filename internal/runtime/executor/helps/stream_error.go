@@ -16,17 +16,52 @@ import (
 // StreamSSEData joins multiline JSON data before inspection. Codex also accepts
 // delimiterless JSON records, so it emits as soon as the joined JSON is valid.
 // Native SSE passthrough uses StreamSSEEvent to wait for the event boundary.
+// Returned data and Lines remain valid only until the next Observe call.
 type StreamSSEData struct {
-	Event   string
-	pending []byte
+	// PreserveLines retains owned Scanner units for native passthrough. Lines
+	// is nonempty only for a multiline record, including intervening controls.
+	PreserveLines bool
+	Lines         [][]byte
+	ready         bool
+	wireBytes     int
+	Event         string
+	pending       []byte
+	hasData       bool
+	depth         int
+	inString      bool
+	escaped       bool
+	compact       bytes.Buffer
 }
 
 func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
+	if s.ready {
+		clear(s.Lines)
+		s.Lines = s.Lines[:0]
+		s.ready = false
+		s.wireBytes = 0
+	}
+	originalLine := line
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		s.Event = ""
-		s.pending = nil
+		s.pending = s.pending[:0]
+		s.hasData = false
+		s.depth = 0
+		s.inString = false
+		s.escaped = false
+		clear(s.Lines)
+		s.Lines = s.Lines[:0]
+		s.wireBytes = 0
 		return nil, false
+	}
+	if s.PreserveLines && s.hasData {
+		// Bound retained wire bytes (including comments) and slice headers
+		// before cloning. The unit limit still admits the 100k-line fixture.
+		if len(originalLine) > 52_428_800-s.wireBytes || len(s.Lines) >= 1<<20 {
+			return s.overflow()
+		}
+		s.Lines = append(s.Lines, bytes.Clone(originalLine))
+		s.wireBytes += len(originalLine)
 	}
 	if bytes.HasPrefix(line, []byte("event:")) {
 		s.Event = strings.TrimSpace(string(line[6:]))
@@ -38,29 +73,69 @@ func (s *StreamSSEData) Observe(line []byte) ([]byte, bool) {
 	data := bytes.TrimSpace(line[5:])
 	// Match the executor scanner's 50 MB ceiling across data lines as well.
 	if len(s.pending)+len(data)+1 > 52_428_800 {
-		s.pending = nil
-		return []byte(`{"type":"error","error":{"code":"upstream_stream_invalid","type":"server_error","message":"upstream SSE event exceeds 50 MB"}}`), true
+		return s.overflow()
 	}
-	if len(s.pending) > 0 {
+	multiline := s.hasData
+	// Visit only the new bytes. Validating every accumulated prefix makes a
+	// large event split into short Scanner units quadratic. This checkpoint
+	// only detects a possible end; json.Valid still owns syntax validation.
+	for _, b := range data {
+		if s.inString {
+			if s.escaped {
+				s.escaped = false
+			} else if b == '\\' {
+				s.escaped = true
+			} else if b == '"' {
+				s.inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			s.inString = true
+		case '{', '[':
+			s.depth++
+		case '}', ']':
+			s.depth--
+		}
+	}
+	if multiline {
 		s.pending = append(s.pending, '\n')
 		s.pending = append(s.pending, data...)
 		data = s.pending
 	}
-	if bytes.Equal(data, []byte("[DONE]")) || json.Valid(data) {
-		multiline := len(s.pending) > 0
-		s.pending = nil
+	if !s.inString && s.depth == 0 && (bytes.Equal(data, []byte("[DONE]")) || json.Valid(data)) {
+		s.pending = s.pending[:0]
+		s.hasData = false
+		s.ready = true
 		if multiline {
-			// Line-oriented native translators must not emit a joined JSON
-			// newline as a bare SSE line without the required data: prefix.
-			var compact bytes.Buffer
-			if errCompact := json.Compact(&compact, data); errCompact == nil {
-				data = compact.Bytes()
+			// Reuse storage: translated SSE must not contain bare JSON newlines.
+			s.compact.Reset()
+			if errCompact := json.Compact(&s.compact, data); errCompact == nil {
+				data = s.compact.Bytes()
 			}
 		}
 		return data, true
 	}
-	s.pending = append(s.pending[:0], data...)
+	s.hasData = true
+	if !multiline {
+		s.pending = append(s.pending[:0], data...)
+		if s.PreserveLines {
+			s.Lines = append(s.Lines, bytes.Clone(originalLine))
+			s.wireBytes = len(originalLine)
+		}
+	}
 	return nil, false
+}
+
+func (s *StreamSSEData) overflow() ([]byte, bool) {
+	s.pending = s.pending[:0]
+	s.hasData = false
+	s.depth = 0
+	s.inString = false
+	s.escaped = false
+	s.ready = true
+	return []byte(`{"type":"error","error":{"code":"upstream_stream_invalid","type":"server_error","message":"upstream SSE event exceeds buffering limit"}}`), true
 }
 
 func IsStreamErrorFrame(data []byte, event string) bool {

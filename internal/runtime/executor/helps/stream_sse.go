@@ -20,7 +20,7 @@ type StreamSSEEvent struct {
 func (s *StreamSSEEvent) Observe(line []byte) ([]byte, bool) {
 	if s.flushed {
 		s.Event = ""
-		s.pending = nil
+		s.pending = s.pending[:0]
 		s.hasData = false
 		s.oversized = false
 		s.flushed = false

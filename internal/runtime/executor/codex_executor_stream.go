@@ -198,33 +198,38 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	sawOutputDelta := false
-	var sseData helps.StreamSSEData
-	// Ported from router-for-me/CLIProxyAPI#6760: keep event: error from
-	// attaching to the preceding delimiterless translated payload.
-	sseFrameHasContent := false
+	// Native Responses retain the original Scanner units when inspection does
+	// not change the payload. Assembling for inspection must not rewrite them.
+	nativeResponses := responseFormat == sdktranslator.FormatOpenAIResponse
+	sseData := helps.StreamSSEData{PreserveLines: nativeResponses}
+	translateLine := func(line, dataPayload []byte) [][]byte {
+		if nativeResponses && len(sseData.Lines) > 0 && bytes.HasPrefix(line, dataTag) && bytes.Equal(bytes.TrimSpace(line[5:]), dataPayload) {
+			var chunks [][]byte
+			for _, original := range sseData.Lines {
+				original = applyCodexIdentityExposeResponsePayload(original, identityState)
+				chunks = append(chunks, helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, original, &param, claudeInputTokens)...)
+			}
+			return chunks
+		}
+		return helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, line, &param, claudeInputTokens)
+	}
 	if buffering || !modelGuard.Authoritative() {
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			dataPayload, completeData := sseData.Observe(line)
-			if bytes.HasPrefix(line, dataTag) {
-				if !completeData {
-					continue
-				}
-				line = append([]byte("data: "), dataPayload...)
+			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
+				continue
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			isHandshake := false
 			terminalSuccess := false
-			if len(line) > 0 {
-				sseFrameHasContent = true
-			}
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
 				isHandshake = true
-			} else if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
+			} else if completeData {
+				data := dataPayload
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				eventType := gjson.GetBytes(data, "type").String()
@@ -326,15 +331,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				// the frame they belong to. They spend the same budgets.
 				// Non-data lines also need owned storage before translation can retain them.
 				translatedLine = bytes.Clone(line)
-				if len(line) == 0 && sseFrameHasContent {
-					translatedLine = []byte("\n\n")
-					sseFrameHasContent = false
+				// Separate event fields from delimiterless records, without
+				// inventing blank payload units between ordinary data lines.
+				if bytes.HasPrefix(line, []byte("event:")) {
+					translatedLine = append([]byte("\n\n"), line...)
 				}
 				isHandshake = true
 			}
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			chunks := translateLine(translatedLine, dataPayload)
 			if (!modelGuard.Authoritative() || (buffering && isHandshake)) && !terminalSuccess {
 				frameBytes := len(line)
 				for i := range chunks {
@@ -478,23 +484,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			dataPayload, completeData := sseData.Observe(line)
-			if bytes.HasPrefix(line, dataTag) {
-				if !completeData {
-					continue
-				}
-				line = append([]byte("data: "), dataPayload...)
+			if !completeData && (bytes.HasPrefix(line, dataTag) || len(sseData.Lines) > 0) {
+				continue
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			terminalSuccess := false
-			if len(line) > 0 {
-				sseFrameHasContent = true
-			}
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
-			} else if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
+			} else if completeData {
+				data := dataPayload
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				eventType := gjson.GetBytes(data, "type").String()
@@ -552,14 +552,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			} else {
 				translatedLine = bytes.Clone(line)
-				if len(line) == 0 && sseFrameHasContent {
-					translatedLine = []byte("\n\n")
-					sseFrameHasContent = false
+				if bytes.HasPrefix(line, []byte("event:")) {
+					translatedLine = append([]byte("\n\n"), line...)
 				}
 			}
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			chunks := translateLine(translatedLine, dataPayload)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
