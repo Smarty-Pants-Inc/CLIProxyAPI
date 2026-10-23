@@ -748,7 +748,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
+				// A non-replayable stop must not refresh and retry the same request.
+				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized || isRequestStopError(errExec)); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
@@ -789,6 +790,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					m.MarkResult(execCtx, result)
+				}
+				// Record normal cooling before stopping; a stop need not be request-scoped.
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {

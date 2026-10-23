@@ -24,6 +24,8 @@ import (
 // Recorded catch: PR #174 r7 S-1. Exercise real WebSocket reads through the
 // conductor: model-only output is private until non-stream completion, whereas
 // server-side tool execution must never be replayed on another credential.
+// Recorded catch: PR #174 r8 N-5. An unsafe stop must still cool a failing or
+// exhausted credential, without cooling lifecycle-only disconnects.
 func TestCodexNonStreamModelOnlyFailover(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -38,8 +40,23 @@ func TestCodexNonStreamModelOnlyFailover(t *testing.T) {
 		{name: "custom_input", frames: []string{`{"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"ct","name":"patch","input":""}}`, `{"type":"response.custom_tool_call_input.delta","item_id":"ct","delta":"patch"}`}},
 		{name: "web_search", frames: []string{`{"type":"response.output_item.added","item":{"type":"web_search_call","id":"ws","status":"in_progress"}}`}, work: true},
 		{name: "mcp", frames: []string{`{"type":"response.output_item.added","item":{"type":"mcp_call","id":"mcp","status":"in_progress"}}`}, work: true},
+		{name: "text_then_web_search", frames: []string{`{"type":"response.output_text.delta","delta":"hello"}`, `{"type":"response.output_item.added","item":{"type":"web_search_call","id":"ws","status":"in_progress"}}`}, work: true},
+		{name: "function_then_mcp", frames: []string{`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc","name":"lookup","arguments":"{}"}}`, `{"type":"response.output_item.added","item":{"type":"mcp_call","id":"mcp","status":"in_progress"}}`}, work: true},
+		{name: "image_generation", frames: []string{`{"type":"response.output_item.added","item":{"type":"image_generation_call","id":"img","status":"in_progress"}}`}, work: true},
+		{name: "code_interpreter", frames: []string{`{"type":"response.output_item.added","item":{"type":"code_interpreter_call","id":"ci","status":"in_progress"}}`}, work: true},
+		{name: "file_search", frames: []string{`{"type":"response.output_item.added","item":{"type":"file_search_call","id":"fs","status":"in_progress"}}`}, work: true},
+		{name: "snapshot_with_mcp", frames: []string{`{"type":"response.in_progress","response":{"id":"resp-a","model":"gpt-6-astra","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]},{"type":"mcp_call","id":"mcp","status":"in_progress"}]}}`}, work: true},
+		{name: "unknown_local_shell", frames: []string{`{"type":"response.output_item.added","item":{"type":"local_shell_call","id":"shell"}}`}, work: true},
+		{name: "unknown_computer", frames: []string{`{"type":"response.output_item.added","item":{"type":"computer_call","id":"computer"}}`}, work: true},
+		{name: "unknown_tool_search", frames: []string{`{"type":"response.output_item.added","item":{"type":"tool_search_call","id":"ts"}}`}, work: true},
+		{name: "unknown_future_item", frames: []string{`{"type":"response.output_item.added","item":{"type":"future_tool_call","id":"future"}}`}, work: true},
+		{name: "unknown_untyped_item", frames: []string{`{"type":"response.output_item.added","item":{"id":"untyped"}}`}, work: true},
+		{name: "unknown_web_search_event", frames: []string{`{"type":"response.web_search_call.searching","item_id":"ws"}`}, work: true},
+		{name: "unknown_typeless_frame", frames: []string{`{"future_field":"opaque"}`}, work: true},
+		{name: "unknown_audio_part", frames: []string{`{"type":"response.content_part.added","part":{"type":"output_audio","audio":"opaque"}}`}, work: true},
+		{name: "unknown_queued", frames: []string{`{"type":"response.queued","response":{"id":"resp-a","model":"gpt-6-astra"}}`}, work: true},
 	} {
-		for _, cut := range []string{"remove", "drop", "server_error"} {
+		for _, cut := range []string{"remove", "drop", "server_error", "failed429", "wserr429"} {
 			t.Run(tc.name+"/"+cut, func(t *testing.T) {
 				cfg := &config.Config{}
 				manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
@@ -90,6 +107,10 @@ func TestCodexNonStreamModelOnlyFailover(t *testing.T) {
 						_, _, _ = conn.ReadMessage()
 					case "server_error":
 						write(`{"type":"response.failed","response":{"id":"resp-a","model":"gpt-6-astra","error":{"type":"server_error","code":"server_error","message":"upstream failed"}}}`)
+					case "failed429":
+						write(`{"type":"response.failed","response":{"id":"resp-a","model":"gpt-6-astra","error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage exhausted","resets_in_seconds":60}}}`)
+					case "wserr429":
+						write(`{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage exhausted","resets_in_seconds":60}}`)
 					}
 				}))
 				defer upstream.Close()
@@ -143,9 +164,10 @@ func TestCodexNonStreamModelOnlyFailover(t *testing.T) {
 					if err != nil || !strings.Contains(string(resp.Payload), "resp-healthy") {
 						t.Errorf("model-only output must fail over: err=%v body=%s", err, resp.Payload)
 					}
-					if cut == "server_error" && !cooled {
-						t.Error("server_error must cool A")
-					}
+				}
+				wantCooled := cut == "server_error" || cut == "failed429" || cut == "wserr429"
+				if cooled != wantCooled {
+					t.Errorf("credential A cooled=%t want=%t after %s", cooled, wantCooled, cut)
 				}
 				if !reflect.DeepEqual(got, want) {
 					t.Errorf("attempts=%v want=%v", got, want)

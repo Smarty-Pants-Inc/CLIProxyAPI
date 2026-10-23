@@ -36,12 +36,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	modelGuard := helps.NewCodexModelGuard(baseModel)
-	// Non-stream responses still must not replay work already dispatched upstream.
+	// Non-stream responses must not replay dispatched work, but must retain
+	// upstream error scope so credential failures still receive normal cooling.
 	replaySafe := true
 	defer func() {
 		var stop interface{ IsRequestStop() bool }
 		if err != nil && !replaySafe && !errors.As(err, &stop) {
-			err = helps.WrapCodexNonReplayableError(err)
+			err = helps.WrapCodexNonReplayableStreamError(err)
 		}
 	}()
 	var unverifiedObserverEvents codexUnverifiedObserverEvents
