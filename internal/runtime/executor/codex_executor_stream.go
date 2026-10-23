@@ -382,28 +382,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 		if !streamStarted && bootstrapTerminalErr == nil {
 			closeBootstrapBody()
-			if errScan := scanner.Err(); errScan != nil {
-				// A cancelled downstream request must not be recorded as an upstream failure or
-				// penalise the credential; mirror the unbuffered goroutine's guard.
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx, errScan)
-				return nil, errScan
-			}
+			// Held chunks have not reached the downstream relay. EOF/read failure
+			// before release is still incomplete, even if translation produced nothing.
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if replaySafe && len(bufferedChunks) == 0 && len(initialChunks) == 0 {
-				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
-				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
-				reporter.PublishFailure(ctx, emptyErr)
-				closedCh := make(chan cliproxyexecutor.StreamChunk)
-				close(closedCh)
-				return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: closedCh}, nil
-			}
-			streamErr := newCodexIncompleteStreamError()
+			var progress helps.StreamProgress
+			cause := errors.Join(newCodexIncompleteStreamError(), scanner.Err())
+			streamErr := progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
 			return nil, streamErr
@@ -459,17 +445,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		progress.Sent(chunk)
 	}
 	streamReplaySafe := replaySafe
-	emittedCount := 0
-	for _, chunk := range bufferedChunks {
-		if len(chunk) > 0 {
-			emittedCount++
-		}
-	}
-	for _, chunk := range initialChunks {
-		if len(chunk) > 0 {
-			emittedCount++
-		}
-	}
 	go func() {
 		defer close(out)
 		sendError := func(err error) {
@@ -571,9 +546,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 					progress.Sent(chunks[i])
-					if len(chunks[i]) > 0 {
-						emittedCount++
-					}
 				case <-ctx.Done():
 					return
 				}
@@ -584,14 +556,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		if ctx.Err() != nil {
 			_ = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", ctx.Err())
-			return
-		}
-		// An empty translation may hide server-tool work. Only a replay-safe
-		// empty stream can use the conductor's pre-output disconnect failover.
-		if emittedCount == 0 && streamReplaySafe {
-			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
-			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
-			reporter.PublishFailure(ctx, emptyErr)
 			return
 		}
 		cause := error(newCodexIncompleteStreamError())

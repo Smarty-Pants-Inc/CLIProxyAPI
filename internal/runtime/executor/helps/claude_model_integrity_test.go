@@ -80,6 +80,9 @@ func TestClaudeModelStreamIdentity(t *testing.T) {
 				if strings.Contains(err.Error(), "MUST_NOT_LEAK") {
 					t.Fatal("upstream payload escaped in error")
 				}
+				if got, want := errors.Is(err, io.ErrUnexpectedEOF), tc.name == "empty" || tc.name == "ping-only"; got != want {
+					t.Fatalf("EOF classification = %t, want %t: %v", got, want, err)
+				}
 				return
 			}
 			if err != nil {

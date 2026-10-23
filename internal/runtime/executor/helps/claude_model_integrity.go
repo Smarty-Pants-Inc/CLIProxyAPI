@@ -18,7 +18,14 @@ func (e *ClaudeModelMismatchError) StatusCode() int     { return e.cause.StatusC
 func (e *ClaudeModelMismatchError) Unwrap() error       { return e.cause }
 func (*ClaudeModelMismatchError) IsRequestScoped() bool { return true }
 
-func claudeModelMismatch() error {
+// Preserve the identity guard's fail-closed API for non-stream callers while
+// exposing EOF to streaming callers, which report it as an incomplete stream.
+type claudeModelStreamEOFError struct{ *ClaudeModelMismatchError }
+
+func (e *claudeModelStreamEOFError) Unwrap() error      { return e.ClaudeModelMismatchError }
+func (*claudeModelStreamEOFError) Is(target error) bool { return target == io.ErrUnexpectedEOF }
+
+func claudeModelMismatch() *ClaudeModelMismatchError {
 	// Do not include unverified upstream strings in the downstream error.
 	return &ClaudeModelMismatchError{&cliproxyauth.Error{
 		Code: "model_mismatch", Message: "upstream Claude model is missing or does not match the requested upstream model",
@@ -69,7 +76,9 @@ func (g *claudeModelStream) next() ([]byte, error) {
 			return nil, err
 		}
 		if !g.verified {
-			return nil, claudeModelMismatch()
+			// Keep the fail-closed identity classification for non-stream callers,
+			// but let streaming callers distinguish cutoff from an observed mismatch.
+			return nil, &claudeModelStreamEOFError{claudeModelMismatch()}
 		}
 		return nil, io.EOF
 	}

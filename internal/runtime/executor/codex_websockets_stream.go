@@ -331,6 +331,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
 				mappedErr := mapCodexWebsocketReadError(errRead)
+				var tooBig codexWebsocketMessageTooBigError
+				if !errors.As(mappedErr, &tooBig) {
+					// Buffered frames have not reached the downstream relay yet.
+					var progress helps.StreamProgress
+					mappedErr = progress.Incomplete(ctx, e.Identifier(), req.Model, http.StatusSwitchingProtocols, "response.completed", mappedErr)
+				}
 				if sess != nil {
 					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "read_error", mappedErr)
 					sess.clearActive(conn, readCh)
@@ -341,6 +347,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				} else {
 					logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "read_error", mappedErr)
 					_ = closer.Close()
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
 				reporter.PublishFailure(ctx, mappedErr)
@@ -700,13 +709,17 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
-				if sess != nil && ctx != nil && ctx.Err() != nil {
+				if ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 					return
 				}
 				mappedErr := mapCodexWebsocketReadError(errRead)
+				var tooBig codexWebsocketMessageTooBigError
+				if !errors.As(mappedErr, &tooBig) {
+					mappedErr = progress.Incomplete(ctx, e.Identifier(), req.Model, http.StatusSwitchingProtocols, "response.completed", mappedErr)
+				}
 				terminateReason = "read_error"
 				terminateErr = mappedErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)

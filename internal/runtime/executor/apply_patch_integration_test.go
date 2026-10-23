@@ -204,12 +204,12 @@ func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 						t.Fatal(errExecuteStream)
 					}
 					if strings.HasPrefix(provider, "claude") && mode == "empty" {
-						// No identity exists to authorize any downstream bytes, even a
-						// translated apply_patch failure. The fork guard wins here.
+						// No identity exists to authorize payload bytes. Report a cut
+						// stream, not a translated apply_patch failure or clean EOF.
 						failures := 0
 						for chunk := range stream.Chunks {
-							var mismatch *helps.ClaudeModelMismatchError
-							if len(chunk.Payload) != 0 || !errors.As(chunk.Err, &mismatch) || mismatch.StatusCode() != http.StatusBadGateway {
+							var incomplete *helps.IncompleteStreamError
+							if len(chunk.Payload) != 0 || !errors.As(chunk.Err, &incomplete) || incomplete.StatusCode() != http.StatusBadGateway {
 								t.Fatalf("unverified empty stream exposed output: %s %v", chunk.Payload, chunk.Err)
 							}
 							failures++

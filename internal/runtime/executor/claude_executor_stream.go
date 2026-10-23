@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -396,6 +397,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		guardedBody, errIdentity := helps.GuardClaudeModelStream(decodedBody, gjson.GetBytes(bodyForUpstream, "model").String())
 		if errIdentity != nil {
 			if !emitCancellation(errIdentity) {
+				var mismatch *helps.ClaudeModelMismatchError
+				var refusal *cliproxyauth.Error
+				if errors.Is(errIdentity, io.ErrUnexpectedEOF) {
+					errIdentity = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", io.ErrUnexpectedEOF)
+				} else if !errors.As(errIdentity, &mismatch) && !errors.As(errIdentity, &refusal) {
+					errIdentity = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "message_stop", errIdentity)
+				}
 				emitResponseError(errIdentity)
 			}
 			return
