@@ -129,6 +129,14 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			selection.End("attempt_bind_failed")
 			return cliproxyexecutor.Response{}, errBind
 		}
+		// Socket retirement must not cancel the attempt before its terminal error
+		// and Home result are recorded (non-stream twin of the stream hold).
+		releaseTerminal := selection.holdStreamTerminalDelivery()
+		releaseBoundAttempt := releaseAttempt
+		releaseAttempt = func() {
+			releaseBoundAttempt()
+			releaseTerminal()
+		}
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = newUpstreamAttemptContext(execCtx)
