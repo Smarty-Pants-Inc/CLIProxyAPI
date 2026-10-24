@@ -307,6 +307,15 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "antigravity":
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	case "claude":
+		// Auth watcher updates must not revoke native pool trust or cancel work.
+		// Keep the legacy (pools-OFF) rebinding path unchanged.
+		if cfg != nil && cfg.AccountPools != nil && !forceReplace {
+			if existing, ok := s.coreManager.Executor("claude"); ok {
+				if _, native := existing.(*executor.ClaudeExecutor); native {
+					return
+				}
+			}
+		}
 		if err := s.coreManager.RegisterNativePoolExecutor(executor.NewClaudeExecutor(cfg)); err != nil {
 			log.WithError(err).Error("register native Claude pool executor")
 		}
