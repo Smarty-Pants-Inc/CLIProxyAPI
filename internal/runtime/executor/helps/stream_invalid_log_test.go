@@ -7,12 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
-// Trust boundary: retain a bounded cause for operators, never secrets in the
+// Trust boundary: retain the known scanner failure for operators, never secrets in the
 // client error or raw upstream diagnostics in logs (PR #174 round-5 N3).
 func TestStreamInvalidLogsSanitizedCause(t *testing.T) {
 	hook := logtest.NewGlobal()
@@ -27,7 +26,7 @@ func TestStreamInvalidLogsSanitizedCause(t *testing.T) {
 		}
 		found = true
 		diagnostic, ok := entry.Data["upstream_error"].(string)
-		if !ok || diagnostic != logging.SafeDiagnosticForLog(cause.Error()) || strings.Contains(diagnostic, "diagnostic-secret") || entry.Level != logrus.WarnLevel || entry.Data["code"] != "upstream_stream_invalid" {
+		if !ok || diagnostic != bufio.ErrTooLong.Error() || strings.Contains(diagnostic, "diagnostic-secret") || entry.Level != logrus.WarnLevel || entry.Data["code"] != "upstream_stream_invalid" {
 			t.Fatalf("unsafe or missing cause: %+v", entry)
 		}
 	}

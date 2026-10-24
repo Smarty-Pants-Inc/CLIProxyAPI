@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/sirupsen/logrus"
@@ -19,6 +20,8 @@ import (
 type StreamProgress struct {
 	Bytes  int64
 	Chunks int64
+	// StartedAt includes any handshake buffering before downstream output.
+	StartedAt time.Time
 }
 
 func (p *StreamProgress) Sent(payload []byte) {
@@ -42,7 +45,8 @@ func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string,
 	if errors.Is(cause, bufio.ErrTooLong) {
 		fields["type"] = "upstream_stream_invalid"
 		fields["code"] = "upstream_stream_invalid"
-		fields["upstream_error"] = logging.SafeDiagnosticForLog(cause.Error())
+		// Only the known scanner failure is safe to render, not any wrapped prose.
+		fields["upstream_error"] = bufio.ErrTooLong.Error()
 		LogWithRequestID(ctx).WithFields(fields).Warn("upstream stream invalid")
 		return NewInvalidStreamError(cause)
 	}
@@ -58,7 +62,8 @@ func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string,
 		// diagnostics. Use the shared bounded, redacted diagnostic representation.
 		body := logging.SafeDiagnosticForLog(cause.Error())
 		detail["upstream_error"] = body
-		fields["upstream_error"] = body
+		// Ordinary logs must not contain any upstream body text, even redacted.
+		fields["upstream_error"] = logging.SafeErrorDiagnostic(cause)
 		for _, path := range []string{"error.code", "response.error.code", "code"} {
 			if code := gjson.Get(body, path); code.Exists() {
 				detail["upstream_code"] = code.Value()
@@ -70,6 +75,9 @@ func (p *StreamProgress) Incomplete(ctx context.Context, provider, model string,
 	}
 	fields["type"] = "upstream_stream_incomplete"
 	fields["code"] = "upstream_stream_incomplete"
+	if !p.StartedAt.IsZero() {
+		fields["stream_elapsed_seconds"] = time.Since(p.StartedAt).Seconds()
+	}
 	LogWithRequestID(ctx).WithFields(fields).Warn("upstream stream incomplete")
 	body, _ := json.Marshal(map[string]any{"error": detail})
 	return &IncompleteStreamError{body: string(body), cause: cause}
