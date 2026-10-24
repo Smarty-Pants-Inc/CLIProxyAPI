@@ -203,8 +203,14 @@ func (m *Manager) acquirePoolProof(ctx context.Context, candidate *Auth) (*Auth,
 	v, _ := m.poolRuntime.acquisitions.LoadOrStore(candidate.ID, &sync.Mutex{})
 	lock := v.(*sync.Mutex)
 	lock.Lock()
+	// Identity acquisition can rotate refresh tokens too. Share the ordinary
+	// refresh lock and read the current credential only after both locks are held.
+	refreshValue, _ := m.refreshLocks.LoadOrStore(candidate.ID, &authRefreshLock{})
+	refreshLock := refreshValue.(*authRefreshLock)
+	refreshLock.mu.Lock()
 	var warning *nativePoolTransitionWarning
 	defer func() {
+		refreshLock.mu.Unlock()
 		lock.Unlock()
 		logPoolTransitionWarning(warning)
 	}()
