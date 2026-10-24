@@ -215,10 +215,14 @@ type Manager struct {
 	// refreshJobs retains queued and running jobs across loop restarts under m.mu.
 	refreshJobs map[string]*authRefreshJob
 
-	keyPolicyMu         sync.Mutex
-	keyPolicyAccounts   map[string]*keyPolicyAccount
-	keyPolicyNow        func() time.Time
-	requestPrepareLocks sync.Map
+	poolConfigInitialized bool
+	poolInvalid           atomic.Bool
+	poolRuntime           nativePoolRuntime
+	poolCounters          map[string]int64
+	keyPolicyMu           sync.Mutex
+	keyPolicyAccounts     map[string]*keyPolicyAccount
+	keyPolicyNow          func() time.Time
+	requestPrepareLocks   sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map

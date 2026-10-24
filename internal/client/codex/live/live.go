@@ -59,6 +59,8 @@ type Handler struct {
 	mediaRelayConfigured bool
 	mediaLimiter         *mediaSessionLimiter
 	rawRelayOwners       map[*liveSessionResources]struct{}
+	poolCalls            map[*liveCallLifetime]struct{}
+	poolClosed           bool
 }
 
 // NewHandler creates a Codex live session handler.
@@ -119,6 +121,10 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 
 // refuseKeyPolicy runs before parsing, claiming sessions, creating secrets or dialing.
 func (h *Handler) refuseKeyPolicy(c *gin.Context) bool {
+	if h.poolModeEnabled() {
+		writePoolLiveError(c, http.StatusServiceUnavailable, "api_key_pool_path_unavailable")
+		return true
+	}
 	owner, _ := requestOwner(c)
 	restricted := false
 	if h != nil {
@@ -220,11 +226,19 @@ func (h *Handler) Close() {
 		return
 	}
 	h.mediaRelayMu.Lock()
+	h.poolClosed = true
+	var poolCalls []*liveCallLifetime
+	for lifetime := range h.poolCalls {
+		poolCalls = append(poolCalls, lifetime)
+	}
 	var retire []*liveSessionResources
 	for resources := range h.rawRelayOwners {
 		retire = append(retire, resources)
 	}
 	h.mediaRelayMu.Unlock()
+	for _, lifetime := range poolCalls {
+		lifetime.requestClose("server_stopped")
+	}
 	for _, resources := range retire {
 		resources.close()
 	}
@@ -234,10 +248,17 @@ func (h *Handler) Close() {
 	if h.clientSecrets != nil {
 		h.clientSecrets.close()
 	}
+	for _, lifetime := range poolCalls {
+		lifetime.waitClosed()
+	}
 }
 
 // Handle forwards a WebRTC SDP bootstrap request to the Codex realtime calls endpoint.
 func (h *Handler) Handle(c *gin.Context) {
+	if h.poolModeEnabled() {
+		h.handlePoolLive(c)
+		return
+	}
 	if h.refuseKeyPolicy(c) {
 		return
 	}

@@ -303,6 +303,8 @@ func (s *fakeMediaSession) CloseWithReason(reason string) error {
 	return nil
 }
 
+func (s *fakeMediaSession) WaitClosed() error { return nil }
+
 func registerCredential(t *testing.T, manager *auth.Manager, credential *auth.Auth) {
 	t.Helper()
 	if _, errRegister := manager.Register(context.Background(), credential); errRegister != nil {

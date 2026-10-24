@@ -28,6 +28,7 @@ type keyPolicyAccount struct {
 	requests, tokens int64
 }
 type KeyPolicyOperation struct {
+	pool                     *poolOperationState
 	manager                  *Manager
 	policies                 []config.APIKeyPolicy
 	account                  *keyPolicyAccount
@@ -44,7 +45,13 @@ func copyPolicies(p []config.APIKeyPolicy) []config.APIKeyPolicy {
 	return (&config.Config{SDKConfig: config.SDKConfig{APIKeyPolicies: p}}).CloneForRuntime().APIKeyPolicies
 }
 func (m *Manager) KeyPolicies(key string) []config.APIKeyPolicy {
+	if m == nil {
+		return nil
+	}
 	cfg, _ := m.runtimeConfig.Load().(*config.Config)
+	if cfg == nil {
+		return nil
+	}
 	var out []config.APIKeyPolicy
 	for _, p := range cfg.APIKeyPolicies {
 		if p.KeySHA256 == keyDigest(key) {
@@ -60,6 +67,9 @@ func (m *Manager) KeyPolicies(key string) []config.APIKeyPolicy {
 // ponytail: reuse the authenticated principal, never re-read competing client headers.
 // Restricted clients cannot enter SDK raw execution without policy admission.
 func (m *Manager) MissingKeyPolicy(ctx context.Context) bool {
+	if m != nil && (m.PoolMode() || KeyPolicyFromContext(ctx).IsPoolOperation()) {
+		return m.checkPoolAdmission(ctx) != nil
+	}
 	if m == nil || ctx == nil || KeyPolicyFromContext(ctx) != nil {
 		return false
 	}
@@ -95,6 +105,9 @@ func containsExact(values []string, value string) bool {
 // BeginKeyPolicy captures the effective authentication/operation floor. One active
 // operation per key bounds token overshoot to one operation, independent of callers.
 func (m *Manager) BeginKeyPolicy(ctx context.Context, policies []config.APIKeyPolicy, model string) (context.Context, func(), error) {
+	if m.PoolMode() {
+		return ctx, nil, poolError("admission_required", 503)
+	}
 	if len(policies) == 0 {
 		return ctx, func() {}, nil
 	}
@@ -211,6 +224,9 @@ func saturatingAdd(a, b int64) int64 {
 	return a + b
 }
 func (op *KeyPolicyOperation) observe(r usage.Record) {
+	if op.IsPoolOperation() {
+		return
+	}
 	op.mu.Lock()
 	defer op.mu.Unlock()
 	if r.Detail.Incomplete || r.Detail.InputTokens < 0 || r.Detail.OutputTokens < 0 {
@@ -320,7 +336,13 @@ func (op *KeyPolicyOperation) selectExecutor(req ex.Request, opts ex.Options) (*
 // CheckKeyPolicySend binds the final model and published credential snapshot and
 // forbids redirects/replays. Runtime policy relaxation cannot erase admission.
 func CheckKeyPolicySend(req *http.Request) error {
+	if req == nil {
+		return policyError("api_key_policy_unavailable", 503)
+	}
 	op := KeyPolicyFromContext(req.Context())
+	if op.IsPoolOperation() {
+		return CheckNativePoolSend(req)
+	}
 	if op == nil {
 		return nil
 	}

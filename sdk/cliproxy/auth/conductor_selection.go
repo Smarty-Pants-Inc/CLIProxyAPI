@@ -76,6 +76,7 @@ type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
 type authSelectionEligibility struct {
+	pool             *poolEligibility
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
@@ -100,6 +101,10 @@ func credentialPolicyFromContext(ctx context.Context) string {
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
 	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
 	if ctx != nil {
+		eligibility.pool, _ = ctx.Value(poolEligibilityContextKey{}).(*poolEligibility)
+		if op := KeyPolicyFromContext(ctx); op.IsPoolOperation() {
+			eligibility.pool = op.poolEligibilitySnapshot()
+		}
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
 	}
@@ -108,6 +113,9 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 
 func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if auth == nil {
+		return false
+	}
+	if e.pool != nil && !e.pool.allows(auth) {
 		return false
 	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
@@ -1898,6 +1906,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 // SelectAuth selects one credential through the configured scheduling strategy.
 // It does not execute or alter the selected credential's result state.
 func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	if m.PoolMode() || KeyPolicyFromContext(ctx).IsPoolOperation() {
+		return nil, poolError("admission_required", 503)
+	}
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -1914,6 +1925,9 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 // SelectAuthByKind selects one credential of the required kind through the
 // configured scheduling strategy. Credentials of other kinds are skipped.
 func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, requiredKind string, opts cliproxyexecutor.Options) (*Auth, error) {
+	if m.PoolMode() || KeyPolicyFromContext(ctx).IsPoolOperation() {
+		return nil, poolError("admission_required", 503)
+	}
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -1938,6 +1952,9 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 
 // SelectAuthWithCredentialPolicy selects one local credential allowed by a fixed policy.
 func (m *Manager) SelectAuthWithCredentialPolicy(ctx context.Context, provider, model, policy string, opts cliproxyexecutor.Options) (*Auth, error) {
+	if m.PoolMode() || KeyPolicyFromContext(ctx).IsPoolOperation() {
+		return nil, poolError("admission_required", 503)
+	}
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -2241,7 +2258,14 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	return authCopy, executor, providerKey, nil
 }
 
-func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (poolAuth *Auth, poolExec ProviderExecutor, poolProvider string, poolErr error) {
+	defer func() {
+		var typed *Error
+		missing := errors.As(poolErr, &typed) && typed != nil && (typed.Code == "auth_not_found" || typed.Code == "provider_not_found" || typed.Code == "executor_not_found")
+		if KeyPolicyFromContext(ctx).IsPoolOperation() && (missing || isAuthUnavailableError(poolErr)) {
+			poolErr = wrapRequestStopError(poolError("unavailable", 503))
+		}
+	}()
 	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)

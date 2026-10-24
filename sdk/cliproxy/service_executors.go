@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 type openAICompatibilityRegistrationCache struct {
@@ -254,6 +255,11 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
+	if cfg != nil && cfg.AccountPools != nil {
+		// Native pool factories build the configured credential/global proxy
+		// themselves. No opaque host RoundTripper may sit below their fence.
+		s.coreManager.SetRoundTripperProvider(nil)
+	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
 		// Replacing the executor closes every live Codex websocket session, so a
 		// config reload keeps the executor already bound to that exact config.
@@ -265,7 +271,9 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 				return
 			}
 		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
+		if err := s.coreManager.RegisterNativePoolExecutor(executor.NewCodexAutoExecutor(cfg)); err != nil {
+			log.WithError(err).Error("register native Codex pool executor")
+		}
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -299,7 +307,18 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "antigravity":
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
+		// Auth watcher updates must not revoke native pool trust or cancel work.
+		// Keep the legacy (pools-OFF) rebinding path unchanged.
+		if cfg != nil && cfg.AccountPools != nil && !forceReplace {
+			if existing, ok := s.coreManager.Executor("claude"); ok {
+				if _, native := existing.(*executor.ClaudeExecutor); native {
+					return
+				}
+			}
+		}
+		if err := s.coreManager.RegisterNativePoolExecutor(executor.NewClaudeExecutor(cfg)); err != nil {
+			log.WithError(err).Error("register native Claude pool executor")
+		}
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
 	case "xai":

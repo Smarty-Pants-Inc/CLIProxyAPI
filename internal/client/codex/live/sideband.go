@@ -54,13 +54,16 @@ type liveSession struct {
 	homeSelection         *auth.HomeDispatchSelection
 	media                 mediaRelaySession
 	resources             *liveSessionResources
+	poolOp                *auth.KeyPolicyOperation
+	lifetime              *liveCallLifetime
 	token                 uint64
 }
 
 type liveSessionResources struct {
-	mu      sync.Mutex
-	closed  bool
-	closers []*liveResourceRegistration
+	mu        sync.Mutex
+	closed    bool
+	closeDone chan struct{}
+	closers   []*liveResourceRegistration
 }
 
 type liveResourceRegistration struct {
@@ -116,6 +119,13 @@ func (s *sessionStore) put(callID string, session liveSession) liveSession {
 	s.sessions[callID] = entry
 	s.mu.Unlock()
 
+	if previous != nil && previous.session.lifetime != nil {
+		if previous.timer != nil {
+			previous.timer.Stop()
+		}
+		endLiveSession(previous.session, "session_replaced")
+		return session
+	}
 	if previous != nil {
 		if previous.timer != nil {
 			previous.timer.Stop()
@@ -209,6 +219,12 @@ func (s *sessionStore) closeAll(reason string) {
 	for _, entry := range entries {
 		endLiveSession(entry.session, reason)
 	}
+	// External shutdown waits outside the store lock; callbacks only request close.
+	for _, entry := range entries {
+		if entry.session.lifetime != nil {
+			entry.session.lifetime.waitClosed()
+		}
+	}
 }
 
 func (s *sessionStore) expiryDuration() time.Duration {
@@ -244,6 +260,10 @@ func (s *sessionStore) peek(callID string) (liveSession, bool) {
 }
 
 func endLiveSession(session liveSession, reason string) {
+	if session.lifetime != nil {
+		session.lifetime.requestClose(reason)
+		return
+	}
 	if session.resources != nil {
 		session.resources.close()
 	}
@@ -291,23 +311,37 @@ func (r *liveSessionResources) add(closers ...func() error) func() {
 	}
 }
 
-func (r *liveSessionResources) close() {
+// requestClose never waits and is safe inside a closer or a media callback.
+func (r *liveSessionResources) requestClose() <-chan struct{} {
 	if r == nil {
-		return
+		done := make(chan struct{})
+		close(done)
+		return done
 	}
 	r.mu.Lock()
+	if r.closeDone == nil {
+		r.closeDone = make(chan struct{})
+	}
+	done := r.closeDone
 	if r.closed {
 		r.mu.Unlock()
-		return
+		return done
 	}
 	r.closed = true
 	closers := r.closers
 	r.closers = nil
 	r.mu.Unlock()
-	for _, registration := range closers {
-		closeSessionResources(registration.closers)
-	}
+	go func() {
+		for _, registration := range closers {
+			closeSessionResources(registration.closers)
+		}
+		close(done)
+	}()
+	return done
 }
+
+// close is an external completion barrier. Resource callbacks use requestClose.
+func (r *liveSessionResources) close() { <-r.requestClose() }
 
 func closeSessionResources(closers []func() error) {
 	for _, closer := range closers {
@@ -330,6 +364,10 @@ const (
 
 // HandleSideband relays live session sideband WebSocket frames bidirectionally.
 func (h *Handler) HandleSideband(c *gin.Context) {
+	if h.poolModeEnabled() {
+		h.handlePoolSideband(c)
+		return
+	}
 	if h.refuseKeyPolicy(c) {
 		return
 	}

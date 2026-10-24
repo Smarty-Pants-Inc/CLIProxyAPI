@@ -391,6 +391,12 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return f.fallback.RoundTrip(req)
 }
 
+// newFallbackHTTPTransport is the native transport constructor. Policy fences
+// are installed by the client factory after construction.
+var newFallbackHTTPTransport = func(anthropic, chrome, fallback http.RoundTripper) http.RoundTripper {
+	return &fallbackRoundTripper{anthropic: anthropic, chrome: chrome, fallback: fallback}
+}
+
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
 // fingerprints for protected hosts. It uses Claude Code's Node/OpenSSL profile
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
@@ -417,15 +423,11 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 
 	client := &http.Client{
-		Transport: &fallbackRoundTripper{
-			anthropic: anthropicRT,
-			chrome:    chromeRT,
-			fallback:  standardTransport,
-		},
+		Transport: newFallbackHTTPTransport(anthropicRT, chromeRT, standardTransport),
 	}
 	client.Transport = restrictCodexAuthority(ctx, auth, client.Transport)
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
-	return client
+	return fenceNativePoolClient(ctx, cfg, client)
 }

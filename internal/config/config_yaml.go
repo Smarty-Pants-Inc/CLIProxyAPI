@@ -421,7 +421,7 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	}
 
 	// Pointer-backed integer overrides retain explicit zero, including quota expiry.
-	if len(path) > 0 && (path[len(path)-1] == "weight" || path[len(path)-1] == "request-retry" || path[len(path)-1] == "exhausted-reading-max-age-seconds") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
+	if len(path) > 0 && (path[len(path)-1] == "weight" || path[len(path)-1] == "request-retry" || path[len(path)-1] == "exhausted-reading-max-age-seconds" || path[len(path)-1] == "max-in-flight") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
 		return false
 	}
 
