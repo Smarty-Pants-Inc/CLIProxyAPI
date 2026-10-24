@@ -59,10 +59,12 @@ var logFieldOrder = []string{
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
 	"credential", "auth_ref", "auth_id", "auth_index", "connection", "proxy_scheme", "remote_transport",
 	"operation", "upstream_host", "reused", "was_idle", "idle_time",
+	"upstream_status", "upstream_error", "partial_bytes", "partial_chunks", "stream_elapsed_seconds",
 	"media_session_id", "call_id", "peer", "state", "reason",
 }
 
 var quotedLogFields = map[string]struct{}{
+	"upstream_error":   {},
 	"credential":       {},
 	"auth_ref":         {},
 	"auth_id":          {},
@@ -97,6 +99,8 @@ func formatLogFieldValue(key string, value any) string {
 				value = safe
 			}
 		}
+	case "upstream_error":
+		value = SafeDiagnosticForLog(fmt.Sprint(value))
 	case "error":
 		if err, ok := value.(error); ok {
 			value = SafeErrorDiagnostic(err)

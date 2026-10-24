@@ -151,6 +151,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
+	streamStartedAt := time.Now()
+
 	// Default on: hold the handshake until the first output or terminal frame so an overload or
 	// quota refusal can fail over. An explicit stream-bootstrap-buffering: false releases right
 	// after the exact-model identity is verified; the pre-identity hold always runs (fail-closed).
@@ -277,7 +279,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						}
 						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}
-					var progress helps.StreamProgress
+					progress := helps.StreamProgress{StartedAt: streamStartedAt}
 					for _, chunk := range bufferedChunks {
 						progress.Sent(chunk)
 					}
@@ -387,8 +389,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			var progress helps.StreamProgress
-			cause := errors.Join(newCodexIncompleteStreamError(), scanner.Err())
+			progress := helps.StreamProgress{StartedAt: streamStartedAt}
+			readErr := scanner.Err()
+			if readErr == nil {
+				readErr = io.EOF
+			}
+			cause := errors.Join(newCodexIncompleteStreamError(), readErr)
 			streamErr := progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
@@ -437,7 +443,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
 
-	var progress helps.StreamProgress
+	progress := helps.StreamProgress{StartedAt: streamStartedAt}
 	for _, chunk := range bufferedChunks {
 		progress.Sent(chunk)
 	}
@@ -558,10 +564,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			_ = progress.Incomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", ctx.Err())
 			return
 		}
-		cause := error(newCodexIncompleteStreamError())
-		if scanner.Err() != nil {
-			cause = errors.Join(cause, scanner.Err())
+		readErr := scanner.Err()
+		if readErr == nil {
+			readErr = io.EOF
 		}
+		cause := errors.Join(newCodexIncompleteStreamError(), readErr)
 		streamErr := progress.ReplaySafeIncomplete(ctx, e.Identifier(), req.Model, httpResp.StatusCode, "response.completed", cause)
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
