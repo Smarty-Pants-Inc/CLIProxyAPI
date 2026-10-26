@@ -18,6 +18,9 @@ type Result struct {
 	Provider  string
 	Principal string
 	Metadata  map[string]string
+	// RouteKeyDigests is set by Manager after authentication, never trusted from a provider.
+	// It preserves client-key route attribution when a provider maps keys to account identities.
+	RouteKeyDigests []string
 }
 
 var (
