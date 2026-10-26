@@ -129,6 +129,16 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return evaluator.ShouldRefresh(now, a)
 	}
 
+	if _, hasSIWC, needSIWC := CodexSIWCNeedsRefresh(a, now); hasSIWC {
+		if needSIWC {
+			return true
+		}
+		if _, hasOuter, needOuter := CodexOuterNeedsRefresh(a, now); hasOuter {
+			return needOuter
+		}
+		return false
+	}
+
 	lastRefresh := a.LastRefreshedAt
 	if lastRefresh.IsZero() {
 		if ts, ok := authLastRefreshTimestamp(a); ok {
@@ -384,11 +394,18 @@ type authRefreshLock struct {
 	mu sync.Mutex
 }
 
-func authAccessToken(auth *Auth) string {
+func authOuterAccessToken(auth *Auth) string {
 	if token := authMetadataString(auth, "access_token"); token != "" {
 		return token
 	}
 	return authMetadataString(auth, "accessToken")
+}
+
+func authAccessToken(auth *Auth) string {
+	if IsCodexUseSIWC(auth) {
+		return authSIWCTokenField(auth, "access_token")
+	}
+	return authOuterAccessToken(auth)
 }
 
 func authRefreshToken(auth *Auth) string {
@@ -405,6 +422,9 @@ func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refreshToken") != "" {
 		return true
 	}
+	if _, hasSIWC, _ := CodexSIWCNeedsRefresh(auth, time.Now()); hasSIWC {
+		return true
+	}
 	// Meta exchanges its device token for a replacement API key after a 401.
 	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") &&
 		(authMetadataString(auth, "dca_token") != "" || strings.TrimSpace(auth.Attributes["dca_token"]) != "")
@@ -416,7 +436,7 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existing == nil || incoming == nil {
 		return false
 	}
-	if authAccessToken(existing) != authAccessToken(incoming) {
+	if authAccessToken(existing) != authAccessToken(incoming) || authOuterAccessToken(existing) != authOuterAccessToken(incoming) {
 		return true
 	}
 	if authRefreshToken(existing) != authRefreshToken(incoming) {
@@ -450,6 +470,19 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingKey != incomingKey {
 		return true
 	}
+	if authSIWCTokenField(existing, "access_token") != authSIWCTokenField(incoming, "access_token") ||
+		authSIWCTokenField(existing, "refresh_token") != authSIWCTokenField(incoming, "refresh_token") ||
+		authSIWCTokenField(existing, "id_token") != authSIWCTokenField(incoming, "id_token") ||
+		authSIWCTokenField(existing, "client_id") != authSIWCTokenField(incoming, "client_id") {
+		return true
+	}
+	existingValue, _ := existing.MetadataValue("use_siwc")
+	incomingValue, _ := incoming.MetadataValue("use_siwc")
+	existingUseSIWC, existingHasUseSIWC := parseBoolAny(existingValue)
+	incomingUseSIWC, incomingHasUseSIWC := parseBoolAny(incomingValue)
+	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
+		return true
+	}
 	return false
 }
 
@@ -475,6 +508,16 @@ func refreshBindingChanged(base, current *Auth) bool {
 		}
 	}
 	return false
+}
+
+func authSIWCTokenField(auth *Auth, key string) string {
+	value, _ := auth.MetadataValue("siwc")
+	siwcMap, ok := value.(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return ""
+	}
+	val, _ := siwcMap[key].(string)
+	return strings.TrimSpace(val)
 }
 
 // ClearUnauthorizedModelStates resets model states whose last error was an unauthorized failure.
@@ -596,19 +639,29 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 
 type forceRefreshContextKey struct{}
 
-func withForceRefresh(ctx context.Context) context.Context {
+// WithForceRefresh marks ctx as an explicit forced credential refresh.
+func WithForceRefresh(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, forceRefreshContextKey{}, true)
 }
 
-func isForceRefreshContext(ctx context.Context) bool {
+// IsForceRefreshContext reports whether ctx carries an explicit forced credential refresh marker.
+func IsForceRefreshContext(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
 	v, ok := ctx.Value(forceRefreshContextKey{}).(bool)
 	return ok && v
+}
+
+func withForceRefresh(ctx context.Context) context.Context {
+	return WithForceRefresh(ctx)
+}
+
+func isForceRefreshContext(ctx context.Context) bool {
+	return IsForceRefreshContext(ctx)
 }
 
 func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
@@ -691,7 +744,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 
 	base := auth
-	updated, err := exec.Refresh(ctx, base.Clone())
+	updated, err := exec.Refresh(m.withRefreshPersistenceFence(ctx, base), base.Clone())
 	now := time.Now()
 	if err != nil && errors.Is(err, context.Canceled) {
 		logEntryWithRequestID(ctx).Debugf("refresh canceled for %s", formatAuthIdentity(auth, auth.Provider))

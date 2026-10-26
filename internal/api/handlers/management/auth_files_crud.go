@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -58,7 +60,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 
 	fileHeaders, errMultipart := h.multipartAuthFileHeaders(c)
 	if errMultipart != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid multipart form: %v", errMultipart)})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errMultipart, http.StatusBadRequest), gin.H{"error": fmt.Sprintf("invalid multipart form: %v", errMultipart)})
 		return
 	}
 	if len(fileHeaders) == 1 {
@@ -119,7 +121,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	}
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(400, gin.H{"error": "failed to read body"})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), gin.H{"error": "failed to read body"})
 		return
 	}
 	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
@@ -157,7 +159,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					full = abs
 				}
 			}
-			if err = os.Remove(full); err == nil {
+			if err = codexauth.WithFileLock(full, func() error { return os.Remove(full) }); err == nil {
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
 					c.JSON(500, gin.H{"error": errDel.Error()})
 					return
@@ -172,7 +174,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 
 	names, errNames := requestedAuthFileNamesForDelete(c)
 	if errNames != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errNames.Error()})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errNames, http.StatusBadRequest), gin.H{"error": errNames.Error()})
 		return
 	}
 	if len(names) == 0 {
@@ -295,6 +297,10 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to read body")
 	}
 	body = bytes.TrimSpace(body)
@@ -367,7 +373,7 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
-	if errRemove := os.Remove(targetPath); errRemove != nil {
+	if errRemove := codexauth.WithFileLock(targetPath, func() error { return os.Remove(targetPath) }); errRemove != nil {
 		if os.IsNotExist(errRemove) {
 			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
 		}
