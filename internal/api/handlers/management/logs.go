@@ -3,6 +3,7 @@ package management
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -502,6 +503,12 @@ func (h *Handler) collectLogFiles(dir string) ([]string, error) {
 		order int64
 	}
 	cands := make([]candidate, 0, len(entries))
+	names := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			names[entry.Name()] = true
+		}
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -509,6 +516,11 @@ func (h *Handler) collectLogFiles(dir string) ([]string, error) {
 		name := entry.Name()
 		if name == defaultLogFileName {
 			cands = append(cands, candidate{path: filepath.Join(dir, name), order: 0})
+			continue
+		}
+		// Lumberjack exposes the .gz name while compression is still writing.
+		// Until it removes the raw backup, read that complete copy only.
+		if strings.HasSuffix(name, ".gz") && names[strings.TrimSuffix(name, ".gz")] {
 			continue
 		}
 		if order, ok := rotationOrder(name); ok {
@@ -559,7 +571,16 @@ func (acc *logAccumulator) consumeFile(path string) error {
 		_ = file.Close()
 	}()
 
-	scanner := bufio.NewScanner(file)
+	var reader io.Reader = file
+	if strings.HasSuffix(path, ".gz") {
+		zr, errGzip := gzip.NewReader(file)
+		if errGzip != nil {
+			return errGzip
+		}
+		defer func() { _ = zr.Close() }()
+		reader = zr
+	}
+	scanner := bufio.NewScanner(reader)
 	buf := make([]byte, 0, logScannerInitialBuffer)
 	scanner.Buffer(buf, logScannerMaxBuffer)
 	for scanner.Scan() {
@@ -699,7 +720,7 @@ func tailStartOffset(path string, boundary int64, limit int) (int64, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
-	file, errOpen := os.Open(path)
+	file, errOpen := openLogReadFile(path)
 	if errOpen != nil {
 		return 0, errOpen
 	}
@@ -833,7 +854,12 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 		nameToIndex[filepath.Base(files[i])] = i
 	}
 	deferEmptyMainMatch := false
-	if index, ok := nameToIndex[cursor.File]; ok {
+	index, ok := nameToIndex[cursor.File]
+	if !ok && !strings.HasSuffix(cursor.File, ".gz") {
+		// Lumberjack can finish compressing a backup after its cursor was issued.
+		index, ok = nameToIndex[cursor.File+".gz"]
+	}
+	if ok {
 		matches, truncated, errMatch := logFileMatchesCursor(files[index], cursor)
 		if errMatch != nil {
 			if errors.Is(errMatch, os.ErrNotExist) {
@@ -950,7 +976,7 @@ func logFileChangedAfterCursor(path string, cursor logCursor) bool {
 }
 
 func logFileMatchesCursor(path string, cursor logCursor) (bool, bool, error) {
-	info, errStat := os.Stat(path)
+	info, errStat := logReadFileInfo(path)
 	if errStat != nil {
 		return false, false, errStat
 	}
@@ -1051,7 +1077,7 @@ func safeLogFilePath(logDir, name string) (string, error) {
 }
 
 func newLogCursor(path string, offset, latest int64) (string, error) {
-	info, errStat := os.Stat(path)
+	info, errStat := logReadFileInfo(path)
 	if errStat != nil {
 		return "", errStat
 	}
@@ -1099,7 +1125,7 @@ func logFileFingerprint(path string, boundary int64) (string, error) {
 	if boundary < 0 {
 		return "", fmt.Errorf("invalid fingerprint boundary")
 	}
-	file, errOpen := os.Open(path)
+	file, errOpen := openLogReadFile(path)
 	if errOpen != nil {
 		return "", errOpen
 	}
@@ -1133,7 +1159,7 @@ func logFileFingerprint(path string, boundary int64) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:12]), nil
 }
 
-func writeFileRange(dst io.Writer, file *os.File, start, length int64) error {
+func writeFileRange(dst io.Writer, file io.ReaderAt, start, length int64) error {
 	if length <= 0 {
 		return nil
 	}
@@ -1164,7 +1190,7 @@ func readCompleteLogLines(path string, offset, maxOffset int64, limit int) (comp
 	if offset < 0 {
 		return completeLogRead{}, fmt.Errorf("invalid log offset")
 	}
-	file, errOpen := os.Open(path)
+	file, errOpen := openLogReadFile(path)
 	if errOpen != nil {
 		return completeLogRead{}, errOpen
 	}
@@ -1240,7 +1266,7 @@ func readCompleteLogLines(path string, offset, maxOffset int64, limit int) (comp
 }
 
 func completeLogBoundary(path string) (int64, error) {
-	file, errOpen := os.Open(path)
+	file, errOpen := openLogReadFile(path)
 	if errOpen != nil {
 		return 0, errOpen
 	}

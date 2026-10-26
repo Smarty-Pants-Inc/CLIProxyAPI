@@ -264,10 +264,7 @@ func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...strin
 // Returns:
 //   - error: An error if directory creation fails, nil otherwise
 func (l *FileRequestLogger) ensureLogsDir() error {
-	if _, err := os.Stat(l.logsDir); os.IsNotExist(err) {
-		return os.MkdirAll(l.logsDir, 0755)
-	}
-	return nil
+	return ensurePrivateLogDir(l.logsDir)
 }
 
 // generateFilename creates a sanitized filename from the URL path and current timestamp.
@@ -323,7 +320,7 @@ func createUniqueLogFile(dir, filename string) (*os.File, string, error) {
 	}
 
 	target := filepath.Join(dir, filename)
-	logFile, errOpen := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	logFile, errOpen := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if errOpen == nil {
 		return logFile, target, nil
 	}
@@ -334,7 +331,7 @@ func createUniqueLogFile(dir, filename string) (*os.File, string, error) {
 	for seq := 1; seq <= 1000; seq++ {
 		candidateName := fmt.Sprintf("%s_%d-%s%s", prefix, seq, idPart, ext)
 		candidatePath := filepath.Join(dir, candidateName)
-		logCandidate, errCandidate := os.OpenFile(candidatePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		logCandidate, errCandidate := os.OpenFile(candidatePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if errCandidate == nil {
 			return logCandidate, candidatePath, nil
 		}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -45,6 +46,10 @@ func TestFinalizeCleansStreamingSpoolsOnSourceError(t *testing.T) {
 		t.Fatal("expected source merge error")
 	}
 	assertNoRequestLogSpools(t, logsDir)
+	logs, errGlob := filepath.Glob(filepath.Join(logsDir, "*.log"))
+	if errGlob != nil || len(logs) != 0 {
+		t.Fatalf("unexpected completed logs: %v, %v", logs, errGlob)
+	}
 	if wrapper.streamWriter != nil {
 		t.Fatal("streaming writer was not released")
 	}
@@ -66,6 +71,10 @@ func TestFinalizeCleansStreamingSpoolsAfterDisable(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoRequestLogSpools(t, logsDir)
+	logs, errGlob := filepath.Glob(filepath.Join(logsDir, "*.log"))
+	if errGlob != nil || len(logs) != 0 {
+		t.Fatalf("unexpected completed logs: %v, %v", logs, errGlob)
+	}
 	if wrapper.streamWriter != nil {
 		t.Fatal("streaming writer was not released after disabling request-log")
 	}

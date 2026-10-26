@@ -202,6 +202,8 @@ func (w *testStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 
 func (w *testStreamingLogWriter) SetFirstChunkTimestamp(time.Time) {}
 
+func (w *testStreamingLogWriter) Abort() error { return nil }
+
 func (w *testStreamingLogWriter) Close() error {
 	w.closed = true
 	return nil

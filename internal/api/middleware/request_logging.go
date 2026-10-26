@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -96,6 +97,7 @@ type fileBodySourceFactory interface {
 }
 
 type deferredRequestBodyCapture struct {
+	mu            sync.Mutex // protects capture state, not the potentially blocking underlying Read
 	body          io.ReadCloser
 	file          *os.File
 	source        *logging.FileBodySource
@@ -145,6 +147,11 @@ func (c *deferredRequestBodyCapture) Read(payload []byte) (int, error) {
 		return 0, io.EOF
 	}
 	n, errRead := c.body.Read(payload)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.finished {
+		return n, errRead
+	}
 	if errRead == io.EOF {
 		c.sawEOF = true
 	}
@@ -197,6 +204,12 @@ func (c *deferredRequestBodyCapture) Finish() error {
 	if c == nil {
 		return nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.finishLocked()
+}
+
+func (c *deferredRequestBodyCapture) finishLocked() error {
 	if c.finished {
 		return c.captureErr
 	}
@@ -211,23 +224,34 @@ func (c *deferredRequestBodyCapture) Finish() error {
 }
 
 func (c *deferredRequestBodyCapture) Bytes() ([]byte, string, error) {
-	if c == nil || c.source == nil {
+	if c == nil {
 		return nil, "", nil
 	}
-	if errFinish := c.Finish(); errFinish != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.source == nil {
+		return nil, "", nil
+	}
+	if errFinish := c.finishLocked(); errFinish != nil {
 		return nil, "", errFinish
 	}
 	body, errBytes := c.source.Bytes()
 	if errBytes != nil {
 		return nil, "", errBytes
 	}
-	return body, c.statusMarker(), nil
+	return body, c.statusMarkerLocked(), nil
 }
 
 func (c *deferredRequestBodyCapture) statusMarker() string {
 	if c == nil {
 		return ""
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.statusMarkerLocked()
+}
+
+func (c *deferredRequestBodyCapture) statusMarkerLocked() string {
 	var markers []string
 	if c.truncated {
 		markers = append(markers, fmt.Sprintf("[REQUEST BODY TRUNCATED: captured first %d bytes]", c.bytesCaptured))
@@ -244,10 +268,15 @@ func (c *deferredRequestBodyCapture) statusMarker() string {
 }
 
 func (c *deferredRequestBodyCapture) Cleanup() {
-	if c == nil || c.source == nil {
+	if c == nil {
 		return
 	}
-	if errFinish := c.Finish(); errFinish != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.source == nil {
+		return
+	}
+	if errFinish := c.finishLocked(); errFinish != nil {
 		log.WithError(errFinish).Warn("failed to finish deferred request body capture")
 	}
 	if errCleanup := c.source.Cleanup(); errCleanup != nil {

@@ -299,12 +299,12 @@ func (w *ResponseWriterWrapper) finishStreamingChunks() time.Time {
 // For non-streaming responses, it logs the complete request and response details,
 // including any API-specific request/response data stored in the Gin context.
 func (w *ResponseWriterWrapper) Finalize(c *gin.Context) (errFinalize error) {
-	// Also release an already-started stream when logging is disabled mid-request
-	// or merging a source fails before the normal Close below.
+	// Early returns (hot-disable or merge failure) must discard captured bodies,
+	// not publish a disabled or incomplete log. Success explicitly calls Close below.
 	defer func() {
 		if w.streamWriter != nil {
 			w.finishStreamingChunks()
-			if errClose := w.streamWriter.Close(); errClose != nil && errFinalize == nil {
+			if errClose := w.streamWriter.Abort(); errClose != nil && errFinalize == nil {
 				errFinalize = errClose
 			}
 			w.streamWriter = nil

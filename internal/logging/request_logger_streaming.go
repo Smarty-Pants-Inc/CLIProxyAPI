@@ -13,6 +13,7 @@ import (
 // It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
 // The final log file is assembled when Close is called.
 type FileStreamingLogWriter struct {
+	finished bool
 	// logsDir is the target directory for log files.
 	logsDir string
 
@@ -200,6 +201,10 @@ func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 // Returns:
 //   - error: An error if closing fails, nil otherwise
 func (w *FileStreamingLogWriter) Close() error {
+	if w.finished {
+		return nil
+	}
+	w.finished = true
 	if w.chunkChan != nil {
 		close(w.chunkChan)
 	}
@@ -238,6 +243,24 @@ func (w *FileStreamingLogWriter) Close() error {
 
 	w.cleanupTempFiles()
 	return writeErr
+}
+
+// Abort stops spooling and deletes captured bodies without producing a log.
+func (w *FileStreamingLogWriter) Abort() error {
+	if w.finished {
+		return nil
+	}
+	w.finished = true
+	if w.chunkChan != nil {
+		close(w.chunkChan)
+	}
+	if w.closeChan != nil {
+		<-w.closeChan
+	}
+	w.chunkChan = nil
+	w.cleanupTempFiles()
+	cleanupFileBodySources(w.apiRequestSource, w.apiResponseSource)
+	return nil
 }
 
 // asyncWriter runs in a goroutine to buffer chunks from the channel.
@@ -381,3 +404,5 @@ func (w *NoOpStreamingLogWriter) SetFirstChunkTimestamp(_ time.Time) {}
 // Returns:
 //   - error: Always returns nil
 func (w *NoOpStreamingLogWriter) Close() error { return nil }
+
+func (w *NoOpStreamingLogWriter) Abort() error { return nil }
