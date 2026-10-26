@@ -426,7 +426,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		if picked := shard.pickReadyLocked(preferWebsocket, strategy, pred); picked != nil {
 			return picked, providerKey, nil
 		}
-		return nil, "", shard.unavailableErrorLocked(provider, model, pred)
+		return nil, "", shard.pinnedUnavailableErrorLocked(provider, model, pred, pinnedAuthID)
 	})
 	return picked, errPick
 }
@@ -569,7 +569,7 @@ func (s *authScheduler) pickMixedLocked(normalized []string, model, modelKey, pi
 		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
-		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
+		return nil, "", shard.pinnedUnavailableErrorLocked("mixed", model, predicate, pinnedAuthID)
 	}
 
 	candidateShards := make([]*modelScheduler, len(normalized))
@@ -1488,6 +1488,18 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 		}
 	}
 	return count
+}
+
+// pinnedUnavailableErrorLocked refines only the hard-pinned candidate that
+// survived the scheduler predicate; it does not widen or retry the selection.
+func (m *modelScheduler) pinnedUnavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool, pinnedAuthID string) error {
+	err := m.unavailableErrorLocked(provider, model, predicate)
+	if m != nil && pinnedAuthID != "" {
+		if entry := m.entries[pinnedAuthID]; entry != nil && (predicate == nil || predicate(entry)) {
+			return compactionAccountAvailabilityError(pinnedAuthID, entry.auth, err)
+		}
+	}
+	return err
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.

@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net/http"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -10,6 +12,9 @@ import (
 )
 
 const (
+	// ErrorCodeCompactionAccountUnavailable tells clients to recompact on a live seat.
+	ErrorCodeCompactionAccountUnavailable = "compaction_account_unavailable"
+
 	compactionAffinityMetadataKey      = "compaction_affinity"
 	compactionAffinityStoreMetadataKey = "compaction_affinity_store"
 )
@@ -48,6 +53,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		auths = pinnedAuths
 	}
 	auth, errPick := origin.pick(ctx, provider, model, opts, auths)
+	for _, candidate := range auths {
+		errPick = compactionAccountAvailabilityError(pinnedAuthIDFromMetadata(opts.Metadata), candidate, errPick)
+	}
 	if errPick == nil && auth != nil {
 		keys, _ := opts.Metadata[compactionAffinityMetadataKey].([]string)
 		if errRefresh := refreshCompactionSignerBindings(ctx, origin, auth.ID, keys); errRefresh != nil {
@@ -203,6 +211,28 @@ func affinityStateError() *Error {
 	return &Error{Code: "affinity_state_unavailable", Message: "session affinity state is unavailable; refusing to change accounts", HTTPStatus: http.StatusServiceUnavailable}
 }
 
-func compactedAuthUnavailableError() *Error {
-	return &Error{Code: "auth_unavailable", Message: "signed compaction account is unavailable; refusing account failover", HTTPStatus: http.StatusServiceUnavailable}
+func compactedAuthUnavailableError(auths ...*Auth) *Error {
+	err := &Error{Code: "auth_unavailable", Message: "signed compaction account is unavailable; refusing account failover", HTTPStatus: http.StatusServiceUnavailable}
+	if len(auths) > 0 && auths[0] != nil {
+		// Never expose auth IDs (which may be paths), metadata or upstream errors.
+		digest := sha256.Sum256([]byte(auths[0].ID))
+		err.Code = ErrorCodeCompactionAccountUnavailable
+		err.Message = fmt.Sprintf("the account that produced this conversation's compaction is unavailable; start a new compaction/conversation (account sha256:%x)", digest[:12])
+	}
+	return err
+}
+
+// Only refine an availability failure after all eligibility and hard-pin filters.
+// Missing/disabled pins, ordinary affinity, model cooldowns and recovered seats
+// retain their existing errors. In particular this never changes selection.
+func compactionAccountAvailabilityError(pinnedAuthID string, candidate *Auth, err error) error {
+	if pinnedAuthID == "" || candidate == nil || candidate.ID != pinnedAuthID ||
+		candidate.Disabled || candidate.Status == StatusDisabled || !candidate.Unavailable {
+		return err
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.Code != "auth_unavailable" {
+		return err
+	}
+	return compactedAuthUnavailableError(candidate)
 }
