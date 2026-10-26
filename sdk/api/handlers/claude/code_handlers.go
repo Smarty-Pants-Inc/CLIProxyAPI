@@ -370,6 +370,14 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 			Message: message,
 		},
 	}
+	var authErr *coreauth.Error
+	if msg != nil && errors.As(msg.Error, &authErr) && authErr.Code == coreauth.ErrorCodeCompactionAccountUnavailable {
+		retryable := false
+		response.Error.Message = authErr.Message
+		response.Error.Code = authErr.Code
+		response.Error.Retryable = &retryable
+		return response
+	}
 	detail := gjson.Get(errText, "error")
 	response.Error.Code = detail.Get("code").String()
 	if retryable := detail.Get("retryable"); retryable.IsBool() {

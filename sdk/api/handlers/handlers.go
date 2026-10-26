@@ -6,6 +6,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -81,6 +82,15 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	}
 
 	trimmed := strings.TrimSpace(errText)
+
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr.Code == coreauth.ErrorCodeCompactionAccountUnavailable {
+		retryable := false
+		payload, _ := json.Marshal(ErrorResponse{Error: ErrorDetail{
+			Message: authErr.Message, Type: "server_error", Code: authErr.Code, Retryable: &retryable,
+		}})
+		return payload
+	}
 
 	if coreauth.IsTerminalAuthError(err) {
 		message := errText
