@@ -254,11 +254,13 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		}
 		protectedPath = filepath.Join(logDir, "main.log")
 		logWriter = &lumberjack.Logger{
-			Filename:   protectedPath,
-			MaxSize:    10,
-			MaxBackups: 0,
-			MaxAge:     0,
-			Compress:   false,
+			Filename: protectedPath,
+			MaxSize:  10,
+			// Bound main logs even when the optional directory size cap is off.
+			// 19 backups plus the active 10 MiB file is about 200 MiB before gzip.
+			MaxBackups: 19,
+			MaxAge:     7,
+			Compress:   true,
 		}
 		log.SetOutput(logWriter)
 	} else {

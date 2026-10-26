@@ -1127,7 +1127,9 @@ observability:
     # Enable debug logging
     debug: false
 
-    # When true, write application logs to rotating files instead of stdout
+    # When true, write application logs to rotating files instead of stdout.
+    # Main logs rotate at 10 MiB, keep at most 19 gzip backups for up to 7 days
+    # (about 200 MiB including the active file, before compression).
     logging-to-file: false
 
     # Maximum total size (MB) of log files under the logs directory. When exceeded, the oldest log
