@@ -138,10 +138,12 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		m.beginExecutionAttempt(opts)
 		resp, err := exec.Execute(ctx, a, req, opts)
 		if err != nil {
+			op.observe(coreusage.Record{Failed: true})
 			return resp, err
 		}
 		// Publish signer evidence before delivery; withhold output on failure.
 		if errSave := m.RecordCompactionOutput(a.ID, opts, resp.Payload); errSave != nil {
+			op.observe(coreusage.Record{Failed: true})
 			return cliproxyexecutor.Response{}, wrapRequestStopError(errSave)
 		}
 		return resp, nil
@@ -290,10 +292,12 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		m.beginExecutionAttempt(opts)
 		result, err := exec.ExecuteStream(producerCtx, a, req, opts)
 		if err != nil {
+			op.observe(coreusage.Record{Failed: true})
 			cancelProducer()
 			return nil, err
 		}
 		if result == nil || result.Chunks == nil {
+			op.observe(coreusage.Record{Failed: true})
 			cancelProducer()
 			return nil, policyError("api_key_policy_unavailable", 503)
 		}
@@ -323,6 +327,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			// them, stops the producer and drains it without further delivery.
 			flush := func(payloads [][]byte, errSave error) {
 				if errSave != nil {
+					op.observe(coreusage.Record{Failed: true})
 					stopped = true
 					cancelProducer()
 					send(cliproxyexecutor.StreamChunk{Err: wrapRequestStopError(errSave)})
@@ -335,6 +340,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				}
 			}
 			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					op.observe(coreusage.Record{Failed: true})
+				}
 				if stopped {
 					continue
 				}
