@@ -274,11 +274,42 @@ func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
 	}
 }
 
+// finishStreamingChunks drains the wrapper worker before closing its log writer.
+func (w *ResponseWriterWrapper) finishStreamingChunks() time.Time {
+	w.streamMu.Lock()
+	w.streamClosed = true
+	if w.chunkChannel != nil {
+		close(w.chunkChannel)
+	}
+	w.streamMu.Unlock()
+	if w.streamDone != nil {
+		<-w.streamDone
+		w.streamDone = nil
+	}
+	// Clear the channel only after its reader has exited.
+	w.streamMu.Lock()
+	w.chunkChannel = nil
+	firstChunkTimestamp := w.firstChunkTimestamp
+	w.streamMu.Unlock()
+	return firstChunkTimestamp
+}
+
 // Finalize completes the logging process for the request and response.
 // For streaming responses, it closes the chunk channel and the stream writer.
 // For non-streaming responses, it logs the complete request and response details,
 // including any API-specific request/response data stored in the Gin context.
-func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
+func (w *ResponseWriterWrapper) Finalize(c *gin.Context) (errFinalize error) {
+	// Early returns (hot-disable or merge failure) must discard captured bodies,
+	// not publish a disabled or incomplete log. Success explicitly calls Close below.
+	defer func() {
+		if w.streamWriter != nil {
+			w.finishStreamingChunks()
+			if errClose := w.streamWriter.Abort(); errClose != nil && errFinalize == nil {
+				errFinalize = errClose
+			}
+			w.streamWriter = nil
+		}
+	}()
 	if w.requestInfo != nil && w.requestInfo.deferredBodyCapture != nil {
 		defer w.requestInfo.deferredBodyCapture.Cleanup()
 	}
@@ -315,24 +346,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
-		w.streamMu.Lock()
-		w.streamClosed = true
-		if w.chunkChannel != nil {
-			close(w.chunkChannel)
-		}
-		w.streamMu.Unlock()
-
-		if w.streamDone != nil {
-			<-w.streamDone
-			w.streamDone = nil
-		}
-		// The chunk processor reads chunkChannel; clear it only after it exits.
-		w.streamMu.Lock()
-		w.chunkChannel = nil
-		firstChunkTimestamp := w.firstChunkTimestamp
-		w.streamMu.Unlock()
-
-		w.streamWriter.SetFirstChunkTimestamp(firstChunkTimestamp)
+		w.streamWriter.SetFirstChunkTimestamp(w.finishStreamingChunks())
 
 		// Write API Request and Response to the streaming log before closing
 		apiRequest := w.extractAPIRequest(c)

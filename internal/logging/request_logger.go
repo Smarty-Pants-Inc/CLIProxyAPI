@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -124,6 +125,10 @@ type StreamingLogWriter interface {
 	//   - timestamp: The time when first response chunk was received
 	SetFirstChunkTimestamp(timestamp time.Time)
 
+	// Abort drains the worker and removes temporary resources without building or forwarding a log.
+	// No chunk writes may be in flight when Abort or Close is called.
+	Abort() error
+
 	// Close finalizes the log file and cleans up resources.
 	//
 	// Returns:
@@ -165,12 +170,16 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
-	return &FileRequestLogger{
+	logger := &FileRequestLogger{
 		enabled:           enabled,
 		logsDir:           logsDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
 		homeEnabled:       false,
 	}
+	if err := tightenRequestLogPermissions(logsDir); err != nil {
+		log.WithError(err).Warn("failed to secure request log directory")
+	}
+	return logger
 }
 
 // IsEnabled returns whether request logging is currently enabled.

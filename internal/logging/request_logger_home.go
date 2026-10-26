@@ -81,6 +81,7 @@ func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 }
 
 type homeStreamingLogWriter struct {
+	finished  bool
 	url       string
 	method    string
 	timestamp time.Time
@@ -197,10 +198,30 @@ func (w *homeStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	}
 }
 
-func (w *homeStreamingLogWriter) Close() error {
-	if w == nil {
+// Abort waits for the chunk worker but never assembles or queues a request log.
+func (w *homeStreamingLogWriter) Abort() error {
+	if w == nil || w.finished {
 		return nil
 	}
+	w.finished = true
+	if w.chunkChan != nil {
+		close(w.chunkChan)
+		<-w.doneChan
+		w.chunkChan = nil
+	}
+	w.responseBody.Reset()
+	w.requestBody = nil
+	w.apiRequest = nil
+	w.apiResponse = nil
+	w.apiWebsocketTime = nil
+	return nil
+}
+
+func (w *homeStreamingLogWriter) Close() error {
+	if w == nil || w.finished {
+		return nil
+	}
+	w.finished = true
 
 	if w.chunkChan != nil {
 		close(w.chunkChan)
