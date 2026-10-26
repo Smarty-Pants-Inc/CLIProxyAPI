@@ -68,17 +68,26 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
+		// The creator owns cleanup even when a handler panics past c.Next, or
+		// finalization returns early. The downstream cleanup is idempotent.
+		defer func() {
+			cleanupFileBodySources(
+				extractFileBodySource(c, logging.APIRequestSourceContextKey),
+				extractFileBodySource(c, logging.APIResponseSourceContextKey),
+				extractFileBodySource(c, logging.WebsocketTimelineSourceContextKey),
+				extractFileBodySource(c, logging.APIWebsocketTimelineSourceContextKey),
+			)
+		}()
 		attachRequestLogSources(c, logger, loggerEnabled)
-		attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, loggerEnabled, captureBody)
+		capture := attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, loggerEnabled, captureBody)
+		defer capture.Cleanup()
+		defer func() {
+			// Logging errors must not interrupt the response or replace a panic.
+			_ = wrapper.Finalize(c)
+		}()
 
-		// Process the request
+		// Process the request. Finalization also runs on panic/ErrAbortHandler.
 		c.Next()
-
-		// Finalize logging after request processing
-		if err = wrapper.Finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
-		}
 	}
 }
 
