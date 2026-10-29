@@ -211,15 +211,21 @@ func TestStreamPreOutputCredentialFailoverHTTP(t *testing.T) {
 								t.Fatalf("attempts=%v, want %v; status=%d body=%s", gotAttempts, wantAttempts, writer.Code, body)
 							}
 							if !replay {
-								wantStatus := http.StatusOK
-								if strings.HasPrefix(cut, "item-") || work && client == "gemini" {
-									wantStatus = http.StatusBadGateway
-								}
-								if writer.Code != wantStatus || !strings.Contains(body, "upstream_stream_incomplete") {
-									t.Fatalf("post-output/work: status=%d body=%s", writer.Code, body)
+								if client == "responses" {
+									requireResponsesFailureSSE(t, writer.Code, body)
+								} else {
+									wantStatus := http.StatusOK
+									if strings.HasPrefix(cut, "item-") || work && client == "gemini" {
+										wantStatus = http.StatusBadGateway
+									}
+									if writer.Code != wantStatus || !strings.Contains(body, "upstream_stream_incomplete") {
+										t.Fatalf("post-output/work: status=%d body=%s", writer.Code, body)
+									}
 								}
 							} else if allCut {
-								if writer.Code != http.StatusBadGateway || gjson.Get(body, "error.code").String() != "upstream_stream_incomplete" || !gjson.Get(body, "error.retryable").Bool() {
+								if client == "responses" {
+									requireResponsesFailureSSE(t, writer.Code, body)
+								} else if writer.Code != http.StatusBadGateway || gjson.Get(body, "error.code").String() != "upstream_stream_incomplete" || !gjson.Get(body, "error.retryable").Bool() {
 									t.Fatalf("exhaustion: status=%d body=%s", writer.Code, body)
 								}
 								if client == "messages" {

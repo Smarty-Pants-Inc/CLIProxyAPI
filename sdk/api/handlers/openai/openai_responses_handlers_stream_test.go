@@ -70,7 +70,7 @@ func TestResponsesSSEFramerFlushesMultilineDataWithoutDelimiter(t *testing.T) {
 
 func TestResponsesSSEFramerUsesPayloadErrorOverCompletedEvent(t *testing.T) {
 	var output bytes.Buffer
-	framer := &responsesSSEFramer{failureEvent: "response.failed"}
+	framer := &responsesSSEFramer{}
 	framer.WriteChunk(&output, []byte("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\nevent: response.completed\n\n"))
 
 	if framer.terminalEvent != "response.failed" || strings.Contains(output.String(), "event: response.completed") {
@@ -85,14 +85,14 @@ func TestResponsesSSEFramerUsesErrorEventOverPayloadType(t *testing.T) {
 	var output bytes.Buffer
 	framer := &responsesSSEFramer{}
 	framer.WriteChunk(&output, []byte("event: error\ndata: {\"type\":\"provider.error\",\"message\":\"failed\"}\n\n"))
-	if framer.terminalEvent != "error" {
-		t.Fatalf("terminal event = %q, want error", framer.terminalEvent)
+	if framer.terminalEvent != "response.failed" {
+		t.Fatalf("terminal event = %q, want response.failed", framer.terminalEvent)
 	}
 
 	framer = &responsesSSEFramer{}
 	framer.WriteChunk(&output, []byte("data: {\"response\":{\"error\":{\"message\":\"failed\"}}}\n\n"))
-	if framer.terminalEvent != "error" {
-		t.Fatalf("nested response error terminal event = %q, want error", framer.terminalEvent)
+	if framer.terminalEvent != "response.failed" {
+		t.Fatalf("nested response error terminal event = %q, want response.failed", framer.terminalEvent)
 	}
 }
 
@@ -238,7 +238,7 @@ func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
 	if !strings.HasPrefix(got, wantPrefix) {
 		t.Fatalf("unexpected split-event framing.\nGot:        %q\nWant prefix: %q", got, wantPrefix)
 	}
-	if !strings.Contains(got, "event: error") {
+	if !strings.Contains(got, "event: response.failed") {
 		t.Fatalf("unterminated framing test stream did not end with an error: %q", got)
 	}
 }
@@ -259,7 +259,7 @@ func TestForwardResponsesStreamPreservesValidFullSSEEventChunks(t *testing.T) {
 	if !strings.HasPrefix(got, string(chunk)) {
 		t.Fatalf("unexpected full-event framing.\nGot:        %q\nWant prefix: %q", got, string(chunk))
 	}
-	if !strings.Contains(got, "event: error") {
+	if !strings.Contains(got, "event: response.failed") {
 		t.Fatalf("unterminated framing test stream did not end with an error: %q", got)
 	}
 }
@@ -281,7 +281,7 @@ func TestForwardResponsesStreamBuffersSplitDataPayloadChunks(t *testing.T) {
 	if !strings.HasPrefix(got, wantPrefix) {
 		t.Fatalf("unexpected split-data framing.\nGot:        %q\nWant prefix: %q", got, wantPrefix)
 	}
-	if !strings.Contains(got, "event: error") {
+	if !strings.Contains(got, "event: response.failed") {
 		t.Fatalf("unterminated framing test stream did not end with an error: %q", got)
 	}
 }
@@ -310,7 +310,7 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 	if strings.Contains(got, `data: {"type":"response.created"`) {
 		t.Fatalf("incomplete trailing data was not dropped on flush: %q", got)
 	}
-	if !strings.Contains(got, "event: error") {
+	if !strings.Contains(got, "event: response.failed") {
 		t.Fatalf("unterminated framing test stream did not end with an error: %q", got)
 	}
 }
@@ -339,8 +339,8 @@ func TestForwardResponsesStreamErrorEventPreservesNestedError(t *testing.T) {
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
 
 	body := recorder.Body.String()
-	if !strings.Contains(body, "event: error\n") {
-		t.Fatalf("expected event: error in output, got: %q", body)
+	if !strings.Contains(body, "event: response.failed\n") {
+		t.Fatalf("expected event: response.failed in output, got: %q", body)
 	}
 
 	parts := strings.Split(strings.TrimSpace(body), "\n\n")
@@ -349,33 +349,35 @@ func TestForwardResponsesStreamErrorEventPreservesNestedError(t *testing.T) {
 	}
 
 	lastPart := strings.TrimSpace(parts[len(parts)-1])
-	if !strings.HasPrefix(lastPart, "event: error\ndata: ") {
-		t.Fatalf("last event is not error event: %q", lastPart)
+	if !strings.HasPrefix(lastPart, "event: response.failed\ndata: ") {
+		t.Fatalf("last event is not response.failed: %q", lastPart)
 	}
 
-	jsonPayload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: error\ndata: "))
+	jsonPayload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: response.failed\ndata: "))
 	var payload struct {
-		Type           string         `json:"type"`
-		Error          map[string]any `json:"error"`
-		SequenceNumber int            `json:"sequence_number"`
+		Type     string `json:"type"`
+		Response struct {
+			Error map[string]any `json:"error"`
+		} `json:"response"`
+		SequenceNumber int `json:"sequence_number"`
 	}
 	if errUnmarshal := json.Unmarshal([]byte(jsonPayload), &payload); errUnmarshal != nil {
 		t.Fatalf("unmarshal error event payload: %v (raw: %s)", errUnmarshal, jsonPayload)
 	}
-	if payload.Type != "error" {
-		t.Fatalf("payload.Type = %q, want error", payload.Type)
+	if payload.Type != "response.failed" {
+		t.Fatalf("payload.Type = %q, want response.failed", payload.Type)
 	}
 	if payload.SequenceNumber != 2 {
 		t.Fatalf("payload.SequenceNumber = %d, want 2", payload.SequenceNumber)
 	}
-	if payload.Error["type"] != "invalid_request" {
-		t.Fatalf("payload.Error.type = %v, want invalid_request", payload.Error["type"])
+	if payload.Response.Error["type"] != "invalid_request" {
+		t.Fatalf("payload.Response.Error.type = %v, want invalid_request", payload.Response.Error["type"])
 	}
-	if payload.Error["code"] != "cyber_policy" {
-		t.Fatalf("payload.Error.code = %v, want cyber_policy", payload.Error["code"])
+	if payload.Response.Error["code"] != "cyber_policy" {
+		t.Fatalf("payload.Response.Error.code = %v, want cyber_policy", payload.Response.Error["code"])
 	}
-	if param, exists := payload.Error["param"]; !exists || param != nil {
-		t.Fatalf("payload.Error.param = %v, want null/nil", param)
+	if param, exists := payload.Response.Error["param"]; !exists || param != nil {
+		t.Fatalf("payload.Response.Error.param = %v, want null/nil", param)
 	}
 }
 
@@ -389,7 +391,7 @@ func TestResponsesSSEFramerRepairErrorPayloadCalculatesCorrectSequenceNumber(t *
 		SequenceNumber int            `json:"sequence_number"`
 		Error          map[string]any `json:"error"`
 	}
-	payload1 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out1.String()), "event: error\ndata: "))
+	payload1 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out1.String()), "event: response.failed\ndata: "))
 	if err := json.Unmarshal([]byte(payload1), &p1); err != nil {
 		t.Fatalf("unmarshal error payload: %v", err)
 	}
@@ -409,7 +411,7 @@ func TestResponsesSSEFramerRepairErrorPayloadCalculatesCorrectSequenceNumber(t *
 		SequenceNumber int            `json:"sequence_number"`
 		Error          map[string]any `json:"error"`
 	}
-	payload2 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out2.String()), "event: error\ndata: "))
+	payload2 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out2.String()), "event: response.failed\ndata: "))
 	if err := json.Unmarshal([]byte(payload2), &p2); err != nil {
 		t.Fatalf("unmarshal error payload: %v", err)
 	}
@@ -445,7 +447,7 @@ func TestForwardResponsesStreamErrorEventPreservesExplicitSequenceNumber(t *test
 		Error          map[string]any `json:"error"`
 	}
 	lastPart := strings.TrimSpace(strings.Split(strings.TrimSpace(body), "\n\n")[0])
-	payload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: error\ndata: "))
+	payload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: response.failed\ndata: "))
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
 		t.Fatalf("unmarshal error payload: %v (raw: %s)", err, payload)
 	}
@@ -529,7 +531,7 @@ func TestResponsesStreamErrorTextPreservesTokenCountersAndLargeInts(t *testing.T
 
 func TestResponsesSSEFramer_FiltersUpstreamPrivateEvents(t *testing.T) {
 	var output bytes.Buffer
-	framer := &responsesSSEFramer{failureEvent: "error"}
+	framer := &responsesSSEFramer{}
 
 	rateLimitsFrame := []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
 	framer.WriteChunk(&output, rateLimitsFrame)
@@ -599,7 +601,7 @@ func TestForwardResponsesStream_FiltersUpstreamPrivateEvents(t *testing.T) {
 
 func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
 	var output bytes.Buffer
-	framer := &responsesSSEFramer{failureEvent: "response.failed", isCodexClient: true}
+	framer := &responsesSSEFramer{isCodexClient: true}
 
 	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
 	framer.WriteChunk(&output, metadataFrame)
@@ -624,7 +626,7 @@ func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
 
 func TestResponsesSSEFramer_FiltersDataOnlyPrivateEventsAndNonJSON(t *testing.T) {
 	var output bytes.Buffer
-	framer := &responsesSSEFramer{failureEvent: "error"}
+	framer := &responsesSSEFramer{}
 
 	// Data-only frame with private type
 	dataOnlyPrivateFrame := []byte("data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
@@ -666,7 +668,7 @@ func TestResponsesSSEFramer_FiltersDataOnlyPrivateEventsAndNonJSON(t *testing.T)
 
 func TestResponsesSSEFramer_CodexClientFiltersRateLimitsAndTiming(t *testing.T) {
 	var output bytes.Buffer
-	framer := &responsesSSEFramer{failureEvent: "response.failed", isCodexClient: true}
+	framer := &responsesSSEFramer{isCodexClient: true}
 
 	rateLimitsFrame := []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
 	framer.WriteChunk(&output, rateLimitsFrame)
