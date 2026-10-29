@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
@@ -15,8 +17,9 @@ const (
 	// ErrorCodeCompactionAccountUnavailable tells clients to recompact on a live seat.
 	ErrorCodeCompactionAccountUnavailable = "compaction_account_unavailable"
 
-	compactionAffinityMetadataKey      = "compaction_affinity"
-	compactionAffinityStoreMetadataKey = "compaction_affinity_store"
+	compactionAffinityMetadataKey       = "compaction_affinity"
+	compactionAffinityStoreMetadataKey  = "compaction_affinity_store"
+	compactionClaudeDegradedMetadataKey = "compaction_claude_degraded"
 )
 
 // Pick keeps every signed compaction input on its observed producing account.
@@ -112,6 +115,136 @@ func (m *Manager) PrepareCompactionRequest(model string, opts cliproxyexecutor.O
 	}
 	m.prepareCompactionDuplexValidation(opts)
 	return opts, nil
+}
+
+// releaseUnavailableClaudeAffinity releases mutable routing only. Signed input
+// may be released only at payload admission, where both copies can be rewritten.
+// The direct selector's signer check remains the final guard.
+func (m *Manager) releaseUnavailableClaudeAffinity(ctx context.Context, provider string, providers []string, model string, opts cliproxyexecutor.Options, rewrite bool) bool {
+	if m == nil || m.HomeEnabled() || cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return false
+	}
+	if provider != "mixed" && canonicalSchedulingProvider(provider) != "claude" {
+		return false
+	}
+	if len(providers) > 0 {
+		claude := false
+		for _, candidate := range providers {
+			claude = claude || canonicalSchedulingProvider(candidate) == "claude"
+		}
+		if !claude {
+			return false
+		}
+	}
+	if degraded, _ := opts.Metadata[compactionClaudeDegradedMetadataKey].(bool); degraded && rewrite {
+		delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+		delete(opts.Metadata, compactionAffinityMetadataKey)
+		return true
+	}
+	// Oversized input already takes the bounded #8742 streaming rewrite.
+	// Do not run the body-copying key collector before that budget check.
+	if len(opts.OriginalRequest) > maxCompactionJSONBytes {
+		return false
+	}
+	origin := m.compactionOutputStore(opts)
+	keys, errCollect := compactionAffinityKeysChecked(ctx, opts)
+	if errCollect != nil || (len(keys) > 0 && !rewrite) {
+		return false
+	}
+	if origin != nil && (origin.cache == nil || origin.cache.PersistenceError() != nil) {
+		return false
+	}
+	authID := pinnedAuthIDFromMetadata(opts.Metadata)
+	if len(keys) > 0 {
+		if origin == nil {
+			return false
+		}
+		// Match admission's newest-known-signer rule, not a routing guess.
+		for i := len(keys) - 1; i >= 0; i-- {
+			if signer, known := origin.cache.Get(keys[i]); known && origin.cache.IsProtected(keys[i]) {
+				authID = signer
+				break
+			}
+		}
+	}
+	primary, fallback := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	routingKeys := make([]string, 0, 4)
+	for _, namespace := range []string{provider, "claude"} {
+		for _, sessionID := range []string{primary, fallback} {
+			if sessionID == "" {
+				continue
+			}
+			key := namespace + "::" + cliproxysession.BoundSessionIdentity(sessionID) + "::" + canonicalModelKey(model)
+			routingKeys = append(routingKeys, key)
+			if authID == "" && origin != nil && origin.cache.IsProtected(key) {
+				authID, _ = origin.cache.Get(key)
+			}
+		}
+	}
+	if authID == "" || !m.unavailableClaudeAuthHasFallback(ctx, provider, providers, model, opts, authID) {
+		return false
+	}
+	if origin != nil {
+		for _, key := range routingKeys {
+			if bound, ok := origin.cache.Get(key); ok && bound == authID {
+				// Digests have independent groups and are never invalidated.
+				origin.cache.Invalidate(key)
+			}
+		}
+		if origin.cache.PersistenceError() != nil {
+			return false
+		}
+	}
+	delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+	delete(opts.Metadata, compactionAffinityMetadataKey)
+	if rewrite {
+		opts.Metadata[compactionClaudeDegradedMetadataKey] = true
+	}
+	return true
+}
+
+// Check the same resolved route model and request eligibility as selection.
+// Admission has no provider list yet: never infer unavailability from another
+// provider's route, and require an actual healthy Claude alternate.
+func (m *Manager) unavailableClaudeAuthHasFallback(ctx context.Context, provider string, providers []string, model string, opts cliproxyexecutor.Options, authID string) bool {
+	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	now := time.Now()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	signer := m.auths[authID]
+	if signer != nil {
+		if executorKeyFromAuth(signer) != "claude" {
+			return false
+		}
+	} else if provider != "claude" && string(opts.SourceFormat) != "claude" && !(len(providers) == 1 && canonicalSchedulingProvider(providers[0]) == "claude") {
+		// Entry protocol is not the route's provider. A removed Claude
+		// signer can still be identified by an unambiguous registered route.
+		routeProviders := registry.GetGlobalRegistry().GetModelProviders(canonicalModelKey(model))
+		if len(routeProviders) != 1 || canonicalSchedulingProvider(routeProviders[0]) != "claude" {
+			return false
+		}
+	}
+	if _, ok := m.executorLocked("claude"); !ok {
+		return false
+	}
+	weighted := selectorRequiresPositiveWeight(m.selector)
+	eligible := func(candidate *Auth) bool {
+		if candidate == nil || executorKeyFromAuth(candidate) != "claude" || !eligibility.allows(candidate) ||
+			!m.authSupportsRouteModel(registry.GetGlobalRegistry(), candidate, model) || (weighted && authWeight(candidate) <= 0) {
+			return false
+		}
+		blocked, _, _ := isAuthBlockedForModel(candidate, m.selectionModelForAuth(candidate, model), now)
+		return !blocked
+	}
+	if eligible(signer) {
+		return false
+	}
+	for _, candidate := range m.auths {
+		if candidate != nil && candidate.ID != authID && eligible(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsLocalCompactionAffinityStop identifies local affinity failures without

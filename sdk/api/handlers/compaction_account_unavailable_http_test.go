@@ -67,7 +67,8 @@ func (*deadCompactionHTTPExecutor) HttpRequest(context.Context, *coreauth.Auth, 
 }
 
 // Recorded regression / trust boundary: exercise production, dead-seat replay,
-// HTTP envelopes and upstream non-failover through both public endpoint handlers.
+// HTTP envelopes and safe Claude failover through both public endpoint handlers.
+// Codex retains its account-bound fail-closed behavior.
 func TestCompactionAccountUnavailableHTTP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, protocol := range []string{"claude", "responses"} {
@@ -82,11 +83,17 @@ func TestCompactionAccountUnavailableHTTP(t *testing.T) {
 					aID, bID := t.Name()+"-A", t.Name()+"-B"
 					var mu sync.Mutex
 					calls := map[string]int{}
+					bodies := map[string]string{}
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						mu.Lock()
 						defer mu.Unlock()
 						id := r.Header.Get("X-Test-Seat")
 						calls[id]++
+						payload, errRead := io.ReadAll(r.Body)
+						if errRead != nil {
+							t.Error(errRead)
+						}
+						bodies[id] = string(payload)
 						w.Header().Set("Content-Type", "application/json")
 						body := `{"id":"resp-live","status":"completed","output":[]}`
 						if protocol == "claude" {
@@ -155,13 +162,20 @@ func TestCompactionAccountUnavailableHTTP(t *testing.T) {
 					got := request(kind == "signed", stream)
 					mu.Lock()
 					aCalls, bCalls := calls[aID], calls[bID]
+					bBody := bodies[bID]
 					mu.Unlock()
 					if aCalls != 1 {
 						t.Fatalf("dead seat called: A=%d B=%d", aCalls, bCalls)
 					}
-					if kind == "ordinary" {
+					if kind == "ordinary" || protocol == "claude" {
 						if got.Code != 200 || bCalls != 1 {
-							t.Fatalf("ordinary failover: status=%d B=%d body=%s", got.Code, bCalls, got.Body.String())
+							t.Fatalf("safe failover: status=%d B=%d body=%s", got.Code, bCalls, got.Body.String())
+						}
+						if protocol == "claude" && strings.Contains(bBody, `"type":"compaction"`) {
+							t.Fatalf("signed block reached non-signer: %s", bBody)
+						}
+						if protocol == "claude" && kind == "signed" && !strings.Contains(bBody, `"text":"http-signed-summary"`) {
+							t.Fatalf("plain summary lost on failover: %s", bBody)
 						}
 						return
 					}
