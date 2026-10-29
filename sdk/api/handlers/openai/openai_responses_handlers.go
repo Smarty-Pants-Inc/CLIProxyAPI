@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -71,7 +72,7 @@ type responsesSSEFramer struct {
 	lastEvent            string
 	terminalEvent        string
 	terminalError        *interfaces.ErrorMessage
-	failureEvent         string
+	requestID            string
 	isCodexClient        bool
 	dataFrames           int
 	writeErr             error
@@ -247,11 +248,7 @@ func (f *responsesSSEFramer) repairErrorPayload(payload []byte) []byte {
 	errMsg := responsesSSEPayloadErrorMessage(payload)
 	status := errMsg.StatusCode
 	f.terminalError = errMsg
-	failureEvent := f.failureEvent
-	if failureEvent != "response.failed" {
-		failureEvent = "error"
-	}
-	f.terminalEvent = failureEvent
+	f.terminalEvent = "response.failed"
 	errText := responsesStreamErrorText(errMsg, status)
 	seq := 0
 	if s := gjson.GetBytes(payload, "sequence_number"); s.Exists() {
@@ -261,12 +258,29 @@ func (f *responsesSSEFramer) repairErrorPayload(payload []byte) []byte {
 	} else if f != nil && f.dataFrames > 0 {
 		seq = f.dataFrames - 1
 	}
-	if failureEvent == "response.failed" {
-		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
-		return []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", chunk))
+	chunk := f.failedChunk(status, errText, seq)
+	return []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", chunk))
+}
+
+// failedChunk uses the shared Responses shape and adds structured gateway
+// correlation without changing the message clients use for retry classification.
+func (f *responsesSSEFramer) failedChunk(status int, errText string, seq int) []byte {
+	chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
+	defaults := handlers.BuildOpenAIResponsesStreamFailedChunk(status, http.StatusText(status), seq)
+	for _, field := range []string{"type", "code", "message"} {
+		path := "response.error." + field
+		if strings.TrimSpace(gjson.GetBytes(chunk, path).String()) == "" {
+			chunk, _ = sjson.SetBytes(chunk, path, gjson.GetBytes(defaults, path).String())
+		}
 	}
-	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, seq)
-	return []byte(fmt.Sprintf("event: error\ndata: %s\n\n", chunk))
+	if !gjson.GetBytes(chunk, "response.error.retryable").Exists() {
+		retryable := status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+		chunk, _ = sjson.SetBytes(chunk, "response.error.retryable", retryable)
+	}
+	if f.requestID != "" {
+		chunk, _ = sjson.SetBytes(chunk, "response.error.request_id", f.requestID)
+	}
+	return chunk
 }
 
 func responsesSSEErrorEvent(eventType string) bool {
@@ -748,12 +762,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	isCodexClient := isCodexResponsesClientRequest(c)
-	failureEvent := "error"
-	if isCodexClient {
-		failureEvent = "response.failed"
-	}
-	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
+	framer := &responsesSSEFramer{requestID: responsesStreamRequestID(c), isCodexClient: isCodexResponsesClientRequest(c), canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
 	var initialOutput bytes.Buffer
 
 	// Peek at the first complete SSE data frame.
@@ -773,7 +782,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			if framer.dataFrames == 0 {
 				safeErrMsg = sanitizeResponsesInitialErrorMessage(errMsg)
 			}
-			if safeErrMsg != nil && framer.dataFrames > 0 {
+			if safeErrMsg != nil && (framer.dataFrames > 0 || isEstablishedResponsesStreamFailure(safeErrMsg)) {
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
@@ -790,7 +799,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, framer)
 				return
 			}
-			// Upstream failed before a complete SSE data frame. Return JSON.
+			// Preflight/direct errors and unclassified pre-output failures stay JSON.
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), safeErrMsg)
 			h.WriteErrorResponse(c, safeErrMsg)
 			if safeErrMsg != nil {
@@ -816,7 +825,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 					errMsg = sanitizeResponsesInitialErrorMessage(errMsg)
 				}
 
-				if framer.dataFrames > 0 {
+				// A closed, established data channel without any pending error is
+				// premature EOF, even when no complete SSE frame was received.
+				if framer.dataFrames > 0 || isEstablishedResponsesStreamFailure(errMsg) || !hasPendingError {
 					setSSEHeaders()
 					handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 					if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
@@ -880,7 +891,33 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 }
 
-// isCodexResponsesClientRequest limits the alternate terminal event to official Codex clients.
+// isEstablishedResponsesStreamFailure recognizes failures produced after an
+// upstream handshake, including bootstrap failures returned before any payload.
+// Do not guess from status/text: auth and direct preflight failures stay JSON.
+func isEstablishedResponsesStreamFailure(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil || errMsg.DirectResponse {
+		return false
+	}
+	var incomplete *helps.IncompleteStreamError
+	var authError *coreauth.Error
+	var upstreamFrame interface{ IsUpstreamStreamError() bool }
+	// The auth manager creates empty_stream only after a returned stream closes.
+	return (errors.As(errMsg.Error, &authError) && authError.Code == "empty_stream") ||
+		errors.As(errMsg.Error, &incomplete) ||
+		(errors.As(errMsg.Error, &upstreamFrame) && upstreamFrame.IsUpstreamStreamError())
+}
+
+func responsesStreamRequestID(c *gin.Context) string {
+	if requestID := logging.GetGinRequestID(c); requestID != "" {
+		return requestID
+	}
+	if c != nil && c.Request != nil {
+		return logging.GetRequestID(c.Request.Context())
+	}
+	return ""
+}
+
+// isCodexResponsesClientRequest controls private metadata compatibility only.
 func isCodexResponsesClientRequest(c *gin.Context) bool {
 	if c == nil || c.Request == nil {
 		return false
@@ -1065,13 +1102,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 	if framer == nil {
 		framer = &responsesSSEFramer{}
 	}
-	if isCodexResponsesClientRequest(c) {
-		framer.failureEvent = "response.failed"
-		framer.isCodexClient = true
-	} else {
-		framer.failureEvent = "error"
-		framer.isCodexClient = false
-	}
+	framer.requestID = responsesStreamRequestID(c)
+	framer.isCodexClient = isCodexResponsesClientRequest(c)
 	// Initial frames have already been written and flushed by the caller.
 	if framer.writeErr != nil {
 		cancel(framer.writeErr)
@@ -1105,18 +1137,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		if origSeq := gjson.Get(errText, "sequence_number"); origSeq.Exists() {
 			seq = int(origSeq.Int())
 		}
-		// Port the terminal response.failed pattern from upstream #4683 for
-		// classified upstream frames regardless of User-Agent. Responses clients
-		// (including Pi) read response.error, not a nested generic error event.
-		var upstreamFrame interface{ IsUpstreamStreamError() bool }
-		isUpstreamFrame := errors.As(errMsg.Error, &upstreamFrame) && upstreamFrame.IsUpstreamStreamError()
-		if isCodexResponsesClientRequest(c) || isUpstreamFrame {
-			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
-			return
-		}
-		chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, seq)
-		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+		framer.terminalEvent = "response.failed"
+		chunk := framer.failedChunk(status, errText, seq)
+		framer.writeErr = writeResponsesSSEChunk(c.Writer, []byte(fmt.Sprintf("\nevent: response.failed\ndata: %s\n\n", chunk)))
 	}
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{

@@ -693,9 +693,17 @@ func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 // is shared with the unbuffered path, where the rejection is delivered in-stream and a status
 // change would alter cooldown classification and retry-after parsing for everyone. Keeping 503
 // scoped to this path means disabling the feature restores the previous behaviour exactly.
-func newCodexBootstrapOverloadErr(body []byte) statusErr {
-	return newCodexStatusErr(http.StatusServiceUnavailable, body)
+func newCodexBootstrapOverloadErr(body []byte) codexBootstrapOverloadError {
+	return codexBootstrapOverloadError{statusErr: newCodexStatusErr(http.StatusServiceUnavailable, body)}
 }
+
+// codexBootstrapOverloadError preserves status/cooling and safe bootstrap
+// failover while identifying a refusal received in an established upstream stream.
+// Only the final HTTP handler uses this marker to choose failed SSE over JSON.
+type codexBootstrapOverloadError struct{ statusErr }
+
+func (codexBootstrapOverloadError) IsUpstreamStreamError() bool { return true }
+func (e codexBootstrapOverloadError) Unwrap() error             { return e.statusErr }
 
 // isCodexOverloadBootstrapFailure reports whether a terminal failure delivered inside an HTTP 200
 // stream is a transient capacity rejection that a different credential may be able to serve.
