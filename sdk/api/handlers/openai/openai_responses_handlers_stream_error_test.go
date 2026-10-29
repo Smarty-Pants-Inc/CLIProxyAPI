@@ -11,12 +11,206 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/tidwall/gjson"
 )
+
+// These handler-boundary regressions cover stream failures that are expensive to
+// reproduce live (long upstream cuts) and the downstream diagnostic trust boundary.
+func TestResponsesHandlerTerminalFailuresForEveryClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const requestID = "019a2cc4-1234-7abc-8def-12345678abcd"
+	progress := helps.StreamProgress{}
+	incomplete := progress.ReplaySafeIncomplete(context.Background(), "codex", "terminal-model", http.StatusOK, "response.completed", errors.New("unexpected EOF"))
+	overload := progress.UpstreamError(context.Background(), "codex", "terminal-model", "seat", http.StatusOK,
+		[]byte(`{"type":"error","error":{"code":"server_is_overloaded","message":"Bearer provider-secret"}}`), nil)
+	delta := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+	completed := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+
+	for _, ua := range []string{"pi/0.61.0", "OpenAI/Python", "Codex Desktop/26.803.41515", ""} {
+		for _, tc := range []struct {
+			name         string
+			initialError error
+			chunks       []coreexecutor.StreamChunk
+			code         string
+		}{
+			{name: "initial typed EOF", initialError: incomplete, code: "upstream_stream_incomplete"},
+			{name: "initial typed overload", initialError: overload, code: "server_is_overloaded"},
+			{name: "bootstrap typed EOF", chunks: []coreexecutor.StreamChunk{{Err: incomplete}}, code: "upstream_stream_incomplete"},
+			{name: "empty EOF", code: "internal_server_error"},
+			{name: "partial clean EOF", chunks: []coreexecutor.StreamChunk{{Payload: delta}}, code: "internal_server_error"},
+			{name: "partial read error", chunks: []coreexecutor.StreamChunk{{Payload: delta}, {Err: errors.New("unexpected EOF")}}, code: "internal_server_error"},
+			{name: "partial typed EOF", chunks: []coreexecutor.StreamChunk{{Payload: delta}, {Err: incomplete}}, code: "upstream_stream_incomplete"},
+			{name: "partial typed overload", chunks: []coreexecutor.StreamChunk{{Payload: delta}, {Err: overload}}, code: "server_is_overloaded"},
+			{name: "partial in-band overload", chunks: []coreexecutor.StreamChunk{{Payload: delta}, {Payload: []byte("event: error\ndata: {\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"overloaded\"}}\n\n")}}, code: "server_is_overloaded"},
+			{name: "in-band message only", chunks: []coreexecutor.StreamChunk{{Payload: []byte("event: error\ndata: {\"error\":{\"message\":\"upstream failed\"}}\n\n")}}, code: "internal_server_error"},
+			{name: "in-band overload and trailing success", chunks: []coreexecutor.StreamChunk{{Payload: []byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"overloaded token=provider-secret\"}}\n\n" + completed + "data: [DONE]\n\n")}}, code: "server_is_overloaded"},
+		} {
+			t.Run(ua+"/"+tc.name, func(t *testing.T) {
+				executor := &terminalResponsesStreamExecutor{initialError: tc.initialError, chunks: tc.chunks}
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.RegisterExecutor(executor)
+				auth := &coreauth.Auth{ID: "terminal-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "terminal-model"}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+				router := gin.New()
+				router.Use(func(c *gin.Context) { logging.SetGinRequestID(c, requestID); c.Next() })
+				router.POST("/v1/responses", h.Responses)
+				request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"terminal-model","input":"hi","stream":true}`))
+				request.Header.Set("User-Agent", ua)
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(recorder, request)
+				body := recorder.Body.String()
+				if recorder.Code != http.StatusOK || !strings.HasPrefix(recorder.Header().Get("Content-Type"), "text/event-stream") {
+					t.Fatalf("established stream failure returned status=%d headers=%v body=%q", recorder.Code, recorder.Header(), body)
+				}
+				if strings.Count(body, "event: response.failed\n") != 1 {
+					t.Fatalf("want exactly one terminal response.failed: %q", body)
+				}
+				if len(tc.chunks) > 0 && string(tc.chunks[0].Payload) == string(delta) && !strings.HasPrefix(body, string(delta)) {
+					t.Fatalf("partial output bytes changed: %q", body)
+				}
+				for _, forbidden := range []string{"event: error\n", "event: response.completed\n", `"type":"response.completed"`, "[DONE]", "provider-secret"} {
+					if strings.Contains(body, forbidden) {
+						t.Fatalf("failure contains %q: %q", forbidden, body)
+					}
+				}
+				var payload []byte
+				for _, frame := range strings.Split(body, "\n\n") {
+					if strings.Contains(frame, "event: response.failed\n") {
+						payload, _ = responsesSSEDataPayload([]byte(frame))
+					}
+				}
+				if gjson.GetBytes(payload, "response.error.code").String() != tc.code || !gjson.GetBytes(payload, "response.error.retryable").Bool() {
+					t.Fatalf("missing retryable classification: %s", payload)
+				}
+				if gjson.GetBytes(payload, "response.error.request_id").String() != requestID {
+					t.Fatalf("gateway request ID absent from diagnostic: %s", payload)
+				}
+			})
+		}
+	}
+}
+
+func TestResponsesHandlerPreservesBootstrapFailoverAndCompletedBytes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const completed = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-completed\",\"status\":\"completed\",\"output\":[]}}\n\n"
+	for _, failFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failover=%t", failFirst), func(t *testing.T) {
+			progress := helps.StreamProgress{}
+			incomplete := progress.ReplaySafeIncomplete(context.Background(), "codex", "completed-model", http.StatusOK, "response.completed", errors.New("unexpected EOF"))
+			executor := &terminalResponsesStreamExecutor{failFirst: failFirst, initialError: incomplete, chunks: []coreexecutor.StreamChunk{{Payload: []byte(completed)}}}
+			if !failFirst {
+				executor.initialError = nil
+			}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			for _, id := range []string{"completed-auth-1", "completed-auth-2"} {
+				auth := &coreauth.Auth{ID: id, Provider: executor.Identifier(), Status: coreauth.StatusActive}
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "completed-model"}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+			}
+			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+			router := gin.New()
+			router.POST("/v1/responses", h.Responses)
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"completed-model","input":"hi","stream":true}`))
+			request.Header.Set("User-Agent", "pi/0.61.0")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			// Legacy, non-delivery-aware producers retain the final newline too.
+			if recorder.Code != http.StatusOK || recorder.Body.String() != completed+"\n" {
+				t.Fatalf("completed bytes changed: status=%d body=%q", recorder.Code, recorder.Body.String())
+			}
+			wantCalls := 1
+			if failFirst {
+				wantCalls = 2
+			}
+			if executor.calls != wantCalls {
+				t.Fatalf("executor calls = %d, want %d", executor.calls, wantCalls)
+			}
+		})
+	}
+}
+
+func TestResponsesSSECorrelationDoesNotAlterRetryMessage(t *testing.T) {
+	// Pi treats a 429 substring even inside a hex ID as a rate-limit signal.
+	// Correlation belongs in its own field, not the classified provider message.
+	const requestID = "00000000-0000-4000-8000-0000000a429b"
+	const message = "upstream overloaded: server_is_overloaded"
+	framer := &responsesSSEFramer{requestID: requestID}
+	chunk := framer.failedChunk(http.StatusServiceUnavailable, `{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"`+message+`"}}`, 2)
+	if gjson.GetBytes(chunk, "response.error.request_id").String() != requestID ||
+		gjson.GetBytes(chunk, "response.error.message").String() != message ||
+		gjson.GetBytes(chunk, "response.error.code").String() != "server_is_overloaded" ||
+		!gjson.GetBytes(chunk, "response.error.retryable").Bool() {
+		t.Fatalf("correlation changed retry semantics: %s", chunk)
+	}
+}
+
+func TestForwardResponsesStreamUsesContextRequestIDAndPreservesRejection(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	const requestID = "context-request-id"
+	c.Request = c.Request.WithContext(logging.WithRequestID(c.Request.Context(), requestID))
+	c.Request.Header.Set("User-Agent", "pi/0.61.0")
+	data := make(chan []byte, 1)
+	data <- []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":9,\"response\":{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\",\"message\":\"too long\",\"retryable\":false}}}\n\n")
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	payload, _ := responsesSSEDataPayload(recorder.Body.Bytes())
+	if gjson.GetBytes(payload, "response.error.request_id").String() != requestID || gjson.GetBytes(payload, "response.error.retryable").Bool() || gjson.GetBytes(payload, "response.error.code").String() != "context_length_exceeded" || gjson.GetBytes(payload, "sequence_number").Int() != 9 {
+		t.Fatalf("lost context request ID or changed explicit non-retryable rejection: %s", payload)
+	}
+}
+
+func TestResponsesHandlerKeepsAuthPreflightJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil)))
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"unavailable-model","input":"hi","stream":true}`))
+	request.Header.Set("User-Agent", "pi/0.61.0")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code < http.StatusBadRequest || !strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") || strings.Contains(recorder.Body.String(), "event:") {
+		t.Fatalf("auth preflight became SSE: status=%d headers=%v body=%q", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+}
+
+type terminalResponsesStreamExecutor struct {
+	prematureResponsesStreamExecutor
+	initialError error
+	chunks       []coreexecutor.StreamChunk
+	failFirst    bool
+	calls        int
+}
+
+func (e *terminalResponsesStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.calls++
+	if e.initialError != nil && (!e.failFirst || e.calls == 1) {
+		return nil, e.initialError
+	}
+	chunks := make(chan coreexecutor.StreamChunk, len(e.chunks))
+	for _, chunk := range e.chunks {
+		chunks <- chunk
+	}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
 
 const (
 	prematureResponsesStreamModel       = "premature-responses-stream-model"
@@ -412,8 +606,8 @@ func TestResponsesHandlerRejectsStreamClosedBeforeFirstPayload(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 
-	if recorder.Code == http.StatusOK {
-		t.Fatalf("empty upstream stream returned HTTP 200: %q", recorder.Body.String())
+	if recorder.Code != http.StatusOK || strings.Count(recorder.Body.String(), "event: response.failed\n") != 1 {
+		t.Fatalf("empty upstream stream did not return one SSE failure: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), "closed before first payload") {
 		t.Fatalf("empty upstream stream error is unclear: status=%d body=%q", recorder.Code, recorder.Body.String())
@@ -517,11 +711,11 @@ func TestForwardResponsesStreamExposesTerminalErrors(t *testing.T) {
 
 			h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 			body := recorder.Body.String()
-			exposed := strings.Contains(body, `"type":"error"`)
+			exposed := strings.Contains(body, `"type":"response.failed"`)
 			if exposed != tc.wantExposed {
 				t.Fatalf("error exposed = %t, want %t: %q", exposed, tc.wantExposed, body)
 			}
-			if exposed && !strings.Contains(body, "event: error\ndata: ") {
+			if exposed && !strings.Contains(body, "event: response.failed\ndata: ") {
 				t.Fatalf("expected streaming error chunk, got HTTP error body: %q", body)
 			}
 			if exposed && !strings.Contains(body, `"error":{`) {
