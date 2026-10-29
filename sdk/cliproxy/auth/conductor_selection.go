@@ -1803,6 +1803,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+	m.releaseUnavailableClaudeAffinity(ctx, provider, []string{provider}, model, opts, false)
 	if errAffinity := m.prepareSessionAffinitySelection(provider, model, opts); errAffinity != nil {
 		return nil, nil, errAffinity
 	}
@@ -2071,6 +2072,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+	m.releaseUnavailableClaudeAffinity(ctx, provider, []string{provider}, model, opts, false)
 
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
@@ -2131,6 +2133,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
+	m.releaseUnavailableClaudeAffinity(ctx, "mixed", providers, model, opts, false)
 	if errAffinity := m.prepareSessionAffinitySelection("mixed", model, opts); errAffinity != nil {
 		return nil, nil, "", errAffinity
 	}
@@ -2254,6 +2257,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+	m.releaseUnavailableClaudeAffinity(ctx, "mixed", providers, model, opts, false)
 
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
