@@ -155,7 +155,9 @@ func TestBootstrapIncompleteStreamHTTP(t *testing.T) {
 						return
 					}
 					var detail gjson.Result
-					if writer.Code >= 400 {
+					if client == "responses" {
+						detail = requireResponsesFailureSSE(t, writer.Code, body)
+					} else if writer.Code >= 400 {
 						detail = gjson.Get(body, "error")
 						wantStatus := http.StatusBadGateway
 
@@ -211,4 +213,48 @@ func TestBootstrapIncompleteStreamHTTP(t *testing.T) {
 			}
 		}
 	}
+}
+
+func requireResponsesFailureSSE(t *testing.T, status int, body string) gjson.Result {
+	t.Helper()
+	if status != http.StatusOK {
+		t.Fatalf("Responses failure status=%d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	failureCount := 0
+	finalEventName := ""
+	var failureError gjson.Result
+	for _, event := range strings.Split(strings.TrimSpace(body), "\n\n") {
+		event = strings.TrimSpace(event)
+		if event == "" {
+			continue
+		}
+		eventName := ""
+		var eventData gjson.Result
+		for _, line := range strings.Split(event, "\n") {
+			if strings.HasPrefix(line, "event: ") {
+				eventName = strings.TrimPrefix(line, "event: ")
+			}
+			if strings.HasPrefix(line, "data: ") {
+				eventData = gjson.Parse(strings.TrimPrefix(line, "data: "))
+			}
+		}
+		finalEventName = eventName
+		if eventName == "response.failed" {
+			failureCount++
+			if eventData.Get("type").String() == "response.failed" {
+				failureError = eventData.Get("response.error")
+			}
+		}
+	}
+	if failureCount != 1 || finalEventName != "response.failed" {
+		t.Fatalf("want exactly one final response.failed event, got %d: %s", failureCount, body)
+	}
+	if strings.Contains(body, "event: response.completed") || strings.Contains(body, `"type":"response.completed"`) || strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("Responses failure stream contains a success/DONE event: %s", body)
+	}
+	if !failureError.Exists() || failureError.Get("code").String() != "upstream_stream_incomplete" || !failureError.Get("retryable").Bool() {
+		t.Fatalf("missing nested Responses incomplete error: %s", body)
+	}
+	return failureError
 }

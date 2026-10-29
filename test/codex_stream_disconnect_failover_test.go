@@ -2,7 +2,6 @@ package test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +19,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 // TestCodexStreamDisconnectAfterHeadersFailsOver reproduces issue #6247:
@@ -139,9 +139,54 @@ func TestCodexStreamDisconnectAfterHeadersFailsOver(t *testing.T) {
 	}
 }
 
+func requireResponsesFailureSSE(t *testing.T, status int, body string) gjson.Result {
+	t.Helper()
+	if status != http.StatusOK {
+		t.Fatalf("Responses failure status=%d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	failureCount := 0
+	finalEventName := ""
+	var failureError gjson.Result
+	for _, event := range strings.Split(strings.TrimSpace(body), "\n\n") {
+		event = strings.TrimSpace(event)
+		if event == "" {
+			continue
+		}
+		eventName := ""
+		var eventData gjson.Result
+		for _, line := range strings.Split(event, "\n") {
+			if strings.HasPrefix(line, "event: ") {
+				eventName = strings.TrimPrefix(line, "event: ")
+			}
+			if strings.HasPrefix(line, "data: ") {
+				eventData = gjson.Parse(strings.TrimPrefix(line, "data: "))
+			}
+		}
+		finalEventName = eventName
+		if eventName == "response.failed" {
+			failureCount++
+			if eventData.Get("type").String() == "response.failed" {
+				failureError = eventData.Get("response.error")
+			}
+		}
+	}
+	if failureCount != 1 || finalEventName != "response.failed" {
+		t.Fatalf("want exactly one final response.failed event, got %d: %s", failureCount, body)
+	}
+	if strings.Contains(body, "event: response.completed") || strings.Contains(body, `"type":"response.completed"`) || strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("Responses failure stream contains a success/DONE event: %s", body)
+	}
+	if !failureError.Exists() || failureError.Get("code").String() != "upstream_stream_incomplete" || !failureError.Get("retryable").Bool() {
+		t.Fatalf("missing nested Responses incomplete error: %s", body)
+	}
+	return failureError
+}
+
 // TestCodexStreamDisconnectExhaustionNotInvalidRequestError verifies that when
 // retries are exhausted for a stream that disconnects before any SSE bytes,
-// the surfaced JSON error is classified as an upstream/server error (not invalid_request_error).
+// the surfaced response.failed SSE event is classified as an upstream/server error
+// (not invalid_request_error).
 func TestCodexStreamDisconnectExhaustionNotInvalidRequestError(t *testing.T) {
 	const model = "gpt-6-astra"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -181,23 +226,12 @@ func TestCodexStreamDisconnectExhaustionNotInvalidRequestError(t *testing.T) {
 	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
 	openaihandlers.NewOpenAIResponsesAPIHandler(base).Responses(c)
 
-	body := recorder.Body.String()
-	var errorResp struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-		} `json:"error"`
+	errorDetail := requireResponsesFailureSSE(t, recorder.Code, recorder.Body.String())
+	if errorDetail.Get("type").String() == "invalid_request_error" {
+		t.Fatalf("response.error.type = %q for pre-output disconnect: must not claim well-formed request is invalid", errorDetail.Get("type").String())
 	}
-	if errUnmarshal := json.Unmarshal([]byte(body), &errorResp); errUnmarshal != nil {
-		t.Fatalf("failed to unmarshal JSON error response (body: %s): %v", body, errUnmarshal)
-	}
-
-	if errorResp.Error.Type == "invalid_request_error" {
-		t.Fatalf("error.type = %q for pre-output disconnect: must not claim well-formed request is invalid", errorResp.Error.Type)
-	}
-	if errorResp.Error.Type != "upstream_stream_incomplete" || errorResp.Error.Code != "upstream_stream_incomplete" {
-		t.Fatalf("error = %+v, want upstream_stream_incomplete", errorResp.Error)
+	if errorDetail.Get("type").String() != "upstream_stream_incomplete" || errorDetail.Get("code").String() != "upstream_stream_incomplete" {
+		t.Fatalf("response.error = %s, want type and code upstream_stream_incomplete", errorDetail.Raw)
 	}
 }
 
