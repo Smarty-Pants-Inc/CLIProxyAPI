@@ -57,6 +57,7 @@ func (m *Manager) PrepareCompactionPayload(ctx context.Context, req cliproxyexec
 	if len(opts.OriginalRequest) > MaxCompactionInputBytes || len(req.Payload) > MaxCompactionInputBytes {
 		return req, opts, compactionInputTooLargeError()
 	}
+	opts.Metadata = cloneRequestMetadata(opts.Metadata)
 	req, opts, err := m.degradeCompactionInput(ctx, req, opts)
 	if err != nil {
 		return req, opts, err
@@ -66,7 +67,7 @@ func (m *Manager) PrepareCompactionPayload(ctx context.Context, req cliproxyexec
 }
 
 func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
-	if m == nil || len(opts.OriginalRequest) == 0 {
+	if m == nil {
 		return req, opts, nil
 	}
 	if ctx == nil {
@@ -78,11 +79,12 @@ func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecut
 	} else if !m.HomeEnabled() {
 		origin, _ = m.Selector().(*SessionAffinitySelector)
 	}
-	degraded, dropped, reason, target := degradeCompactionPayload(ctx, origin, opts.OriginalRequest, "")
+	released := m.releaseUnavailableClaudeAffinity(ctx, "mixed", nil, authSelectionModelFromOptions(opts, req.Model), opts, true)
+	degraded, dropped, reason, target := degradeCompactionPayload(ctx, origin, opts.OriginalRequest, "", released)
 	if reason == reasonTooLarge {
 		return req, opts, compactionResultTooLargeError()
 	}
-	if dropped == 0 {
+	if dropped == 0 && !released {
 		return req, opts, nil
 	}
 	if bytes.Equal(req.Payload, opts.OriginalRequest) {
@@ -90,14 +92,29 @@ func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecut
 	} else if len(req.Payload) > 0 {
 		// Same account rule for the executor's copy as for the checked original.
 		var payloadReason string
-		req.Payload, _, payloadReason, _ = degradeCompactionPayload(ctx, origin, req.Payload, target)
+		req.Payload, _, payloadReason, _ = degradeCompactionPayload(ctx, origin, req.Payload, target, released)
 		if payloadReason == reasonTooLarge {
 			return req, opts, compactionResultTooLargeError()
 		}
 	}
+	if released && len(req.Payload) > 0 {
+		// A distinct executor copy must not retain signed input when its pin
+		// was released, including malformed or inconsistent copies.
+		payloadOpts := opts
+		payloadOpts.OriginalRequest = req.Payload
+		keys, errCheck := compactionAffinityKeysChecked(ctx, payloadOpts)
+		if errCheck != nil {
+			return req, opts, wrapRequestStopError(errCheck)
+		}
+		if len(keys) > 0 {
+			return req, opts, wrapRequestStopError(compactedAuthUnavailableError())
+		}
+	}
 	opts.OriginalRequest = degraded
 	session, _ := extractSessionIDs(opts.Headers, degraded, opts.Metadata)
-	log.WithField("session", session).Warnf("compaction: removed %d compaction block(s) (%s); serving the request without them (smarty-dev#8742)", dropped, reason)
+	if dropped > 0 {
+		log.WithField("session", session).Warnf("compaction: removed %d compaction block(s) (%s); serving the request without them (smarty-dev#8742)", dropped, reason)
+	}
 	return req, opts, nil
 }
 
@@ -107,7 +124,7 @@ func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecut
 // It never removes anything when affinity state is unusable or the JSON is
 // ambiguous: those keep their existing fail-closed answers.
 // The returned target is the account whose blocks were kept ("" if none).
-func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelector, payload []byte, authID string) ([]byte, int, string, string) {
+func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelector, payload []byte, authID string, unavailable ...bool) ([]byte, int, string, string) {
 	if origin == nil || origin.cache == nil || origin.cache.PersistenceError() != nil || len(payload) == 0 ||
 		len(payload) > MaxCompactionInputBytes {
 		// Above the hard bound nothing is parsed here; the caller refuses it.
@@ -156,6 +173,9 @@ func degradeCompactionPayload(ctx context.Context, origin *SessionAffinitySelect
 	for _, key := range keys {
 		signer, known := origin.cache.Get(key)
 		switch {
+		case len(unavailable) > 0 && unavailable[0] && known && origin.cache.IsProtected(key):
+			drop[key] = true
+			reason = "signer unavailable"
 		case !known || signer == "":
 			drop[key] = true
 		case !origin.cache.IsProtected(key):
@@ -332,8 +352,9 @@ func compactionItems(root gjson.Result) (items []gjson.Result, over bool) {
 // too large without its compaction blocks.
 func rewriteCompactionItems(payload []byte, root gjson.Result, drop func(gjson.Result) bool) ([]byte, bool) {
 	limit := maxCompactionJSONBytes
-	var out bytes.Buffer
-	out.Grow(min(len(payload), limit) + len(compactionOmittedText) + 64)
+	// Allocate the capped backing slice directly. Buffer.Grow's append/make
+	// path can allocate two full buffers in race-instrumented Go builds.
+	out := bytes.NewBuffer(make([]byte, 0, min(len(payload)+len(compactionOmittedText)+64, limit)))
 	cursor, full := 0, false
 	put := func(chunk string) {
 		if full || out.Len()+len(chunk) > limit {
