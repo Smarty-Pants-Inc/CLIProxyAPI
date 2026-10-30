@@ -231,6 +231,9 @@ func (c *compactionKeyCollector) add(item gjson.Result) error {
 		block = block[n:]
 	}
 	key := fmt.Sprintf("compaction::%x", digest.Sum(nil))
+	if op := KeyPolicyFromContext(c.ctx); op.IsPoolOperation() {
+		key = "compaction::pool:" + op.PoolID() + "::" + fmt.Sprintf("%x", digest.Sum(nil))
+	}
 	if err := compactionCheckContext(c.ctx); err != nil {
 		return err
 	}

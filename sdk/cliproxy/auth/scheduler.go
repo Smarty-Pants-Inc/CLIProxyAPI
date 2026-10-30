@@ -72,6 +72,7 @@ type scheduledAuthMeta struct {
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
 type modelScheduler struct {
+	poolCursors     map[string]map[int]readyBucketCursorState
 	modelKey        string
 	entries         map[string]*scheduledAuth
 	priorityOrder   []int
@@ -421,6 +422,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	defer shard.activatePoolCursors(ctx)()
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
 	picked, _, errPick := s.pickSkippingExhaustedLocked([]*modelScheduler{shard}, predicate, func(pred func(*scheduledAuth) bool) (*Auth, string, error) {
 		if picked := shard.pickReadyLocked(preferWebsocket, strategy, pred); picked != nil {
@@ -546,16 +548,20 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	shards := make([]*modelScheduler, 0, len(normalized))
 	for _, providerKey := range normalized {
 		if providerState := s.providers[providerKey]; providerState != nil {
-			shards = append(shards, providerState.ensureModelLocked(modelKey, now))
+			shard := providerState.ensureModelLocked(modelKey, now)
+			shards = append(shards, shard)
+			if shard != nil {
+				defer shard.activatePoolCursors(ctx)()
+			}
 		}
 	}
 	return s.pickSkippingExhaustedLocked(shards, base, func(predicate func(*scheduledAuth) bool) (*Auth, string, error) {
-		return s.pickMixedLocked(normalized, model, modelKey, pinnedAuthID, strategy, predicate)
+		return s.pickMixedLocked(ctx, normalized, model, modelKey, pinnedAuthID, strategy, predicate)
 	})
 }
 
 // pickMixedLocked picks across provider shards using predicate. The caller holds s.mu.
-func (s *authScheduler) pickMixedLocked(normalized []string, model, modelKey, pinnedAuthID string, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) (*Auth, string, error) {
+func (s *authScheduler) pickMixedLocked(ctx context.Context, normalized []string, model, modelKey, pinnedAuthID string, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) (*Auth, string, error) {
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
@@ -613,7 +619,7 @@ func (s *authScheduler) pickMixedLocked(normalized []string, model, modelKey, pi
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
+	cursorKey := poolScopedProvider(ctx, strings.Join(normalized, ",")) + ":" + modelKey
 	if strategy == schedulerStrategyWeightedRoundRobin {
 		entries := make([]*scheduledAuth, 0)
 		for _, shard := range candidateShards {

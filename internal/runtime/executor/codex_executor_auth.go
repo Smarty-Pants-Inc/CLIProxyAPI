@@ -14,8 +14,16 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func (e *CodexExecutor) AcquirePoolIdentity(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, cliproxyauth.NativePoolIdentity, error) {
+	return helps.AcquireCodexPoolIdentity(ctx, e.cfg, auth)
+}
+
 func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("codex executor: refresh called")
+	if e.cfg != nil && e.cfg.AccountPools != nil {
+		updated, _, err := e.AcquirePoolIdentity(ctx, auth)
+		return updated, err
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}

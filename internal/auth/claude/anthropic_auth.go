@@ -188,6 +188,16 @@ func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
 	return NewClaudeAuthWithProxyURL(cfg, "")
 }
 
+// NewClaudeAuthWithHTTPClient preserves the native OAuth implementation while
+// allowing trusted composition to restrict its transport and redirect policy.
+func NewClaudeAuthWithHTTPClient(cfg *config.Config, client *http.Client) *ClaudeAuth {
+	auth := NewClaudeAuth(cfg)
+	if client != nil {
+		auth.httpClient = client
+	}
+	return auth
+}
+
 // NewClaudeAuthWithProxyURL creates a new Anthropic authentication service with a proxy override.
 // proxyURL takes precedence over cfg.ProxyURL when non-empty.
 func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth {

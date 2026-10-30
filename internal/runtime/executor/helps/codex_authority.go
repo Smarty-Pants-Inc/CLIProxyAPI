@@ -19,7 +19,7 @@ type codexAuthorityRoundTripper struct {
 }
 
 func restrictCodexAuthority(ctx context.Context, auth *cliproxyauth.Auth, base http.RoundTripper) http.RoundTripper {
-	if cliproxyauth.KeyPolicyFromContext(ctx) == nil {
+	if op := cliproxyauth.KeyPolicyFromContext(ctx); op == nil || op.IsPoolOperation() {
 		return base
 	}
 	bound := &codexAuthorityRoundTripper{base: base}

@@ -20,6 +20,9 @@ import (
 )
 
 func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if cliproxyauth.KeyPolicyFromContext(ctx).IsPoolOperation() || helps.NativePoolConfigured(e.cfg) {
+		return resp, &cliproxyauth.Error{Code: "api_key_pool_path_unavailable", Message: "api_key_pool_path_unavailable", HTTPStatus: 503}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
