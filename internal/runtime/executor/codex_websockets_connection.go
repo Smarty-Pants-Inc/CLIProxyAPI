@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -35,7 +36,20 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// A new transport replaces all evidence from the prior connection, even
+	// when dialing fails without receiving an HTTP response.
+	logging.SetResponseHeadersAt(ctx, nil, time.Time{})
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	observedAt := time.Now()
+	if err != nil {
+		// gorilla/websocket v1.5.3 client.go:402 reads up to 1KiB of a
+		// rejected handshake body before DialContext returns. The headers
+		// remain useful raw evidence, but this is not their acquisition time.
+		observedAt = time.Time{}
+	}
+	if resp != nil {
+		logging.SetResponseHeadersAt(ctx, resp.Header, observedAt)
+	}
 	if err != nil {
 		cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	}
@@ -150,35 +164,46 @@ func frameCodexWebsocketRequestBody(body []byte) []byte {
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+	msgType, payload, _, errRead := readCodexWebsocketMessageObserved(ctx, sess, conn, readCh)
+	return msgType, payload, errRead
+}
+
+// readCodexWebsocketMessageObserved returns receipt time, not queue consumption
+// time. Keep the original helper for callers that do not consume quota metadata.
+func readCodexWebsocketMessageObserved(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, time.Time, error) {
 	if sess == nil {
 		if conn == nil {
-			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
+			return 0, nil, time.Time{}, fmt.Errorf("codex websockets executor: websocket conn is nil")
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
-		return msgType, payload, errRead
+		observedAt := time.Now()
+		if errRead != nil {
+			observedAt = time.Time{}
+		}
+		return msgType, payload, observedAt, errRead
 	}
 	if conn == nil {
-		return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
+		return 0, nil, time.Time{}, fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
 	if readCh == nil {
-		return 0, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
+		return 0, nil, time.Time{}, fmt.Errorf("codex websockets executor: session read channel is nil")
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return 0, nil, ctx.Err()
+			return 0, nil, time.Time{}, ctx.Err()
 		case ev, ok := <-readCh:
 			if !ok {
-				return 0, nil, helps.ErrCodexWebsocketSessionClosed
+				return 0, nil, time.Time{}, helps.ErrCodexWebsocketSessionClosed
 			}
 			if ev.conn != conn {
 				continue
 			}
 			if ev.err != nil {
-				return 0, nil, ev.err
+				return 0, nil, time.Time{}, ev.err
 			}
-			return ev.msgType, ev.payload, nil
+			return ev.msgType, ev.payload, ev.observedAt, nil
 		}
 	}
 }

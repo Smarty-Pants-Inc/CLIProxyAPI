@@ -13,6 +13,112 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 )
 
+// Keep: transport-to-auth provenance is a trust boundary; completion must not
+// make retained evidence younger or let an older in-flight request regress it.
+func TestMarkResultPreservesAcquisitionAndRejectsReverseCompletion(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	credential, errRegister := manager.Register(context.Background(), &Auth{ID: "acquisition-order", Provider: "codex"})
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	t0, t1, t3 := time.Unix(100, 0), time.Unix(200, 0), time.Unix(400, 0)
+	older := internallogging.WithFreshResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeadersAt(older, http.Header{
+		"X-Codex-Secondary-Used-Percent": {"20"}, "X-Codex-Credits-Balance": {"10"},
+	}, t0)
+	internallogging.MergeResponseHeadersAt(older, http.Header{
+		"X-Codex-Primary-Used-Percent": {"5"}, "X-Codex-Primary-Reset-After-Seconds": {"60"},
+	}, t1)
+	result := Result{AuthID: credential.ID, Provider: "codex", Model: "acquisition-model", Success: true}
+	manager.MarkResult(older, result)
+	updated, _ := manager.GetByID(credential.ID)
+	for name, quota := range map[string]QuotaState{"auth": updated.Quota, "model": updated.ModelStates[result.Model].Quota} {
+		if !quota.ObservedAt.Equal(t0) || !quota.SignalObservedAt["X-Codex-Secondary-Used-Percent"].Equal(t0) || !quota.SignalObservedAt["X-Codex-Credits-Balance"].Equal(t0) || !quota.SignalObservedAt["X-Codex-Primary-Reset-After-Seconds"].Equal(t1) {
+			t.Fatalf("%s completion replaced acquisition: %+v", name, quota)
+		}
+	}
+	newer := internallogging.WithFreshResponseHeadersHolder(older)
+	internallogging.SetResponseHeadersAt(newer, http.Header{"X-Codex-Primary-Used-Percent": {"5"}}, t3)
+	manager.MarkResult(newer, result)                                                 // Equal numeric value is genuine new evidence.
+	manager.MarkResult(older, result)                                                 // Older request finishes last.
+	manager.MarkResult(internallogging.WithFreshResponseHeadersHolder(newer), result) // No response.
+	result.SkipQuotaObservation = true
+	manager.MarkResult(older, result)
+	updated, _ = manager.GetByID(credential.ID)
+	for name, quota := range map[string]QuotaState{"auth": updated.Quota, "model": updated.ModelStates[result.Model].Quota} {
+		if !quota.ObservedAt.Equal(t3) || !quota.SignalObservedAt["X-Codex-Primary-Used-Percent"].Equal(t3) || len(quota.Signals) != 1 {
+			t.Fatalf("%s regressed or unioned executions: %+v", name, quota)
+		}
+	}
+}
+
+func TestQuotaAcquisitionFilteringCloningAndCooldown(t *testing.T) {
+	t0, t1 := time.Unix(100, 0), time.Unix(200, 0)
+	headers := http.Header{"X-Codex-Primary-Used-Percent": {"5"}, "Authorization": {"do-not-retain"}, "Anthropic-Ratelimit-Unified-Status": {"allowed"}, "X-Codex-Secondary-Used-Percent": {"bad\nvalue"}}
+	times := map[string]time.Time{}
+	for key := range headers {
+		times[key] = t0
+	}
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("X-Codex-Additional-%03d-Primary-Used-Percent", i)
+		headers[key], times[key] = []string{"1"}, t1
+	}
+	var quota QuotaState
+	if !quota.ObserveResponseHeadersObservationForProvider("codex", headers, times) || len(quota.Signals) != maxQuotaSignalHeaders || len(quota.SignalObservedAt) != len(quota.Signals) {
+		t.Fatalf("bounded snapshot lost matching times: %+v", quota)
+	}
+	for key := range quota.SignalObservedAt {
+		if _, ok := quota.Signals[key]; !ok {
+			t.Fatalf("filtered/truncated signal retained provenance: %s", key)
+		}
+	}
+	if !quota.ObservedAt.Equal(t0) {
+		t.Fatalf("scalar must be oldest retained acquisition: %v", quota.ObservedAt)
+	}
+	cloned := quota.Clone()
+	cloned.SignalObservedAt["X-Codex-Primary-Used-Percent"] = t1
+	times["X-Codex-Primary-Used-Percent"] = t1
+	if !quota.SignalObservedAt["X-Codex-Primary-Used-Percent"].Equal(t0) {
+		t.Fatal("input or clone aliases quota provenance")
+	}
+	applyCooldownFields(&quota, QuotaState{Exceeded: true, NextRecoverAt: t1})
+	applyCooldownFields(&quota, cooldownFieldsOf(QuotaState{}))
+	if !quota.SignalObservedAt["X-Codex-Primary-Used-Percent"].Equal(t0) || len(cooldownFieldsOf(quota).SignalObservedAt) != 0 {
+		t.Fatal("cooldown transition changed or persisted passive provenance")
+	}
+	merged := mergeQuotaObservation(QuotaState{}, quota)
+	quota.SignalObservedAt["X-Codex-Primary-Used-Percent"] = t1
+	if !merged.SignalObservedAt["X-Codex-Primary-Used-Percent"].Equal(t0) {
+		t.Fatal("merge aliases source provenance")
+	}
+	if !merged.ClearObservationSignals() || len(merged.SignalObservedAt) != 0 || !merged.ObservedAt.IsZero() {
+		t.Fatal("clear retained provenance")
+	}
+}
+
+func TestQuotaAcquisitionUnknownAndIncomparableSnapshots(t *testing.T) {
+	primary, secondary := "X-Codex-Primary-Used-Percent", "X-Codex-Secondary-Used-Percent"
+	t0, t1, t3 := time.Unix(100, 0), time.Unix(200, 0), time.Unix(400, 0)
+	legacy := QuotaState{ObservedAt: t1, Signals: map[string]string{primary: "5"}}
+	if len(legacy.Clone().SignalObservedAt) != 0 || len(mergeQuotaObservation(QuotaState{}, legacy).SignalObservedAt) != 0 {
+		t.Fatal("legacy scalar manufactured verified provenance")
+	}
+	var unknown QuotaState
+	unknown.ObserveResponseHeadersObservationForProvider("codex", http.Header{primary: {"5"}, secondary: {"20"}}, map[string]time.Time{primary: t1})
+	if !unknown.ObservedAt.IsZero() || len(unknown.SignalObservedAt) != 1 {
+		t.Fatalf("missing provenance became fresh: %+v", unknown)
+	}
+	var current QuotaState
+	current.ObserveResponseHeadersObservationForProvider("codex", http.Header{primary: {"5"}, secondary: {"20"}}, map[string]time.Time{primary: t1, secondary: t1})
+	before := current.Clone()
+	if current.ObserveResponseHeadersObservationForProvider("codex", http.Header{primary: {"6"}, secondary: {"10"}}, map[string]time.Time{primary: t3, secondary: t0}) {
+		t.Fatal("mixed snapshot regressed shared secondary acquisition")
+	}
+	if !reflect.DeepEqual(before, current) {
+		t.Fatal("rejected mixed snapshot changed current evidence")
+	}
+}
+
 func TestQuotaStateObserveResponseHeadersKeepsProviderScopedSignals(t *testing.T) {
 	observedAt := time.Unix(123, 0)
 	var quota QuotaState

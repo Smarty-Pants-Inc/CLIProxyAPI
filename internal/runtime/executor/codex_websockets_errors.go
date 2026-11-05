@@ -193,11 +193,15 @@ func websocketUpgradeRequestLog(info helps.UpstreamRequestLog) helps.UpstreamReq
 	return upgradeInfo
 }
 
-func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, resp *http.Response) {
+func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, resp *http.Response, alreadyCaptured ...bool) {
 	if resp == nil {
 		return
 	}
-	helps.RecordAPIWebsocketHandshake(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	if len(alreadyCaptured) > 0 && alreadyCaptured[0] {
+		helps.LogAPIWebsocketHandshake(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	} else {
+		helps.RecordAPIWebsocketHandshake(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	}
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 }
 
