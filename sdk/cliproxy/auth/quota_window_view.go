@@ -433,11 +433,11 @@ func quotaWindowReset(w *QuotaWindowView, signals map[string]string, observation
 					diagnostic.Code = "relative_reset_only"
 				}
 				if w.ResetAt != nil && !implied.IsZero() {
-					delta := absolute.Sub(implied).Seconds()
+					deltaDuration := absolute.Sub(implied)
+					delta := deltaDuration.Seconds()
 					diagnostic.ResetDeltaSeconds = &delta
-					if relativeVerified && verified && math.Abs(delta) > 1 {
-						diagnostic.Code = "relative_reset_conflict"
-						reason = diagnostic.Code
+					if relativeVerified && verified && (deltaDuration > 10*time.Second || deltaDuration < -10*time.Second) {
+						diagnostic.Code = "relative_reset_disagreement"
 					}
 				} else if reason == "" && relativeVerified && verified {
 					epoch := quotaWindowEpoch(implied)
@@ -489,8 +489,8 @@ func quotaWindowTimestamp(raw string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	// Keep subsecond reset comparisons at time.Time precision. Parsing a
-	// contemporary epoch as float64 first can round a genuine >1s conflict
-	// down to the accepted 1s boundary. Native millisecond handling remains.
+	// contemporary epoch as float64 first can round a genuine >10s disagreement
+	// down to the accepted 10s boundary. Native millisecond handling remains.
 	if quotaWindowDecimal.MatchString(raw) {
 		whole, fraction, _ := strings.Cut(raw, ".")
 		seconds, err := strconv.ParseInt(whole, 10, 64)

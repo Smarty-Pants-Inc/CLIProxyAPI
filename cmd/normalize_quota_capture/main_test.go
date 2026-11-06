@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -60,6 +61,51 @@ const realCaptureFixture = `{
         "Anthropic-Ratelimit-Unified-Representative-Claim": ["seven_day"],
         "Anthropic-Ratelimit-Unified-Reset": ["1793923200"],
         "Anthropic-Ratelimit-Unified-Status": ["allowed"]
+      }
+    }
+  ]
+}`
+
+// Sanitized historical Codex row; its same-time per-header acquisition map is
+// explicit fixture provenance, not evidence from a live endpoint.
+const codexAbsoluteResetRowCapture = `{
+  "captured_at": "2026-11-06T11:34:00Z",
+  "seats": [
+    {
+      "auth_index": "6e912530b1784ac7",
+      "provider": "codex",
+      "model": "gpt-6-luna",
+      "headers": {
+        "X-Codex-Active-Limit": ["premium"],
+        "X-Codex-Credits-Balance": ["0"],
+        "X-Codex-Credits-Has-Credits": ["False"],
+        "X-Codex-Credits-Unlimited": ["False"],
+        "X-Codex-Plan-Type": ["pro"],
+        "X-Codex-Primary-Over-Secondary-Limit-Percent": ["0"],
+        "X-Codex-Primary-Reset-After-Seconds": ["415019"],
+        "X-Codex-Primary-Reset-At": ["1794379849"],
+        "X-Codex-Primary-Used-Percent": ["15"],
+        "X-Codex-Primary-Window-Minutes": ["10080"],
+        "X-Codex-Secondary-Reset-After-Seconds": ["0"],
+        "X-Codex-Secondary-Reset-At": [""],
+        "X-Codex-Secondary-Used-Percent": ["0"],
+        "X-Codex-Secondary-Window-Minutes": ["0"]
+      },
+      "response_headers_observed_at": {
+        "X-Codex-Active-Limit": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Credits-Balance": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Credits-Has-Credits": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Credits-Unlimited": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Plan-Type": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Primary-Over-Secondary-Limit-Percent": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Primary-Reset-After-Seconds": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Primary-Reset-At": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Primary-Used-Percent": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Primary-Window-Minutes": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Secondary-Reset-After-Seconds": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Secondary-Reset-At": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Secondary-Used-Percent": "2026-11-06T11:33:52.196199291Z",
+        "X-Codex-Secondary-Window-Minutes": "2026-11-06T11:33:52.196199291Z"
       }
     }
   ]
@@ -171,6 +217,199 @@ func TestRunRealCaptureFileToStdoutDeterministic(t *testing.T) {
 	if diagnostic.RequestTimestamp == nil || *diagnostic.RequestTimestamp != "2026-11-05T10:44:19.059768Z" || diagnostic.RequestTimestampMS == nil || *diagnostic.RequestTimestampMS != 1793875459059 || diagnostic.RowInsertTimestampMS == nil || *diagnostic.RowInsertTimestampMS != 1793875522055 || diagnostic.RequestTimestampBasis != "request_started_not_acquisition" || diagnostic.RowInsertBasis != "row_inserted_not_acquisition" {
 		t.Fatalf("non-acquisition diagnostics not preserved/labelled: %+v", diagnostic)
 	}
+}
+
+func TestRunCodexAbsoluteResetRow20198112(t *testing.T) {
+	const acquiredText = "2026-11-06T11:33:52.196199291Z"
+	acquired, err := time.Parse(time.RFC3339Nano, acquiredText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := writeCapture(t, []byte(codexAbsoluteResetRowCapture))
+	inputBefore, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputInfoBefore, err := os.Stat(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runAt := func(t *testing.T, path string, asOf time.Time) ([]byte, normalizedCapture) {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := run(cliArgs(path, asOf.UTC().Format(time.RFC3339Nano)), &stdout); err != nil {
+			t.Fatal(err)
+		}
+		raw := append([]byte(nil), stdout.Bytes()...)
+		return raw, decodeOutput(t, raw)
+	}
+	decodeRow := func(t *testing.T) quotaCapture {
+		t.Helper()
+		var capture quotaCapture
+		if err := json.Unmarshal([]byte(codexAbsoluteResetRowCapture), &capture); err != nil {
+			t.Fatal(err)
+		}
+		return capture
+	}
+	assertNumber := func(t *testing.T, label string, got *float64, want, tolerance float64) {
+		t.Helper()
+		if got == nil || math.Abs(*got-want) > tolerance {
+			t.Fatalf("%s = %v, want %v (tolerance %g)", label, got, want, tolerance)
+		}
+	}
+	findDiagnostic := func(t *testing.T, window auth.QuotaWindowView, code string) auth.QuotaWindowDiagnostic {
+		t.Helper()
+		for _, diagnostic := range window.Diagnostics {
+			if diagnostic.Code == code {
+				return diagnostic
+			}
+		}
+		t.Fatalf("missing diagnostic %q: %+v", code, window)
+		return auth.QuotaWindowDiagnostic{}
+	}
+	assertSnapshotID := func(t *testing.T, view normalizedCapture) {
+		t.Helper()
+		id := view.CapacitySnapshotID
+		view.CapacitySnapshotID = ""
+		preimage, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256(preimage)
+		if id != "sha256:"+hex.EncodeToString(hash[:]) {
+			t.Fatal("snapshot ID does not bind the normalized envelope")
+		}
+	}
+
+	asOf := time.Date(2026, 11, 6, 11, 34, 0, 0, time.UTC)
+	firstRaw, first := runAt(t, input, asOf)
+	repeatRaw, repeated := runAt(t, input, asOf)
+	if !bytes.Equal(firstRaw, repeatRaw) || first.CapacitySnapshotID != repeated.CapacitySnapshotID {
+		t.Fatal("same input bytes and args produced different CLI output")
+	}
+	if first.SchemaVersion != schemaVersion || first.SourceVersion != testSourceVersion || first.Source != "usage_events" || first.AsOf != asOf.Format(time.RFC3339Nano) {
+		t.Fatalf("schema/source/clock envelope changed: %+v", first)
+	}
+	if first.CapturedAt != "2026-11-06T11:34:00Z" || first.CapturedAtBasis != "capture_fetch_time_not_acquisition" || first.RosterCompleteness != "unverified" || first.ObservedSeats != 1 || len(first.Seats) != 1 {
+		t.Fatalf("capture/roster provenance changed: %+v", first)
+	}
+	captureHash := sha256.Sum256(inputBefore)
+	if first.SourceCaptureSHA256 != hex.EncodeToString(captureHash[:]) {
+		t.Fatal("source hash is not of exact capture bytes")
+	}
+	assertSnapshotID(t, first)
+
+	seat := first.Seats[0]
+	if seat.AuthIndex != "6e912530b1784ac7" || seat.Provider != "codex" || seat.ObservedModel == nil || *seat.ObservedModel != "gpt-6-luna" || seat.ObservedModelBasis != "usage_event_request_model_not_quota_scope" {
+		t.Fatalf("historical row identity/model changed: %+v", seat)
+	}
+	if seat.QuotaScope != "unverified" || seat.Health != "unknown" || seat.CreditsApproval != "unverified" || seat.CooldownUntil != nil || seat.NextRetryAt != nil {
+		t.Fatalf("unverified authority/health was inferred: %+v", seat)
+	}
+	if seat.Quota.Credits.HasCredits == nil || *seat.Quota.Credits.HasCredits || seat.Quota.Credits.Unlimited == nil || *seat.Quota.Credits.Unlimited || value(seat.Quota.Credits.Balance) != 0 {
+		t.Fatalf("observed zero/false credit facts changed: %+v", seat.Quota.Credits)
+	}
+
+	primary, secondary := findWindow(t, seat, "primary"), findWindow(t, seat, "secondary")
+	if seat.Quota.State != "known" || primary.State != "known" || primary.Reason != "" || primary.TimestampBasis != "header_acquisition" || primary.DurationSeconds == nil || *primary.DurationSeconds != 604800 {
+		t.Fatalf("valid primary evidence not retained: quota=%+v primary=%+v", seat.Quota, primary)
+	}
+	assertNumber(t, "primary used percent", primary.UsedPercent, 15, 1e-9)
+	assertNumber(t, "primary headroom percent", primary.HeadroomPercent, 85, 1e-9)
+	assertNumber(t, "absolute reset", primary.ResetAt, 1794379849, 1e-6)
+	expectedObserved := float64(acquired.Unix()) + float64(acquired.Nanosecond())/1e9
+	assertNumber(t, "acquisition observation timestamp", primary.ObservedAt, expectedObserved, 1e-6)
+	assertNumber(t, "initial observation age", primary.AgeSeconds, asOf.Sub(acquired).Seconds(), 1e-9)
+	if secondary.State != "not_applicable" || secondary.Reason != "upstream_absent" || secondary.DurationSeconds != nil || secondary.UsedPercent != nil || secondary.HeadroomPercent != nil || secondary.ResetAt != nil {
+		t.Fatalf("absent secondary became capacity: %+v", secondary)
+	}
+
+	implied := acquired.Add(415019 * time.Second)
+	diagnostic := findDiagnostic(t, primary, "relative_reset_agrees")
+	assertNumber(t, "relative reset seconds", diagnostic.RelativeResetSeconds, 415019, 1e-9)
+	assertNumber(t, "implied reset", diagnostic.ImpliedResetAt, float64(implied.Unix())+float64(implied.Nanosecond())/1e9, 1e-6)
+	assertNumber(t, "signed reset delta", diagnostic.ResetDeltaSeconds, -2.196199291, 1e-9)
+
+	_, freshBoundary := runAt(t, input, acquired.Add(300*time.Second))
+	freshPrimary := findWindow(t, freshBoundary.Seats[0], "primary")
+	if freshPrimary.State != "known" {
+		t.Fatalf("acquisition at exactly 300 seconds became stale: %+v", freshPrimary)
+	}
+	assertNumber(t, "300-second observation age", freshPrimary.AgeSeconds, 300, 1e-9)
+	_, staleBoundary := runAt(t, input, acquired.Add(300*time.Second+time.Nanosecond))
+	stalePrimary := findWindow(t, staleBoundary.Seats[0], "primary")
+	if stalePrimary.State != "stale" || stalePrimary.Reason != "observation_expired" {
+		t.Fatalf("acquisition just over 300 seconds remained fresh: %+v", stalePrimary)
+	}
+	assertNumber(t, "just-expired observation age", stalePrimary.AgeSeconds, 300.000000001, 1e-9)
+
+	replayAsOf := time.Date(2026, 11, 6, 17, 0, 0, 0, time.UTC)
+	_, replayView := runAt(t, input, replayAsOf)
+	replayedPrimary := findWindow(t, replayView.Seats[0], "primary")
+	if replayedPrimary.State != "stale" || replayedPrimary.Reason != "observation_expired" || replayView.AsOf != replayAsOf.Format(time.RFC3339Nano) || replayView.CapacitySnapshotID == first.CapacitySnapshotID {
+		t.Fatalf("replay restamped historical acquisition: view=%+v primary=%+v", replayView, replayedPrimary)
+	}
+	assertNumber(t, "replayed observation timestamp", replayedPrimary.ObservedAt, expectedObserved, 1e-6)
+	if replayedPrimary.TimestampBasis != "header_acquisition" || replayedPrimary.AgeSeconds == nil || *replayedPrimary.AgeSeconds <= 300 {
+		t.Fatalf("replay did not retain stale acquisition provenance: %+v", replayedPrimary)
+	}
+
+	inputAfter, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputInfoAfter, err := os.Stat(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(inputBefore, inputAfter) || !inputInfoBefore.ModTime().Equal(inputInfoAfter.ModTime()) {
+		t.Fatal("CLI run changed or restamped its input capture")
+	}
+
+	t.Run("synthetic_disagreement_over_10s_keeps_absolute", func(t *testing.T) {
+		capture := decodeRow(t)
+		capture.Seats[0].Headers["X-Codex-Primary-Reset-After-Seconds"] = []string{"415000"}
+		path := writeJSONCapture(t, capture)
+		_, view := runAt(t, path, asOf)
+		window := findWindow(t, view.Seats[0], "primary")
+		if window.State != "known" || window.Reason != "" {
+			t.Fatalf("relative disagreement invalidated absolute reset: %+v", window)
+		}
+		assertNumber(t, "absolute reset retained", window.ResetAt, 1794379849, 1e-6)
+		assertNumber(t, "headroom retained", window.HeadroomPercent, 85, 1e-9)
+		d := findDiagnostic(t, window, "relative_reset_disagreement")
+		disagreementImplied := acquired.Add(415000 * time.Second)
+		assertNumber(t, "disagreeing relative seconds", d.RelativeResetSeconds, 415000, 1e-9)
+		assertNumber(t, "disagreeing implied reset", d.ImpliedResetAt, float64(disagreementImplied.Unix())+float64(disagreementImplied.Nanosecond())/1e9, 1e-6)
+		assertNumber(t, "precise signed disagreement", d.ResetDeltaSeconds, 16.803800709, 1e-9)
+	})
+
+	t.Run("synthetic_relative_only_uses_acquisition_fallback", func(t *testing.T) {
+		capture := decodeRow(t)
+		delete(capture.Seats[0].Headers, "X-Codex-Primary-Reset-At")
+		delete(capture.Seats[0].ResponseHeadersObservedAt, "X-Codex-Primary-Reset-At")
+		path := writeJSONCapture(t, capture)
+		_, view := runAt(t, path, asOf)
+		window := findWindow(t, view.Seats[0], "primary")
+		if window.State != "known" || window.Reason != "" {
+			t.Fatalf("relative-only acquisition fallback became unknown: %+v", window)
+		}
+		expectedReset := acquired.Add(415019 * time.Second)
+		assertNumber(t, "relative-only reset", window.ResetAt, float64(expectedReset.Unix())+float64(expectedReset.Nanosecond())/1e9, 1e-6)
+		findDiagnostic(t, window, "relative_reset_only")
+	})
+
+	t.Run("synthetic_malformed_absolute_is_not_absent", func(t *testing.T) {
+		capture := decodeRow(t)
+		capture.Seats[0].Headers["X-Codex-Primary-Reset-At"] = []string{"not-a-timestamp"}
+		path := writeJSONCapture(t, capture)
+		_, view := runAt(t, path, asOf)
+		window := findWindow(t, view.Seats[0], "primary")
+		if window.State != "unknown" || window.Reason != "invalid_absolute_reset" || window.ResetAt != nil {
+			t.Fatalf("malformed absolute reset incorrectly fell back to relative: %+v", window)
+		}
+	})
 }
 
 func TestRunReplayDoesNotRestampAndIDsBindArguments(t *testing.T) {
