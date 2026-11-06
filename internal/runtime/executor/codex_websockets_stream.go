@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -124,11 +125,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
-			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
+			helps.LogAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
 			unlockStreamSession()
 			if opts.ExecutionLifecycle == nil && !cliproxyexecutor.DownstreamWebsocket(ctx) {
+				logging.SetResponseHeadersAt(ctx, nil, time.Time{})
 				return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 			}
 			if cliproxyexecutor.UpstreamAttempted(dialCtx) {
@@ -152,7 +154,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		closeWebsocketAfterBindFailure(sess, conn, closer)
 		return nil, errBind
 	}
-	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	recordAPIWebsocketHandshake(ctx, e.cfg, respHS, true)
 	reporter.StartResponseTTFT()
 
 	if sess == nil {
@@ -218,7 +220,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				AuthType:  authType,
 				AuthValue: authValue,
 			})
-			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry, true)
 			reporter.StartResponseTTFT()
 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
@@ -328,7 +330,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				return nil, ctx.Err()
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, observedAt, errRead := readCodexWebsocketMessageObserved(ctx, sess, conn, readCh)
 			if errRead != nil {
 				mappedErr := mapCodexWebsocketReadError(errRead)
 				var scoped cliproxyexecutor.RequestScopedError
@@ -411,7 +413,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			observeCodexTokenEvent(reporter, payload)
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.AppendCodexAPIWebsocketResponseAt(ctx, e.cfg, payload, observedAt)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			if codexFrameCommitsUpstreamWork(gjson.GetBytes(payload, "type").String(), payload) {
 				replaySafe = false
@@ -711,7 +713,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, observedAt, errRead := readCodexWebsocketMessageObserved(ctx, sess, conn, readCh)
 			if errRead != nil {
 				if ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -757,7 +759,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			observeCodexTokenEvent(reporter, payload)
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.AppendCodexAPIWebsocketResponseAt(ctx, e.cfg, payload, observedAt)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			if codexFrameCommitsUpstreamWork(gjson.GetBytes(payload, "type").String(), payload) {
 				streamReplaySafe = false

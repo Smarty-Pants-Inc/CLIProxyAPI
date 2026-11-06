@@ -887,6 +887,80 @@ func TestUsageAdapterRecoversSessionHierarchyFromContext(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterClonesResponseHeadersObservation(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 1)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-provenance",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-provenance"}
+	initialAt := time.Date(2026, 4, 25, 0, 1, 0, 123456789, time.UTC)
+	retryAt := initialAt.Add(time.Minute)
+	laterAt := retryAt.Add(time.Hour)
+	source := coreusage.Record{
+		RequestID: "execution-1", TraceID: "trace-1", Provider: "codex", Model: "test-model",
+		AuthID: "auth-1", AuthIndex: "index-1", ResponseModel: "served-model",
+		RequestedAt: initialAt.Add(-time.Minute), Latency: 3 * time.Second, TTFT: 42 * time.Millisecond,
+		ResponseHeaders: http.Header{
+			"X-Upstream-Request-Id": {"upstream-1", "upstream-2"},
+			"Retry-After":           {"30"},
+		},
+		ResponseHeadersObservedAt: map[string]time.Time{
+			"X-Upstream-Request-Id": initialAt,
+			"Retry-After":           retryAt,
+		},
+	}
+	ctx := logging.WithFreshResponseHeadersHolder(context.Background())
+	logging.SetResponseHeadersAt(ctx, http.Header{"Retry-After": {"999"}}, laterAt)
+	adapter.HandleUsage(ctx, source)
+	got := <-plugin.captured
+
+	source.ResponseHeaders["X-Upstream-Request-Id"][0] = "source-mutation"
+	source.ResponseHeadersObservedAt["Retry-After"] = laterAt
+	ids := got.ResponseHeaders.Values("X-Upstream-Request-Id")
+	if len(ids) != 2 || ids[0] != "upstream-1" || ids[1] != "upstream-2" || got.ResponseHeaders.Get("Retry-After") != "30" {
+		t.Fatalf("translated headers changed: %v", got.ResponseHeaders)
+	}
+	if len(got.ResponseHeadersObservedAt) != 2 || !got.ResponseHeadersObservedAt["X-Upstream-Request-Id"].Equal(initialAt) || !got.ResponseHeadersObservedAt["Retry-After"].Equal(retryAt) {
+		t.Fatalf("translated acquisitions changed: %v", got.ResponseHeadersObservedAt)
+	}
+	if got.RequestID != source.RequestID || got.TraceID != source.TraceID || got.AuthID != source.AuthID || got.AuthIndex != source.AuthIndex || got.Provider != source.Provider || got.Model != source.Model || got.ResponseModel != source.ResponseModel {
+		t.Fatalf("translated attribution changed: %+v", got)
+	}
+	if !got.RequestedAt.Equal(source.RequestedAt) || got.Latency != source.Latency || got.TTFT != source.TTFT {
+		t.Fatalf("translated timing changed: requested_at=%v latency=%v ttft=%v", got.RequestedAt, got.Latency, got.TTFT)
+	}
+
+	got.ResponseHeaders["X-Upstream-Request-Id"][1] = "plugin-mutation"
+	got.ResponseHeadersObservedAt["Retry-After"] = time.Time{}
+	if source.ResponseHeaders.Values("X-Upstream-Request-Id")[1] != "upstream-2" || !source.ResponseHeadersObservedAt["Retry-After"].Equal(laterAt) {
+		t.Fatal("plugin mutation reached the core record")
+	}
+}
+
+func TestUsageAdapterLegacyHeadersDoNotInventAcquisition(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 1)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-legacy-provenance",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-legacy-provenance"}
+	ctx := logging.WithFreshResponseHeadersHolder(context.Background())
+	logging.SetResponseHeadersAt(ctx, http.Header{"Retry-After": {"999"}}, time.Date(2026, 4, 25, 0, 1, 0, 0, time.UTC))
+	adapter.HandleUsage(ctx, coreusage.Record{
+		RequestedAt:     time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+		ResponseHeaders: http.Header{"Retry-After": {"30"}},
+	})
+	got := <-plugin.captured
+	if got.ResponseHeaders.Get("Retry-After") != "30" || got.ResponseHeadersObservedAt != nil {
+		t.Fatalf("legacy observation was replaced or invented: headers=%v acquisitions=%v", got.ResponseHeaders, got.ResponseHeadersObservedAt)
+	}
+}
+
 func TestUsageAdapterPropagatesNativeKeyAndAccessProvider(t *testing.T) {
 	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 1)}
 	host := newHostWithRecords(capabilityRecord{
