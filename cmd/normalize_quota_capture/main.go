@@ -97,20 +97,34 @@ func run(args []string, stdout io.Writer) error {
 	provenanceOutput := flags.String("provenance-output", "", "explicit provenance sidecar output file")
 	artifactFile := flags.String("artifact-file", "", "exact caller stdout artifact basename")
 	evaluationTime := flags.String("evaluation-time", "", "explicit offline replay comparison clock, RFC3339Nano")
+	checkpointOut := flags.String("checkpoint-out", "", "explicit next incremental staging checkpoint; enables v2")
+	checkpointIn := flags.String("checkpoint-in", "", "explicit prior native checkpoint; omitted only for cursor-zero bootstrap")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid arguments: require --input, --as-of and --source-version")
 	}
-	producerMode, hasAsOf, hasEvaluation := false, false, false
+	producerMode, hasAsOf, hasEvaluation, incrementalMode, hasCheckpointIn := false, false, false, false, false
 	flags.Visit(func(value *flag.Flag) {
 		switch value.Name {
 		case "roster", "auth-files-observation", "provenance-output", "artifact-file":
 			producerMode = true
+		case "checkpoint-in":
+			incrementalMode, hasCheckpointIn = true, true
+		case "checkpoint-out":
+			incrementalMode = true
 		case "as-of":
 			hasAsOf = true
 		case "evaluation-time":
 			hasEvaluation = true
 		}
 	})
+	if incrementalMode {
+		return runIncremental(incrementalOptions{
+			input: *input, sourceVersion: *sourceVersion, roster: *roster, authFiles: *authFiles,
+			provenanceOutput: *provenanceOutput, artifactFile: *artifactFile,
+			checkpointIn: *checkpointIn, checkpointOut: *checkpointOut,
+			evaluationTime: *evaluationTime, replay: hasEvaluation, hasAsOf: hasAsOf, hasCheckpointIn: hasCheckpointIn,
+		}, stdout)
+	}
 	var now time.Time
 	if producerMode {
 		if *input == "" || !lowerHex(*sourceVersion, 40) || *roster == "" || *authFiles == "" || *provenanceOutput == "" || !validArtifactBasename(*artifactFile) || hasAsOf {

@@ -447,6 +447,13 @@ func authFileCooldown(raw json.RawMessage) *bool {
 // exhaustion, credits, aggregate and opaque namespace signals cannot grant it.
 // Native LimitSignals and window classification retain native conflict refusal.
 func producerLimitReached(row captureSeat, quota auth.QuotaWindowsView, now time.Time) (*bool, time.Time) {
+	value, at, _ := producerLimitReachedEvidence(row, quota, now)
+	return value, at
+}
+
+// The additional keys expose exactly the flag/membership clocks used by v2;
+// the v1 policy and its timestamps remain unchanged.
+func producerLimitReachedEvidence(row captureSeat, quota auth.QuotaWindowsView, now time.Time) (*bool, time.Time, []string) {
 	windows := make(map[string]auth.QuotaWindowView)
 	for _, window := range quota.Windows {
 		if window.LimitKey == "x-codex" {
@@ -454,6 +461,7 @@ func producerLimitReached(row captureSeat, quota auth.QuotaWindowsView, now time
 		}
 	}
 	var rejectedAt, affirmativeAt time.Time
+	var rejectedKeys, affirmativeKeys []string
 	required, allAffirmative := 0, true
 	for _, slot := range []string{"primary", "secondary"} {
 		window, exists := windows[slot]
@@ -462,6 +470,7 @@ func producerLimitReached(row captureSeat, quota auth.QuotaWindowsView, now time
 			at := headerAcquisition(row, prefix+"Window-Minutes")
 			if freshAcquisition(at, now) {
 				affirmativeAt = oldestTime(affirmativeAt, at)
+				affirmativeKeys = append(affirmativeKeys, http.CanonicalHeaderKey(prefix+"Window-Minutes"))
 				continue
 			}
 		}
@@ -482,20 +491,24 @@ func producerLimitReached(row captureSeat, quota auth.QuotaWindowsView, now time
 			rejected := (suffix == "Allowed" && value == "false") || (suffix == "Limit-Reached" && value == "true")
 			if rejected {
 				rejectedAt = oldestTime(rejectedAt, at)
+				rejectedKeys = append(rejectedKeys, key)
 			} else {
 				positive = true
 				affirmativeAt = oldestTime(affirmativeAt, at)
+				affirmativeKeys = append(affirmativeKeys, key)
 			}
 		}
 		allAffirmative = allAffirmative && valid && positive
 	}
 	if !rejectedAt.IsZero() {
 		value := true
-		return &value, rejectedAt
+		sort.Strings(rejectedKeys)
+		return &value, rejectedAt, rejectedKeys
 	}
 	if required > 0 && allAffirmative && !affirmativeAt.IsZero() {
 		value := false
-		return &value, affirmativeAt
+		sort.Strings(affirmativeKeys)
+		return &value, affirmativeAt, affirmativeKeys
 	}
-	return nil, time.Time{}
+	return nil, time.Time{}, nil
 }

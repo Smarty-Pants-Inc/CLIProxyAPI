@@ -333,6 +333,340 @@ independent health in existing sidecar slots. Neither mode implements the reader
 route eligibility, aggregate headroom, cost, equivalence policy or START grant,
 nor changes CPA's selectors. No absent roster seats are fabricated.
 
+## Opt-in checkpointed native producer: v2
+
+The sections above describe **unchanged v1**. Only `--checkpoint-out NEXT.json`
+opts into the separate v2 decoder/reducer below. `--checkpoint-in PREVIOUS.json`
+is optional only for an explicit cursor-zero first bootstrap; it is not a
+legacy-capture seed. A lone checkpoint-in, missing producer options, `--as-of`,
+nonzero bootstrap cursor without a native checkpoint, or mismatched checkpoint
+refuses. There is no fallback to v1 after a v2 error.
+
+```sh
+# First bounded page, after_id MUST be "0". Paths are caller-owned staging paths.
+normalize_quota_capture \
+  --input generation-001/delta.json \
+  --source-version FULL_40_DIGIT_LOWERCASE_SOURCE_COMMIT \
+  --roster ROSTER.json \
+  --auth-files-observation generation-001/auth-files.json \
+  --checkpoint-out generation-001/next.json \
+  --provenance-output generation-001/section-2.provenance.json \
+  --artifact-file section-2.json > generation-001/section-2.json
+
+# Next ordinary invocation, only after the wrapper accepted the prior generation.
+normalize_quota_capture \
+  --input generation-002/delta.json \
+  --source-version FULL_40_DIGIT_LOWERCASE_SOURCE_COMMIT \
+  --roster ROSTER.json \
+  --auth-files-observation generation-002/auth-files.json \
+  --checkpoint-in generation-001/next.json \
+  --checkpoint-out generation-002/next.json \
+  --provenance-output generation-002/section-2.provenance.json \
+  --artifact-file section-2.json > generation-002/section-2.json
+```
+
+`--evaluation-time RFC3339Nano` remains an explicitly labelled offline replay
+clock; without it evaluation uses actual UTC. It never acquires quota. The
+native gateway/origin stays **`fleet-cliproxyapi-ryzen1`**, including roster joins.
+A publisher's `ryzen1-cpa` scope is wrapper configuration, not a native gateway
+alias, org mapping, model equivalence or eligibility decision.
+
+### Exact delta input: `seat_quota_delta.v1`
+
+This synthetic example demonstrates the **outer wire**, not current capacity:
+
+```json
+{
+  "schema_version": "seat_quota_delta.v1",
+  "gateway_id": "fleet-cliproxyapi-ryzen1",
+  "captured_at": "2026-11-06T12:00:29Z",
+  "after_id": "0",
+  "through_id": "100",
+  "caught_up": true,
+  "rows": [{
+    "id": 100,
+    "provider": "codex",
+    "auth_index": "1111111111111111",
+    "model": "gpt-6-luna",
+    "reasoning_effort": "low",
+    "quota_json": "{\"X-Codex-Primary-Used-Percent\":[\"20\"]}",
+    "quota_observed_at_json": "{\"X-Codex-Primary-Used-Percent\":\"2026-11-06T12:00:00.123456789Z\"}",
+    "timestamp": "2026-11-06T11:59:00Z",
+    "timestamp_ms": 1793966340000,
+    "created_at_ms": 1793966410000
+  }]
+}
+```
+
+The exact outer fields are `schema_version`, `gateway_id`, `captured_at`,
+`after_id`, `through_id`, `caught_up`, `rows`. `rows` must be an array (including
+`[]`), and caught_up must be a Boolean. Each row has the fields illustrated;
+`quota_json` and `quota_observed_at_json` are **original SQLite TEXT strings or
+JSON null**, NOT decoded JSON objects. Preserve their text unchanged in the
+wrapper. Nullable timestamp/model/effort columns may be absent/null; missing
+model/effort never obtains a route. Optional failure/status/other row fields are
+ignored, not filters or health facts. Model strings over 256 bytes and effort
+strings over 32 bytes are unusable outer identities and refuse.
+
+Both cursors are canonical nonnegative signed-int64 decimal **strings** (`0` or
+`[1-9][0-9]*`, maximum `9223372036854775807`). Row `id` is a required positive
+int64 JSON **integer**, strictly ascending, greater than after_id and at most
+through_id; no duplicates/conflicting ID reuse are accepted. Read row IDs with
+an int64-capable decoder; do not round them through JavaScript Number. Gaps are
+valid. after_id must equal checkpoint-IN's through_id. For caught_up=false the
+page must contain rows and through_id must be its last row ID. For caught_up=true
+through_id may include the exhausted range's gaps. A missing/malformed checkpoint
+is an error, never a reset to empty state.
+
+The wrapper owns one SQLite read transaction: capture H, read `origin IS NULL`
+and the configured Codex auth scope with `id > after AND id <= H ORDER BY id`,
+and close it before HTTP/CLI work. No SQL value/clock/status/429 filter or
+highest-ID-per-auth selector is allowed. `captured_at` is the completed SQLite
+read receipt, diagnostic only. Then perform a fresh auth-files GET and supply
+its sanitized source receipt. On GET failure supply exactly the unavailable
+shape `{"gateway_id":"fleet-cliproxyapi-ryzen1","files":[]}` without a fabricated
+receipt. Never reuse the last successful health file as this tick's observation.
+The native command itself does not query SQLite or perform/verify the GET.
+
+Only auths configured by matching Codex roster rows participate. An out-of-scope
+row/provider, invalid source/cursor/identity, malformed outer SQL-column type or
+malformed roster/health wrapper is a sanitized whole-run error. Malformed quota
+or acquisition **TEXT contents** for a valid scoped identity instead become
+explicit unknown evidence; the affected auth is not dropped.
+
+### Bounded reducer and restart semantics
+
+The native command retains one ordered whole-pack anchor, at most one uncertain
+representative and fixed uncertainty scalars per distinct configured auth. It
+keeps no losing history, per-model state, downstream partitions or publication
+counter. Each serialized retained pack (including its native output indentation)
+is at most **64 KiB**. A larger
+pack is a digest-only `pack_too_large` unknown, never a truncated positive. Size
+is checked after removing transport/non-Codex keys; an ordinary header-less row
+is still a no-observation even if its unused clock column is malformed/large.
+
+Presence is determined before value validation: retain all `x-codex-*` names
+except `X-Codex-Turn-State`, including opaque namespaces, malformed values,
+empty arrays and nulls. This broad namespace is intentional in this paired
+scope; distinguishing nonquota safety-buffering names is deferred (F1.a).
+Request-ID headers and other-provider/nonquota namespaces are stripped. A
+successfully decoded absent/null/empty/transport-only pack is **no quota
+observation (F1)**: it advances only traversal, never quota origin/clocks,
+uncertainty, recovery, health or observed-seat coverage. Undecodable text/shapes
+cannot prove absence and become unknown. Quota-bearing failed/429 rows still
+participate.
+
+Selection precedes SDK quota-value/window parsing. A newer fully clocked
+malformed/depleted pack displaces an older positive; a higher-ID older positive
+cannot restore it. Coherent acquisitions compare at `time.Time` nanosecond
+precision with ID only for an equal acquisition. For independently clocked
+packs, only strictly disjoint intervals establish whole-pack order; identical
+quota/origin/clock values are duplicates, while nonidentical overlapping
+intervals become unknown. No per-window selection, field merge, maximum-clock
+winner or clock equalization is performed. Separately coherent SDK windows keep
+their own clocks; mixed clocks within one window remain SDK unknown. Valid
+header arrays pass to the SDK unchanged. Non-array/null/empty-array header
+shapes cannot yield a positive normalized pack. Raw values remain in signals.
+
+Quota-bearing missing/invalid/future clocks set uncertainty and hide the anchor.
+A fixed scalar retains the greatest valid nonfuture competitor acquisition;
+invalid/future stamps do not poison it. Complete-overlap uncertainty recovers
+only with a newly delivered fully clocked pack whose oldest acquisition is
+strictly after the entire competitor ceiling and is fresh (`0 <= age <= 300s`).
+Unbounded/missing-time uncertainty additionally requires ID > last_uncertain_id
+and oldest acquisition strictly after its stored `recovery_after` receipt.
+
+**F3/F6 order:** evaluate this page against checkpoint-IN first. A NEW missing/
+invalid/future-clock U immediately invalidates its old receipt, so neither
+`P101 -> U102` nor `U102 -> P103` in that page can use the superseded bound. Only
+AFTER reduction can this tick's valid post-read source auth receipt establish a
+bound for new/still-unbounded U whose bound is absent. An established bound never
+slides without a new U. No-quota E, no rows, health-only success, reset passage or
+clock passage cannot clear uncertainty. Actual post-bound quota (positive,
+depleted or malformed) may recover; the SDK decides its numeric state.
+
+This uses the existing source causal order (header acquisition before insertion,
+completed read before GET) and same-gateway wall-clock contract. Serialized Go
+clocks are **not** process-monotonic proofs; future and inclusive 300-second
+guards remain. Clock steps, installed gateway behavior and live incidence have
+not been measured here. There is no new clock monitor/permission gate.
+
+### Exact checkpoint wire: `seat_quota_checkpoint.v1`
+
+All checkpoint fields are emitted, including nulls:
+
+- Root: `schema_version`, fixed `source: "usage_events"`, fixed `gateway_id`,
+  `roster_sha256` (exact original roster bytes), `through_id` (decimal string),
+  `auths` (array sorted by auth_index, exactly one entry per configured auth).
+- Each auth: `auth_index`, `anchor: pack|null`, `uncertain: pack|null`,
+  `last_uncertain_id` (int64 integer, zero without uncertainty),
+  `acquisition_ceiling: RFC3339Nano|null`, `unbounded: bool`,
+  `recovery_after: RFC3339Nano|null`. These fixed scalars use UTC canonical
+  spellings; the original independent acquisition strings live in the packs.
+- Each pack: `id` (int64 integer), `origin` (EXACT existing five-field object),
+  `headers: object|null`, `response_headers_observed_at: object|null`,
+  `transport_sha256`, optional `marker`, `timestamp: string|null`,
+  `timestamp_ms: int64|null`, `created_at_ms: int64|null`.
+- `headers` retains original Codex names and raw JSON values (normally string
+  arrays). The matching map retains original values, including nulls, invalid
+  entries, spelling, zone and nanoseconds. A missing map key stays absent; a
+  present null stays null. SQL NULL/decoded JSON null maps both render as null;
+  the transport digest still distinguishes their original column bytes. Only
+  clock keys corresponding to retained headers survive. Validated acquisition
+  requires the canonical header name and its actual valid timestamp, never a
+  request/capture/evaluation fallback.
+- `transport_sha256` hashes compact Go JSON of the two-field object
+  `{"quota_json":TEXT_OR_NULL,"quota_observed_at_json":TEXT_OR_NULL}` before
+  filtering. It is not a parsed-value or timestamp digest. Malformed raw text is
+  not echoed: markers are `malformed_quota_text`, `malformed_acquisition_map`, or
+  `pack_too_large`. A malformed map may retain its quota headers with a null map.
+- Request timestamp diagnostics retain only valid strings of at most 128 bytes;
+  they never acquire quota. A marker retains its ID/origin/digest, not a positive
+  truncation. There are no evaluation ages, health snapshots, output hashes,
+  downstream `source_sequence` or publication ledger in NEXT.
+
+Checkpoint-IN must have this native schema, exact gateway/source/roster hash,
+configured identity set and cursor. It is immutable. A legacy capture, arbitrary
+snapshot, missing prior file or changed roster cannot masquerade as cold
+recovery. Serialize NEXT first (indented JSON plus newline), hash those exact
+bytes, then serialize stdout and sidecar: NEXT contains neither digest, avoiding
+a circular hash.
+
+### Exact stdout and provenance v2 wire
+
+Stdout root fields are:
+
+```text
+schema_version = seat_quota_windows.v2
+capacity_snapshot_id = sha256:<content ID>
+source_capture_sha256, source_version, source = usage_events, gateway_id
+as_of: RFC3339Nano|null
+captured_at, captured_at_basis = sqlite_read_receipt_not_acquisition
+observed_seats, roster_completeness = configured_scope_only
+source_status = caught_up|source_catching_up
+after_id, through_id: canonical decimal strings; caught_up: bool
+prior_checkpoint_sha256: lowercase SHA256|null
+next_checkpoint_sha256, roster_sha256, auth_files_observation_sha256
+seats: array; auth_statuses: array; signals: object keyed by auth_index
+```
+
+The core normalized seat/SDK fields retain their v1 shapes. Each observed seat
+adds `evidence_status` (effective status below) and `observed_at: string|null`.
+Configured-but-unobserved coverage is **not** added to seats or observed_seats.
+Uncertain/catching-up rows have empty unknown window projections; retained
+positive raw diagnostics are never their current normalized quota. Selected
+SDK-unknown windows may retain numeric diagnostics and independently valid siblings.
+
+Each `auth_statuses` entry has EXACT fields `auth_index`, `provider: "codex"`,
+`evidence_status: selected|uncertain|unobserved`,
+`effective_status: selected|uncertain|unobserved|source_catching_up`,
+`health_status: complete|partial|unavailable`, `observed_at: string|null`.
+The array covers all configured auths in sorted order. caught_up=false forces
+all effective statuses/source quota to unknown, even if an anchor is selected.
+
+Each `signals[auth_index]` has EXACT fields:
+
+```text
+current_pack: pack|null
+retained_anchor: pack|null
+used_quota_keys: sorted array of original retained header names
+quota_acquired_at: object of key -> original validated timestamp string|null
+quota_observed_at: RFC3339Nano|null
+health: object (below)
+observed_at: RFC3339Nano|null
+```
+
+A selected current pack is the anchor; uncertain current pack is its uncertain
+representative, with the hidden ordered anchor exported separately. Unobserved
+has both null. used_quota_keys reflects the whole pack used for native
+selection/uncertainty, including opaque or malformed present quota, not just
+SDK numeric fields. Missing/invalid/future acquisition validates to null in
+quota_acquired_at; raw evidence is still lossless in current_pack.
+quota_observed_at is the oldest whole selected quota acquisition only when
+complete/caught up. No timestamp is reconstructed from SDK float seconds.
+
+The EXACT `health` fields are `status`, `source_observed_at: string|null`,
+`active: bool|null`, `active_observed_at: string|null`, `cooldown: bool|null`,
+`cooldown_observed_at: string|null`, `limit_reached: bool|null`,
+`limit_used_keys: sorted string[]`,
+`limit_acquired_at: object of key -> original string|null`. Original valid source
+receipt strings are retained even if stale; only fresh typed evidence supplies
+flags. The existing auth-wide flag/membership helper supplies limit_used_keys;
+model cooldown is not widened to credential cooldown. Uncertain/catching-up
+quota cannot grant `limit_reached=false`. Failed GET is unavailable, never last-
+success or fabricated false. Partial independent active/cooldown facts survive.
+
+Authoritative publication `observed_at` (in signals/status/seat) is the oldest
+actually used native quota PLUS independent health acquisition, or null unless
+quota clocks and all three typed health booleans are complete. Global `as_of`
+is the oldest required selected quota acquisition only when **all configured
+auths** are complete/caught up; otherwise null. A global null does not erase an
+independently complete auth's clock. SDK per-window float observations/ages are
+diagnostics, not authoritative publication clocks. No collection/evaluation/
+request/insert time becomes SourceClock.
+
+The sidecar has EXACT root fields `schema_version: seat_quota_provenance.v2`,
+`artifact_file`, `artifact_sha256`, `verification`, `route_projection`,
+`auth_health`, `auth_statuses`, `signals`. The last two exactly mirror stdout.
+`route_projection`/`origin` and partial `auth_health` retain their existing EXACT
+v1 object shapes above, not a new consumer schema. Only selected/caught-up
+same-row gateway/provider/auth/allowlisted-model/qualified-effort tuples with one
+exact supplied roster match gain projection. No model fanout or unobserved seat
+projection is invented. Health may independently be partial for any configured
+auth; unknown fields remain omitted in auth_health, not defaulted.
+
+`verification` has EXACT fields `source_commit`, nullable `as_of`, `schema_version`
+(the stdout schema), `capacity_snapshot_id`, `artifact_sha256`,
+`source_capture_sha256`, `roster_sha256`, `auth_files_observation_sha256`,
+nullable `prior_checkpoint_sha256`, `next_checkpoint_sha256`, `observed_seats`,
+`observed_by_provider`, `window_states`, `evaluated_at`, `evaluation_time_basis`.
+Counts cover exactly the observed normalized seats/windows. Evaluation basis is
+`actual_utc` or `explicit_offline_replay`. Every SHA256 is unprefixed lowercase
+hex except the explicitly prefixed capacity_snapshot_id.
+
+source_capture_sha256 hashes **this exact delta input**, not all history. Prior/
+next checkpoint hashes bind retained evidence; roster/auth hashes bind their
+exact files. capacity_snapshot_id uses the existing compact-Go-JSON preimage
+rule with its own field omitted, over the complete v2 envelope. artifact_sha256
+binds exact stdout bytes INCLUDING newline. Per-auth uncertainty, health, raw
+clocks and checkpoint state therefore affect provenance/identity, not arbitrary
+capture-file mtime. This dated artifact ID is not the wrapper's semantic
+observed_version or durable publication sequence.
+
+### Staging/failure and downstream limits
+
+All parsing/reduction/serialization completes before any output. Write order is
+NEXT checkpoint, sidecar, stdout. Each named output must be distinct from every
+input and from each other, including existing hardlinks/symlinks and symlinked
+parents; the declared artifact path is its basename in the sidecar's directory.
+A file-backed stdout is also checked against input/checkpoint/sidecar aliases.
+The caller must not open/truncate an input as stdout before invoking the command.
+Outputs are caller-owned **staging** paths only; the command never replaces
+latest, edits checkpoint-IN, allocates a sequence or publishes to a remote DB.
+
+Any short stdout, write/parse/checkpoint/sidecar error is failure, not a valid
+result. A failed generation may leave staged checkpoint/sidecar/partial stdout
+bytes. Do NOT adopt that NEXT cursor or advertise any subset as successful.
+The wrapper owns promotion of cursor/state/publication identity together,
+reconciliation of ambiguous remote publication, unknown invalidation of its
+previous exact scope/window/reset partitions, and externally visible failure.
+Do not fall back to last-positive-as-current. Individual file writes/native
+success do not prove local multi-file or remote transaction atomicity.
+
+The wrapper alone owns durable canonical decimal BIGINT source_sequence and
+semantic observed_version within each exact downstream partition. Neither SQL
+row ID, acquisition, native artifact hash nor elapsed time substitutes for it.
+Age-only reevaluation may remain reader-derived; actual changed uncertainty or
+persisted independent health evidence must not reuse an old publication identity.
+No new Go downstream ledger/partition invalidation policy is included.
+
+Cold bootstrap scans cursor-zero bounded pages and stays source_catching_up until
+complete. Page sizing, backlog volume, tick budget and matching native seeds are
+wrapper/Main decisions. F2 per-window fallback, F4 freshness-seek bootstrap,
+F1.a narrower header-name recognition, multi-provider coverage and other GOLD
+follow-ups are explicitly not implemented. No tests here prove installed binary,
+live clock behavior, capacity, throughput, wrapper publication or START.
+
 ## Validation ownership
 
 `main_test.go` exercises the real `run(args, stdout)` boundary with disk inputs
@@ -343,15 +677,26 @@ inputs/arguments and empty/unsupported evidence. Synthetic acquisition times in
 tests are labelled test provenance, not recovered historical evidence. Keep
 reason: data safety and the acquisition-provenance trust boundary.
 
-`producer_test.go` is separately owned by the test sibling. Producer acceptance
-covers the real `run(args, stdout)` seam, atomic newest-row selection, exact
+`producer_test.go` retains existing v1 producer acceptance through the real
+`run(args, stdout)` seam, atomic newest-row selection, exact
 origin/effort binding, two clocks, independent partial health, exact sidecar
 hashes/counts, input immutability and unchanged legacy metadata acceptance.
 Synthetic health/acquisition fixtures must be labelled synthetic, not live proof.
 
+`incremental_test.go` authors file-backed CLI/checkpoint reload sequences for
+F1/F3/F6, newer depleted/malformed versus late old positives, original nullable
+independent clocks, SDK coherence and 300-second/nanosecond freshness, partial
+typed health/failed GET, bounded losing/uncertain pages, catching-up unknown,
+SQL TEXT/outer/source/cursor/roster/checkpoint refusals, aliases, short stdout and
+staging-write errors. Fixed v1 wire templates also guard unflagged stdout and
+sidecar bytes and legacy refusals. These new tests are **authored, not run** by
+the source task. Link-dependent subcases explicitly skip only when that platform
+cannot create the required hardlink/symlink; they do not prove alias coverage on
+such a platform. Main owns execution and independent review on the frozen bytes.
+
 The source implementation task runs only gofmt on its own Go files and
 `git diff --check`, not tests/builds. The parent owns all test/build execution
-after sibling source writers are terminal:
+after source writers are terminal:
 
 ```sh
 go test ./cmd/normalize_quota_capture
