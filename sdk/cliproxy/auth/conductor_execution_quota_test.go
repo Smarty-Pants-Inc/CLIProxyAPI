@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -60,12 +61,12 @@ func (*quotaAttemptIsolationExecutor) HttpRequest(context.Context, *Auth, *http.
 }
 
 func setQuotaAttemptIsolationHeaders(ctx context.Context) {
-	internallogging.SetResponseHeaders(ctx, http.Header{
+	internallogging.SetResponseHeadersAt(ctx, http.Header{
 		"X-Codex-Plan-Type":                   []string{"pro"},
 		"X-Codex-Primary-Used-Percent":        []string{"91"},
 		"X-Codex-Primary-Window-Minutes":      []string{"10080"},
 		"X-Codex-Primary-Reset-After-Seconds": []string{"3600"},
-	})
+	}, time.Unix(123, 0))
 }
 
 func quotaAttemptIsolationError() error {
@@ -124,11 +125,106 @@ func TestExecutionAttemptsDoNotReuseQuotaResponseHeaders(t *testing.T) {
 			if got := first.Quota.Signals["X-Codex-Primary-Used-Percent"]; got != "91" {
 				t.Fatalf("first attempt observation = %q, want 91; quota=%#v", got, first.Quota)
 			}
-			if len(second.Quota.Signals) != 0 || !second.Quota.ObservedAt.IsZero() {
+			if !first.Quota.SignalObservedAt["X-Codex-Primary-Used-Percent"].Equal(time.Unix(123, 0)) || !first.Quota.ObservedAt.Equal(time.Unix(123, 0)) {
+				t.Fatalf("first attempt acquisition changed: %+v", first.Quota)
+			}
+			if len(second.Quota.Signals) != 0 || !second.Quota.ObservedAt.IsZero() || len(second.Quota.SignalObservedAt) != 0 {
 				t.Fatalf("pre-response failure inherited earlier attempt headers: %#v", second.Quota)
 			}
-			if headers := internallogging.GetResponseHeaders(ctx); len(headers) != 0 {
-				t.Fatalf("attempt headers leaked into request holder: %#v", headers)
+			if headers, times := internallogging.GetResponseHeadersObservation(ctx); len(headers) != 0 || len(times) != 0 {
+				t.Fatalf("attempt observation leaked into request holder: headers=%v times=%v", headers, times)
+			}
+		})
+	}
+}
+
+type quotaUnauthorizedIsolationExecutor struct {
+	quotaAttemptIsolationExecutor
+	calls int
+}
+
+func (*quotaUnauthorizedIsolationExecutor) ShouldPrepareRequestAuth(*Auth) bool { return false }
+
+func (e *quotaUnauthorizedIsolationExecutor) invoke(ctx context.Context) error {
+	e.calls++
+	if e.calls == 1 {
+		setQuotaAttemptIsolationHeaders(ctx)
+		return &Error{HTTPStatus: http.StatusUnauthorized, Message: "fixture unauthorized"}
+	}
+	return nil
+}
+
+func (e *quotaUnauthorizedIsolationExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{Payload: []byte("fixture")}, e.invoke(ctx)
+}
+
+func (e *quotaUnauthorizedIsolationExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if errExecute := e.invoke(ctx); errExecute != nil {
+		return nil, errExecute
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("fixture")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (*quotaUnauthorizedIsolationExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	auth.Metadata["access_token"] = "fixture-refreshed"
+	return auth, nil
+}
+
+func TestUnauthorizedRetryDoesNotReuseQuotaAcquisition(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "execute", true: "stream"}[stream], func(t *testing.T) {
+			exec := &quotaUnauthorizedIsolationExecutor{}
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(exec)
+			model := "quota-unauthorized-acquisition"
+			id := t.Name()
+			registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Metadata: map[string]any{"access_token": "fixture-stale", "refresh_token": "fixture-refresh"}}); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			ctx := internallogging.WithResponseHeadersHolder(context.Background())
+			if stream {
+				response, errExecute := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				for chunk := range response.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+				}
+			} else if _, errExecute := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute != nil {
+				t.Fatal(errExecute)
+			}
+			if exec.calls != 2 {
+				t.Fatalf("execute calls=%d, want unauthorized then retry", exec.calls)
+			}
+			updated, _ := manager.GetByID(id)
+			if len(updated.Quota.Signals) != 0 || len(updated.Quota.SignalObservedAt) != 0 || !updated.Quota.ObservedAt.IsZero() {
+				t.Fatalf("response-free retry inherited unauthorized acquisition: %+v", updated.Quota)
+			}
+		})
+	}
+}
+
+func TestQuotaProvenanceIsolatedForModelAndUnauthorizedRetryContexts(t *testing.T) {
+	request := internallogging.WithResponseHeadersHolder(context.Background())
+	first := newUpstreamAttemptContext(request)
+	setQuotaAttemptIsolationHeaders(first)
+	for _, stage := range []string{"model-retry", "unauthorized-refresh", "unauthorized-retry"} {
+		t.Run(stage, func(t *testing.T) {
+			next := newUpstreamAttemptContext(first)
+			if headers, times := internallogging.GetResponseHeadersObservation(next); len(headers) != 0 || len(times) != 0 {
+				t.Fatalf("retry inherited acquisition: %v %v", headers, times)
+			}
+			internallogging.MergeResponseHeadersAt(next, http.Header{"X-Codex-Primary-Used-Percent": {"1"}}, time.Unix(456, 0))
+			_, original := internallogging.GetResponseHeadersObservation(first)
+			if !original["X-Codex-Primary-Used-Percent"].Equal(time.Unix(123, 0)) {
+				t.Fatalf("retry mutated previous acquisition: %v", original)
 			}
 		})
 	}

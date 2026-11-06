@@ -189,7 +189,17 @@ func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
-	logging.SetResponseHeaders(ctx, headers)
+	RecordAPIResponseMetadataAt(ctx, cfg, status, headers, time.Now())
+}
+
+// RecordAPIResponseMetadataAt records an already acquired HTTP response without
+// substituting log formatting or body completion time for header acquisition.
+func RecordAPIResponseMetadataAt(ctx context.Context, cfg *config.Config, status int, headers http.Header, observedAt time.Time) {
+	logging.SetResponseHeadersAt(ctx, headers, observedAt)
+	logAPIResponseMetadata(ctx, cfg, status, headers)
+}
+
+func logAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -320,6 +330,12 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
+	LogAPIWebsocketHandshake(ctx, cfg, status, headers)
+}
+
+// LogAPIWebsocketHandshake formats metadata already captured at the dial boundary.
+// It does not replace or re-date transport observations.
+func LogAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -343,7 +359,14 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 
 // RecordAPIWebsocketUpgradeRejection stores a rejected websocket upgrade as an HTTP attempt.
 func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, status int, headers http.Header, body []byte) {
-	logging.SetResponseHeaders(ctx, headers)
+	// This compatibility API receives an already-read body, not header receipt.
+	logging.SetResponseHeadersAt(ctx, headers, time.Time{})
+	LogAPIWebsocketUpgradeRejection(ctx, cfg, info, status, headers, body)
+}
+
+// LogAPIWebsocketUpgradeRejection logs raw rejection headers already captured
+// by the transport. It neither attests acquisition nor replaces that metadata.
+func LogAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, status int, headers http.Header, body []byte) {
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -353,7 +376,7 @@ func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config,
 	}
 
 	RecordAPIRequest(ctx, cfg, info)
-	RecordAPIResponseMetadata(ctx, cfg, status, headers)
+	logAPIResponseMetadata(ctx, cfg, status, headers)
 	AppendAPIResponseChunk(ctx, cfg, body)
 }
 
@@ -403,7 +426,13 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 // AppendCodexAPIWebsocketResponse stores a codex upstream websocket response frame and merges any
 // quota event headers carried by the frame into the request log.
 func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	logging.MergeResponseHeaders(ctx, ParseCodexQuotaEventHeaders(payload))
+	AppendCodexAPIWebsocketResponseAt(ctx, cfg, payload, time.Now())
+}
+
+// AppendCodexAPIWebsocketResponseAt preserves frame receipt time through queued
+// processing. Non-quota frames do not change retained observations.
+func AppendCodexAPIWebsocketResponseAt(ctx context.Context, cfg *config.Config, payload []byte, observedAt time.Time) {
+	logging.MergeResponseHeadersAt(ctx, ParseCodexQuotaEventHeaders(payload), observedAt)
 	AppendAPIWebsocketResponse(ctx, cfg, payload)
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -77,6 +78,9 @@ type Record struct {
 	Detail      Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
+	// ResponseHeadersObservedAt records acquisition times by canonical HTTP header name.
+	// Missing entries or zero times mean unknown; RequestedAt is not an acquisition time.
+	ResponseHeadersObservedAt map[string]time.Time
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.
@@ -549,7 +553,9 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 		}
 		record.APIKey = "[REDACTED]"
 	}
-	observeRecord(ctx, record)
+	// Own both maps before asynchronous delivery and isolate the synchronous observer.
+	record = cloneRecordResponseObservation(record)
+	observeRecord(ctx, cloneRecordResponseObservation(record))
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
@@ -596,8 +602,14 @@ func (m *Manager) dispatch(item queueItem) {
 				continue
 			}
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		safeInvoke(plugin, item.ctx, cloneRecordResponseObservation(item.record))
 	}
+}
+
+func cloneRecordResponseObservation(record Record) Record {
+	record.ResponseHeaders = record.ResponseHeaders.Clone()
+	record.ResponseHeadersObservedAt = maps.Clone(record.ResponseHeadersObservedAt)
+	return record
 }
 
 func safeInvoke(plugin Plugin, ctx context.Context, record Record) {

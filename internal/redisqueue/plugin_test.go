@@ -250,21 +250,33 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
 		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 		ctx = internallogging.WithResponseStatusHolder(ctx)
-		ctx = internallogging.WithResponseHeadersHolder(ctx)
+		ctx = internallogging.WithFreshResponseHeadersHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
-		initialHeaders := http.Header{}
-		initialHeaders.Set("X-Upstream-Request-Id", "upstream-req-1")
-		internallogging.SetResponseHeaders(ctx, initialHeaders)
+		requestedAt := time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC)
+		initialAt := requestedAt.Add(time.Minute + 123456789*time.Nanosecond)
+		retryAt := initialAt.Add(time.Minute)
+		initialHeaders := http.Header{
+			"X-Upstream-Request-Id": {"upstream-req-1"},
+			"Retry-After":           {"45"},
+		}
+		internallogging.SetResponseHeadersAt(ctx, initialHeaders, initialAt)
+		internallogging.MergeResponseHeadersAt(ctx, http.Header{"Retry-After": {"30"}}, retryAt)
+		headers, observedAt := internallogging.GetResponseHeadersObservation(ctx)
 
 		mgr := coreusage.NewManager(16)
 		defer mgr.Stop()
-
-		mgr.Register(pluginFunc(func(ctx context.Context, _ coreusage.Record) {
-			nextHeaders := http.Header{}
-			nextHeaders.Set("X-Upstream-Request-Id", "upstream-req-2")
-			internallogging.SetResponseHeaders(ctx, nextHeaders)
+		entered := make(chan struct{})
+		release := make(chan struct{}, 1)
+		defer close(release)
+		drained := make(chan struct{})
+		mgr.Register(pluginFunc(func(_ context.Context, _ coreusage.Record) {
+			close(entered)
+			<-release
 		}))
 		mgr.Register(&usageQueuePlugin{})
+		mgr.Register(pluginFunc(func(_ context.Context, _ coreusage.Record) {
+			close(drained)
+		}))
 
 		mgr.Publish(ctx, coreusage.Record{
 			Provider:    "openai",
@@ -274,18 +286,68 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 			AuthIndex:   "0",
 			AuthType:    "apikey",
 			Source:      "user@example.com",
-			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			RequestedAt: requestedAt,
 			Latency:     1500 * time.Millisecond,
+			TTFT:        42 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
 				TotalTokens:  30,
 			},
-			ResponseHeaders: internallogging.GetResponseHeaders(ctx),
+			ResponseHeaders:           headers,
+			ResponseHeadersObservedAt: observedAt,
 		})
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("dispatcher did not reach publication gate")
+		}
 
-		payload := waitForSinglePayload(t, 2*time.Second)
+		// Mutate the caller's snapshot, the original holder, and a fresh attempt
+		// before the asynchronous sink serializes the published observation.
+		headers["X-Upstream-Request-Id"][0] = "caller-mutation"
+		observedAt["Retry-After"] = retryAt.Add(time.Hour)
+		initialHeaders["Retry-After"][0] = "source-mutation"
+		nextHeaders := http.Header{"X-Upstream-Request-Id": {"upstream-req-2"}, "Retry-After": {"999"}}
+		internallogging.SetResponseHeadersAt(ctx, nextHeaders, retryAt.Add(2*time.Hour))
+		nextCtx := internallogging.WithFreshResponseHeadersHolder(ctx)
+		internallogging.SetResponseHeadersAt(nextCtx, nextHeaders, retryAt.Add(3*time.Hour))
+		release <- struct{}{}
+		select {
+		case <-drained:
+		case <-time.After(5 * time.Second):
+			t.Fatal("asynchronous usage sink did not drain")
+		}
+
+		payload := popSinglePayload(t)
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
+		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
+		requireResponseHeadersObservedAt(t, payload, map[string]time.Time{
+			"X-Upstream-Request-Id": initialAt,
+			"Retry-After":           retryAt,
+		})
+		requireStringField(t, payload, "timestamp", requestedAt.Format(time.RFC3339Nano))
+		requireIntField(t, payload, "latency_ms", 1500)
+		requireIntField(t, payload, "ttft_ms", 42)
+		requireStringField(t, payload, "model", "gpt-5.4")
+		requireStringField(t, payload, "auth_index", "0")
+	})
+}
+
+func TestUsageQueuePluginLegacyHeadersDoNotInventAcquisition(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithFreshResponseHeadersHolder(context.Background())
+		internallogging.SetResponseHeadersAt(ctx, http.Header{"Retry-After": {"999"}}, time.Date(2026, 4, 25, 0, 1, 0, 0, time.UTC))
+		for _, observedAt := range []map[string]time.Time{nil, {}} {
+			(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+				RequestedAt:               time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+				ResponseHeaders:           http.Header{"Retry-After": {"30"}},
+				ResponseHeadersObservedAt: observedAt,
+			})
+			payload := popSinglePayload(t)
+			requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
+			requireMissingField(t, payload, "response_headers_observed_at")
+		}
 	})
 }
 
@@ -562,6 +624,26 @@ func requireFailField(t *testing.T, payload map[string]json.RawMessage, wantStat
 	}
 	if got.StatusCode != wantStatus || got.Body != wantBody {
 		t.Fatalf("fail = {status_code:%d body:%q}, want {status_code:%d body:%q}", got.StatusCode, got.Body, wantStatus, wantBody)
+	}
+}
+
+func requireResponseHeadersObservedAt(t *testing.T, payload map[string]json.RawMessage, want map[string]time.Time) {
+	t.Helper()
+	raw, ok := payload["response_headers_observed_at"]
+	if !ok {
+		t.Fatal("payload missing response_headers_observed_at")
+	}
+	var got map[string]string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal response_headers_observed_at: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("response_headers_observed_at = %v, want %v", got, want)
+	}
+	for header, acquired := range want {
+		if got[header] != acquired.Format(time.RFC3339Nano) {
+			t.Fatalf("response_headers_observed_at[%q] = %q, want %q", header, got[header], acquired.Format(time.RFC3339Nano))
+		}
 	}
 }
 

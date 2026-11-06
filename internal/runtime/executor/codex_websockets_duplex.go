@@ -461,7 +461,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		outputItems := make(map[int64][]byte)
 		var outputFallback [][]byte
 		for {
-			kind, payload, errRead := readCodexWebsocketMessage(streamCtx, sess, conn, readCh)
+			kind, payload, observedAt, errRead := readCodexWebsocketMessageObserved(streamCtx, sess, conn, readCh)
 			if errRead != nil {
 				select {
 				case errWrite := <-writeErrors:
@@ -549,7 +549,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				outputFallback = nil
 			}
 			observeCodexTokenEvent(reporter, payload)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.AppendCodexAPIWebsocketResponseAt(ctx, e.cfg, payload, observedAt)
 			// Steering acknowledgements, pending notifications and failures are opaque:
 			// preserve their IDs, input, sequence numbers and event types byte-for-byte.
 			if strings.HasPrefix(eventType, "response.steer.") {

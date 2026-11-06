@@ -568,6 +568,68 @@ func TestParseInteractionsStreamUsageOfficialMetadata(t *testing.T) {
 	}
 }
 
+func TestUsageReporterPublishesResponseHeadersObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		publish func(*UsageReporter, context.Context)
+	}{
+		{name: "success", publish: func(r *UsageReporter, ctx context.Context) {
+			r.Publish(ctx, usage.Detail{TotalTokens: 3})
+		}},
+		{name: "failure", publish: func(r *UsageReporter, ctx context.Context) {
+			r.PublishFailure(ctx, errors.New("upstream failed"))
+		}},
+		{name: "ensure published", publish: func(r *UsageReporter, ctx context.Context) {
+			r.EnsurePublished(ctx)
+		}},
+		{name: "additional model", publish: func(r *UsageReporter, ctx context.Context) {
+			r.PublishAdditionalModel(ctx, "side-model", usage.Detail{TotalTokens: 3})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initialAt := time.Date(2026, 4, 25, 0, 1, 0, 123456789, time.UTC)
+			primaryAt := initialAt.Add(time.Minute)
+			requestedAt := initialAt.Add(-time.Minute)
+			ctx := logging.WithFreshResponseHeadersHolder(context.Background())
+			headers := http.Header{
+				"X-Codex-Primary-Used-Percent":   {"10"},
+				"X-Codex-Secondary-Used-Percent": {"20"},
+			}
+			logging.SetResponseHeadersAt(ctx, headers, initialAt)
+			logging.MergeResponseHeadersAt(ctx, http.Header{"X-Codex-Primary-Used-Percent": {"11"}}, primaryAt)
+			var captured usage.Record
+			calls := 0
+			ctx = usage.WithObserver(ctx, func(record usage.Record) {
+				captured = record
+				calls++
+			})
+			reporter := NewUsageReporter(ctx, "codex", "test-model", nil)
+			reporter.requestedAt = requestedAt
+			reporter.setTTFT(42 * time.Millisecond)
+			tc.publish(reporter, ctx)
+
+			// Neither a later holder update nor a new attempt may change published data.
+			headers["X-Codex-Secondary-Used-Percent"][0] = "99"
+			logging.SetResponseHeadersAt(ctx, http.Header{"X-Codex-Primary-Used-Percent": {"90"}}, primaryAt.Add(time.Hour))
+			nextCtx := logging.WithFreshResponseHeadersHolder(ctx)
+			logging.SetResponseHeadersAt(nextCtx, http.Header{"X-Codex-Primary-Used-Percent": {"95"}}, primaryAt.Add(2*time.Hour))
+
+			if calls != 1 {
+				t.Fatalf("publication count = %d, want 1", calls)
+			}
+			if len(captured.ResponseHeaders) != 2 || captured.ResponseHeaders.Get("X-Codex-Primary-Used-Percent") != "11" || captured.ResponseHeaders.Get("X-Codex-Secondary-Used-Percent") != "20" {
+				t.Fatalf("published headers changed: %v", captured.ResponseHeaders)
+			}
+			if len(captured.ResponseHeadersObservedAt) != 2 || !captured.ResponseHeadersObservedAt["X-Codex-Primary-Used-Percent"].Equal(primaryAt) || !captured.ResponseHeadersObservedAt["X-Codex-Secondary-Used-Percent"].Equal(initialAt) {
+				t.Fatalf("published acquisitions = %v, want primary %v and secondary %v", captured.ResponseHeadersObservedAt, primaryAt, initialAt)
+			}
+			if !captured.RequestedAt.Equal(requestedAt) || captured.TTFT != 42*time.Millisecond {
+				t.Fatalf("request timing changed: requested_at=%v ttft=%v", captured.RequestedAt, captured.TTFT)
+			}
+		})
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
