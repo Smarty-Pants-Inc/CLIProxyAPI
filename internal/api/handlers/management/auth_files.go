@@ -146,6 +146,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 				if cooldownsKnown {
 					entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
 				}
+				addAuthFileQuotaWindowsV8(c, entry, auth, observedAt)
 				files = append(files, entry)
 			}
 		}
@@ -162,6 +163,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			if cooldownsKnown {
 				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
 			}
+			addAuthFileQuotaWindowsV8(c, entry, auth, observedAt)
 			files = append(files, entry)
 		}
 	}

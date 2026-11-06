@@ -32,35 +32,70 @@ func ProviderSupportsQuotaObservation(provider string) bool {
 // indefinitely. Responses that carry no quota signal at all (transport
 // failures, 5xx, unrelated endpoints) leave the previous snapshot untouched.
 //
-// This function only ever touches ObservedAt and Signals. Cooldown and
-// scheduling fields are never read or written here.
+// This compatibility entry point treats observedAt as one acquisition for all
+// headers. Cooldown and scheduling fields are never read or written here.
 func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers http.Header, observedAt time.Time) bool {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	times := make(map[string]time.Time, len(headers))
+	for key := range headers {
+		times[http.CanonicalHeaderKey(strings.TrimSpace(key))] = observedAt
+	}
+	return q.ObserveResponseHeadersObservationForProvider(provider, headers, times)
+}
+
+// ObserveResponseHeadersObservationForProvider replaces a response snapshot with
+// its matching per-signal acquisitions. Missing provenance stays unknown; it is
+// never filled from completion time or the legacy scalar. Separate executions
+// are not unioned, and an older acquisition cannot replace newer evidence.
+func (q *QuotaState) ObserveResponseHeadersObservationForProvider(provider string, headers http.Header, signalObservedAt map[string]time.Time) bool {
 	if q == nil {
 		return false
 	}
 	if !ProviderSupportsQuotaObservation(provider) {
 		return q.ClearObservationSignals()
 	}
-	next := collectQuotaSignals(provider, headers)
-	if len(next) == 0 {
+	next := QuotaState{Signals: collectQuotaSignals(provider, headers)}
+	if len(next.Signals) == 0 {
 		return false
 	}
-	if observedAt.IsZero() {
-		observedAt = time.Now()
+	unknown := false
+	for key := range next.Signals {
+		acquired := signalObservedAt[key]
+		if acquired.IsZero() {
+			unknown = true
+			continue
+		}
+		if next.SignalObservedAt == nil {
+			next.SignalObservedAt = make(map[string]time.Time, len(next.Signals))
+		}
+		next.SignalObservedAt[key] = acquired
+		if next.ObservedAt.IsZero() || acquired.Before(next.ObservedAt) {
+			next.ObservedAt = acquired
+		}
 	}
-	q.Signals = next
-	q.ObservedAt = observedAt
+	if unknown {
+		next.ObservedAt = time.Time{}
+	}
+	if !quotaObservationCanReplace(*q, next) {
+		return false
+	}
+	q.Signals = next.Signals
+	q.ObservedAt = next.ObservedAt
+	q.SignalObservedAt = next.SignalObservedAt
 	return true
 }
 
 // ClearObservationSignals removes only passive observation data. It leaves
 // cooldown and scheduler state untouched.
 func (q *QuotaState) ClearObservationSignals() bool {
-	if q == nil || (len(q.Signals) == 0 && q.ObservedAt.IsZero()) {
+	if q == nil || (len(q.Signals) == 0 && q.ObservedAt.IsZero() && len(q.SignalObservedAt) == 0) {
 		return false
 	}
 	q.Signals = nil
 	q.ObservedAt = time.Time{}
+	q.SignalObservedAt = nil
 	return true
 }
 
@@ -218,10 +253,43 @@ func isQuotaSignalHeaderForProvider(provider, name string) bool {
 // unioning signals captured at different times, so merging an older snapshot
 // can never resurrect a stale watermark.
 func mergeQuotaObservation(target, source QuotaState) QuotaState {
-	if source.ObservedAt.IsZero() || source.ObservedAt.Before(target.ObservedAt) {
+	if !quotaObservationCanReplace(target, source) {
 		return target
 	}
-	target.ObservedAt = source.ObservedAt
-	target.Signals = source.Clone().Signals
+	observation := source.Clone()
+	target.ObservedAt = observation.ObservedAt
+	target.Signals = observation.Signals
+	target.SignalObservedAt = observation.SignalObservedAt
 	return target
+}
+
+func newestQuotaAcquisition(q QuotaState) time.Time {
+	var newest time.Time
+	for key := range q.Signals {
+		if acquired := q.SignalObservedAt[key]; acquired.After(newest) {
+			newest = acquired
+		}
+	}
+	if newest.IsZero() {
+		// Legacy ordering compatibility only; do not manufacture per-signal
+		// verification from this potentially completion-stamped scalar.
+		return q.ObservedAt
+	}
+	return newest
+}
+
+func quotaObservationCanReplace(target, source QuotaState) bool {
+	if len(source.Signals) == 0 || newestQuotaAcquisition(source).Before(newestQuotaAcquisition(target)) {
+		return false
+	}
+	// Mixed acquisitions can be incomparable. Keep the current whole response
+	// rather than regressing a retained signal or unioning different attempts.
+	for key := range source.Signals {
+		if _, exists := target.Signals[key]; exists {
+			if source.SignalObservedAt[key].Before(target.SignalObservedAt[key]) {
+				return false
+			}
+		}
+	}
+	return true
 }

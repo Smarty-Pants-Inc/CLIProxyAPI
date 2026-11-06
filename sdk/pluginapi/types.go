@@ -1543,6 +1543,9 @@ type UsageRecord struct {
 	Detail UsageDetail
 	// ResponseHeaders contains selected upstream response headers.
 	ResponseHeaders http.Header
+	// ResponseHeadersObservedAt records acquisition times by canonical HTTP header name.
+	// Missing entries or zero times mean unknown; RequestedAt is not an acquisition time.
+	ResponseHeadersObservedAt map[string]time.Time
 }
 
 // UsageFailure describes an upstream or executor failure.

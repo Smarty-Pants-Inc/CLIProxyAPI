@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"runtime/debug"
 	"strings"
 
@@ -223,7 +224,8 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			CacheCreationTokens: record.Detail.CacheCreationTokens,
 			TotalTokens:         record.Detail.TotalTokens,
 		},
-		ResponseHeaders: cloneHeader(record.ResponseHeaders),
+		ResponseHeaders:           cloneHeader(record.ResponseHeaders),
+		ResponseHeadersObservedAt: maps.Clone(record.ResponseHeadersObservedAt),
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
@@ -34,8 +35,9 @@ type responseStatusHolder struct {
 }
 
 type responseHeadersHolder struct {
-	mu      sync.RWMutex
-	headers http.Header
+	mu         sync.RWMutex
+	headers    http.Header
+	observedAt map[string]time.Time
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -117,6 +119,12 @@ func SetResponseStatus(ctx context.Context, status int) {
 }
 
 func SetResponseHeaders(ctx context.Context, headers http.Header) {
+	SetResponseHeadersAt(ctx, headers, time.Now())
+}
+
+// SetResponseHeadersAt replaces an attempt's headers and acquisition metadata
+// together. A zero acquisition time is unknown, not the time of this call.
+func SetResponseHeadersAt(ctx context.Context, headers http.Header, observedAt time.Time) {
 	if ctx == nil {
 		return
 	}
@@ -127,11 +135,24 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
+	holder.observedAt = nil
+	if len(headers) > 0 {
+		holder.observedAt = make(map[string]time.Time, len(headers))
+		for key := range headers {
+			holder.observedAt[http.CanonicalHeaderKey(key)] = observedAt
+		}
+	}
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
 // such as quota metadata delivered in a websocket event.
 func MergeResponseHeaders(ctx context.Context, headers http.Header) {
+	MergeResponseHeadersAt(ctx, headers, time.Now())
+}
+
+// MergeResponseHeadersAt records only the headers in this acquisition, even
+// when their values repeat. Untouched headers retain their acquisition times.
+func MergeResponseHeadersAt(ctx context.Context, headers http.Header, observedAt time.Time) {
 	if ctx == nil || len(headers) == 0 {
 		return
 	}
@@ -144,12 +165,16 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 	if holder.headers == nil {
 		holder.headers = make(http.Header, len(headers))
 	}
+	if holder.observedAt == nil {
+		holder.observedAt = make(map[string]time.Time, len(headers))
+	}
 	for key, values := range headers {
 		canonicalKey := http.CanonicalHeaderKey(key)
 		if canonicalKey == "" {
 			continue
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
+		holder.observedAt[canonicalKey] = observedAt
 	}
 }
 
@@ -165,16 +190,31 @@ func GetResponseStatus(ctx context.Context) int {
 }
 
 func GetResponseHeaders(ctx context.Context) http.Header {
+	headers, _ := GetResponseHeadersObservation(ctx)
+	return headers
+}
+
+// GetResponseHeadersObservation atomically snapshots headers and their matching
+// acquisition times. Both returned maps are independent of the attempt holder.
+// Metadata keys are canonical HTTP header names; absent/zero times are unknown.
+func GetResponseHeadersObservation(ctx context.Context) (http.Header, map[string]time.Time) {
 	if ctx == nil {
-		return nil
+		return nil, nil
 	}
 	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
 	if !ok || holder == nil {
-		return nil
+		return nil, nil
 	}
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
-	return cloneHTTPHeader(holder.headers)
+	var observedAt map[string]time.Time
+	if len(holder.observedAt) > 0 {
+		observedAt = make(map[string]time.Time, len(holder.observedAt))
+		for key, acquired := range holder.observedAt {
+			observedAt[key] = acquired
+		}
+	}
+	return cloneHTTPHeader(holder.headers), observedAt
 }
 
 func cloneHTTPHeader(src http.Header) http.Header {
