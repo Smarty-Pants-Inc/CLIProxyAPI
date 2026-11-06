@@ -1,5 +1,6 @@
 // Command normalize_quota_capture projects an explicit offline usage-event
-// capture into seat/window evidence. It neither discovers nor selects routes.
+// capture into seat/window evidence with optional explicit offline provenance.
+// It neither discovers routes nor authorizes dispatch.
 package main
 
 import (
@@ -91,15 +92,53 @@ func run(args []string, stdout io.Writer) error {
 	input := flags.String("input", "", "explicit capture JSON file")
 	asOf := flags.String("as-of", "", "comparison clock, RFC3339 with timezone")
 	sourceVersion := flags.String("source-version", "", "exact normalizer source commit (40 lowercase hex digits)")
+	roster := flags.String("roster", "", "explicit offline route roster JSON file")
+	authFiles := flags.String("auth-files-observation", "", "explicit sanitized auth-files observation JSON file")
+	provenanceOutput := flags.String("provenance-output", "", "explicit provenance sidecar output file")
+	artifactFile := flags.String("artifact-file", "", "exact caller stdout artifact basename")
+	evaluationTime := flags.String("evaluation-time", "", "explicit offline replay comparison clock, RFC3339Nano")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid arguments: require --input, --as-of and --source-version")
 	}
-	if *input == "" || *asOf == "" || !lowerHex(*sourceVersion, 40) {
-		return errors.New("require --input, --as-of and --source-version (full 40-digit lowercase commit)")
-	}
-	now, err := time.Parse(time.RFC3339Nano, *asOf)
-	if err != nil || now.IsZero() {
-		return errors.New("invalid --as-of: require RFC3339 timestamp with timezone")
+	producerMode, hasAsOf, hasEvaluation := false, false, false
+	flags.Visit(func(value *flag.Flag) {
+		switch value.Name {
+		case "roster", "auth-files-observation", "provenance-output", "artifact-file":
+			producerMode = true
+		case "as-of":
+			hasAsOf = true
+		case "evaluation-time":
+			hasEvaluation = true
+		}
+	})
+	var now time.Time
+	if producerMode {
+		if *input == "" || !lowerHex(*sourceVersion, 40) || *roster == "" || *authFiles == "" || *provenanceOutput == "" || !validArtifactBasename(*artifactFile) || hasAsOf {
+			return errors.New("invalid producer arguments: require input, source-version and all four provenance options; as-of is legacy only")
+		}
+		now = time.Now().UTC()
+		if hasEvaluation {
+			parsed, errParse := time.Parse(time.RFC3339Nano, *evaluationTime)
+			if errParse != nil || parsed.IsZero() {
+				return errors.New("invalid --evaluation-time: require RFC3339 timestamp with timezone")
+			}
+			now = parsed.UTC()
+		}
+		if errPath := validateSidecarPath(*provenanceOutput, *input, *roster, *authFiles); errPath != nil {
+			return errPath
+		}
+	} else {
+		if hasEvaluation {
+			return errors.New("evaluation-time requires producer provenance options")
+		}
+		if *input == "" || *asOf == "" || !lowerHex(*sourceVersion, 40) {
+			return errors.New("require --input, --as-of and --source-version (full 40-digit lowercase commit)")
+		}
+		parsed, errParse := time.Parse(time.RFC3339Nano, *asOf)
+		if errParse != nil || parsed.IsZero() {
+			return errors.New("invalid --as-of: require RFC3339 timestamp with timezone")
+		}
+		now = parsed
 	}
 	raw, errRead := os.ReadFile(*input)
 	if errRead != nil {
@@ -112,12 +151,24 @@ func run(args []string, stdout io.Writer) error {
 	if captured, errCaptured := time.Parse(time.RFC3339Nano, capture.CapturedAt); errCaptured != nil || captured.IsZero() {
 		return errors.New("invalid capture: captured_at must be RFC3339 with timezone")
 	}
+	var producer *producerContext
+	if producerMode {
+		prepared, errPrepare := prepareProducer(raw, *roster, *authFiles, now, hasEvaluation)
+		if errPrepare != nil {
+			return errPrepare
+		}
+		producer = prepared
+		capture.Seats = producer.captureSeats()
+	}
 	captureHash := sha256.Sum256(raw)
 	view := normalizedCapture{
 		SchemaVersion: schemaVersion, SourceCaptureSHA256: hex.EncodeToString(captureHash[:]),
 		SourceVersion: *sourceVersion, Source: "usage_events", AsOf: now.UTC().Format(time.RFC3339Nano),
 		CapturedAt: capture.CapturedAt, CapturedAtBasis: "capture_fetch_time_not_acquisition",
 		RosterCompleteness: "unverified", Seats: make([]normalizedSeat, 0, len(capture.Seats)),
+	}
+	if producer != nil {
+		view.AsOf = producer.sourceAsOf.UTC().Format(time.RFC3339Nano)
 	}
 	identities := make(map[string]struct{}, len(capture.Seats))
 	for _, seat := range capture.Seats {
@@ -151,6 +202,15 @@ func run(args []string, stdout io.Writer) error {
 		return errors.New("cannot encode normalized capture")
 	}
 	output = append(output, '\n')
+	if producer != nil {
+		sidecar, errSidecar := producer.provenance(view, output, *artifactFile, now)
+		if errSidecar != nil {
+			return errSidecar
+		}
+		if errWrite := os.WriteFile(*provenanceOutput, sidecar, 0600); errWrite != nil {
+			return errors.New("cannot write provenance sidecar")
+		}
+	}
 	if n, errWrite := stdout.Write(output); errWrite != nil || n != len(output) {
 		return errors.New("cannot write normalized capture")
 	}
