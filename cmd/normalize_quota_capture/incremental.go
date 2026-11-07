@@ -216,7 +216,9 @@ func runIncremental(options incrementalOptions, stdout io.Writer) error {
 			reduceIncrementalPack(states[row.AuthIndex], pack, now)
 		}
 	}
-	if !*delta.CaughtUp && (len(delta.Rows) == 0 || lastID != through) {
+	// The cursor follows the raw page, including rows outside scoped Codex.
+	// Selected rows may be empty or end before through; incomplete pages must advance.
+	if !*delta.CaughtUp && through == after {
 		return errors.New("invalid incomplete incremental page cursor")
 	}
 	// F6: every candidate above used checkpoint-IN's receipt. A new U has

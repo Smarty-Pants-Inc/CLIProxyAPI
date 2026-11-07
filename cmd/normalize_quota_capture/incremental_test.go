@@ -554,6 +554,122 @@ func TestIncrementalSyntheticBoundedPagesLosingRowsRestartAndNoPartialPositive(t
 	}
 }
 
+// Raw ID-only pages can contain no scoped Codex rows. These replay checks
+// protect the cursor/checkpoint trust boundary without inventing observations.
+func TestIncrementalSyntheticProgressOnlyPagesThenSelectedCodexRecovery(t *testing.T) {
+	chain := newIncrementalTestChain(t)
+	empty := chain.execute(t, chain.prepare(t, nil, "", 50, false))
+	incrementalTestAssertStatus(t, empty, "unobserved", "source_catching_up")
+	if empty.view.CaughtUp || empty.view.SourceStatus != "source_catching_up" || empty.view.ThroughID != "50" || empty.checkpoint.ThroughID != "50" || empty.view.ObservedSeats != 0 || len(empty.view.Seats) != 0 || empty.checkpoint.Auths[0].Anchor != nil || empty.checkpoint.Auths[0].Uncertain != nil || empty.checkpoint.Auths[0].RecoveryAfter != nil || len(producerTestOptionalObject(empty.sidecar["auth_health"])) != 0 {
+		t.Fatal("progress-only bootstrap fabricated quota/health or failed to advance the raw cursor")
+	}
+	row := incrementalTestRow(t, 51, "", "12")
+	row["quota_observed_at_json"] = nil
+	unknown := chain.execute(t, chain.prepare(t, []map[string]any{row}, "2026-11-06T12:00:10Z", 60, false))
+	incrementalTestAssertStatus(t, unknown, "uncertain", "source_catching_up")
+	progress := chain.execute(t, chain.prepare(t, nil, "2026-11-06T12:00:20Z", 80, false))
+	incrementalTestAssertStatus(t, progress, "uncertain", "source_catching_up")
+	if !reflect.DeepEqual(unknown.checkpoint.Auths, progress.checkpoint.Auths) || progress.checkpoint.ThroughID != "80" || progress.view.CaughtUp || progress.view.SourceStatus != "source_catching_up" {
+		t.Fatal("progress-only page reset uncertainty, slid its receipt, or manufactured caught-up status")
+	}
+	// Acquisition is after the established receipt, but before the later GET.
+	recovered := chain.step(t, []map[string]any{incrementalTestRow(t, 81, "2026-11-06T12:00:15Z", "12")}, "2026-11-06T12:00:30Z")
+	incrementalTestAssertStatus(t, recovered, "selected", "selected")
+	if recovered.view.AfterID != "80" || recovered.checkpoint.Auths[0].Anchor.ID != 81 || recovered.checkpoint.Auths[0].Uncertain != nil || incrementalTestPrimary(t, recovered) != "known" {
+		t.Fatal("later scoped Codex acquisition did not recover through the advanced raw cursor")
+	}
+}
+
+func TestIncrementalSyntheticGappedTailAdvancesCheckpointWithoutPublishingPartialQuota(t *testing.T) {
+	chain := newIncrementalTestChain(t)
+	partial := chain.execute(t, chain.prepare(t, []map[string]any{incrementalTestRow(t, 1, "2026-11-06T12:00:00Z", "12")}, "2026-11-06T12:00:10Z", 10, false))
+	incrementalTestAssertStatus(t, partial, "selected", "source_catching_up")
+	if partial.view.CaughtUp || partial.view.SourceStatus != "source_catching_up" || partial.view.ThroughID != "10" || partial.checkpoint.ThroughID != "10" || partial.checkpoint.Auths[0].Anchor.ID != 1 {
+		t.Fatal("gapped raw tail failed to advance independently of the last selected row")
+	}
+	caughtUp := chain.step(t, nil, "2026-11-06T12:00:20Z")
+	incrementalTestAssertStatus(t, caughtUp, "selected", "selected")
+	if !caughtUp.view.CaughtUp || caughtUp.view.AfterID != "10" || caughtUp.view.ThroughID != "10" || !bytes.Equal(partial.stateRaw, caughtUp.stateRaw) || incrementalTestPrimary(t, caughtUp) != "known" {
+		t.Fatal("empty caught-up no-advance tick lost the retained selected row or rewrote its checkpoint")
+	}
+}
+
+func TestIncrementalSyntheticProgressOnlyPreservesAnchorOriginAndAcquisitionDespiteFreshGET(t *testing.T) {
+	const acquired = "2026-11-06T13:00:00.123456789+01:00"
+	const canonicalAcquired = "2026-11-06T12:00:00.123456789Z"
+	const evaluation = "2026-11-06T12:06:00Z"
+	chain := newIncrementalTestChain(t)
+	first := chain.step(t, []map[string]any{incrementalTestRow(t, 1, acquired, "12")}, "2026-11-06T12:00:10Z")
+	if incrementalTestPrimary(t, first) != "known" {
+		t.Fatal("synthetic checkpoint did not establish known quota")
+	}
+	invocation := chain.prepare(t, nil, evaluation, 100, false)
+	invocation.args = incrementalTestSetArg(invocation.args, "--evaluation-time", evaluation)
+	progress := chain.execute(t, invocation)
+	incrementalTestAssertStatus(t, progress, "selected", "source_catching_up")
+	if !reflect.DeepEqual(first.checkpoint.Auths, progress.checkpoint.Auths) || !reflect.DeepEqual(first.view.Signals[producerTestAuthA].QuotaAcquiredAt, progress.view.Signals[producerTestAuthA].QuotaAcquiredAt) || progress.view.CaughtUp || progress.checkpoint.ThroughID != "100" {
+		t.Fatal("raw cursor/read/GET refreshed or replaced established origin, anchor, or acquisition clocks")
+	}
+	invocation = chain.prepare(t, nil, evaluation, chain.cursor, true)
+	invocation.args = incrementalTestSetArg(invocation.args, "--evaluation-time", evaluation)
+	stale := chain.execute(t, invocation)
+	incrementalTestAssertStatus(t, stale, "selected", "selected")
+	signals := stale.view.Signals[producerTestAuthA]
+	if incrementalTestPrimary(t, stale) != "stale" || !bytes.Equal(progress.stateRaw, stale.stateRaw) || stale.view.AsOf == nil || *stale.view.AsOf != canonicalAcquired || signals.QuotaObservedAt == nil || *signals.QuotaObservedAt != canonicalAcquired || signals.QuotaAcquiredAt["X-Codex-Primary-Used-Percent"] == nil || *signals.QuotaAcquiredAt["X-Codex-Primary-Used-Percent"] != acquired || signals.Health.ActiveObservedAt == nil || *signals.Health.ActiveObservedAt != evaluation {
+		t.Fatal("fresh GET or caught-up reevaluation made stale quota current instead of retaining its acquisition")
+	}
+}
+
+func TestIncrementalSyntheticProgressOnlyRetainsPreexistingRecoveryReceiptBehavior(t *testing.T) {
+	chain := newIncrementalTestChain(t)
+	chain.step(t, []map[string]any{incrementalTestRow(t, 1, "2026-11-06T12:00:00Z", "12")}, "2026-11-06T12:00:05Z")
+	row := incrementalTestRow(t, 2, "", "12")
+	row["quota_observed_at_json"] = nil
+	unknown := chain.step(t, []map[string]any{row}, "")
+	if unknown.checkpoint.Auths[0].RecoveryAfter != nil {
+		t.Fatal("failed GET fabricated a recovery receipt")
+	}
+	bound := chain.execute(t, chain.prepare(t, nil, "2026-11-06T12:00:20Z", 10, false))
+	incrementalTestAssertStatus(t, bound, "uncertain", "source_catching_up")
+	want := unknown.checkpoint.Auths[0]
+	receipt := "2026-11-06T12:00:20Z"
+	want.RecoveryAfter = &receipt
+	if !reflect.DeepEqual(want, bound.checkpoint.Auths[0]) {
+		t.Fatal("progress-only receipt changed more than the preexisting recovery bound behavior")
+	}
+	repeated := chain.execute(t, chain.prepare(t, nil, "2026-11-06T12:00:30Z", 20, false))
+	incrementalTestAssertStatus(t, repeated, "uncertain", "source_catching_up")
+	if !reflect.DeepEqual(bound.checkpoint.Auths, repeated.checkpoint.Auths) {
+		t.Fatal("later progress-only GET slid the established recovery bound or reset uncertainty")
+	}
+}
+
+func TestIncrementalSyntheticIncompleteNonProgressRefusesWithEstablishedCheckpoint(t *testing.T) {
+	for _, mutation := range []string{"no_progress", "regressing", "row_at_after"} {
+		t.Run(mutation, func(t *testing.T) {
+			chain := newIncrementalTestChain(t)
+			chain.step(t, []map[string]any{incrementalTestRow(t, 1, "2026-11-06T12:00:00Z", "12")}, "2026-11-06T12:00:10Z")
+			through := chain.cursor
+			var rows []map[string]any
+			switch mutation {
+			case "regressing":
+				through--
+			case "row_at_after":
+				through++
+				rows = []map[string]any{incrementalTestRow(t, chain.cursor, "2026-11-06T12:00:15Z", "12")}
+			}
+			invocation := chain.prepare(t, rows, "2026-11-06T12:00:20Z", through, false)
+			var stdout bytes.Buffer
+			if err := run(invocation.args, &stdout); err == nil || stdout.Len() != 0 {
+				t.Fatalf("invalid incomplete cursor/row was accepted after restart: %v", err)
+			}
+			producerTestAssertInputsUnchanged(t, invocation.inputs)
+			producerTestAssertSidecarAbsent(t, invocation.checkpoint)
+			producerTestAssertSidecarAbsent(t, invocation.sidecar)
+		})
+	}
+}
+
 func TestIncrementalSyntheticOversizedPackIsDigestUnknownNotTruncatedPositive(t *testing.T) {
 	chain := newIncrementalTestChain(t)
 	chain.step(t, []map[string]any{incrementalTestRow(t, 1, "2026-11-06T12:00:00Z", "12")}, "2026-11-06T12:00:05Z")
@@ -603,7 +719,7 @@ func incrementalTestSetArg(args []string, name, value string) []string {
 }
 
 func TestIncrementalSyntheticOuterCursorSourceRosterAndCheckpointErrorsAreSanitized(t *testing.T) {
-	for _, mutation := range []string{"schema", "gateway", "after_noncanonical", "through_overflow", "bootstrap_jump", "row_id_absent", "row_id_string", "row_order", "row_scope", "row_provider", "raw_not_sql_text", "not_caught_up_empty", "not_caught_up_wrong_through", "bad_roster", "bad_health", "lone_checkpoint_in", "as_of", "wrong_checkpoint", "empty_checkpoint", "empty_checkpoint_option"} {
+	for _, mutation := range []string{"schema", "gateway", "after_noncanonical", "after_negative", "after_fractional", "after_overflow", "through_negative", "through_fractional", "through_overflow", "through_before_after", "bootstrap_jump", "row_id_absent", "row_id_string", "row_id_zero", "row_id_negative", "row_order", "row_reversed", "row_scope", "row_provider", "raw_not_sql_text", "not_caught_up_no_progress", "row_above_through", "bad_roster", "bad_health", "lone_checkpoint_in", "as_of", "wrong_checkpoint", "empty_checkpoint", "empty_checkpoint_option"} {
 		t.Run(mutation, func(t *testing.T) {
 			chain := newIncrementalTestChain(t)
 			invocation := chain.prepare(t, []map[string]any{incrementalTestRow(t, 1, "2026-11-06T12:00:00Z", "12")}, "2026-11-06T12:00:10Z", 1, true)
@@ -617,26 +733,45 @@ func TestIncrementalSyntheticOuterCursorSourceRosterAndCheckpointErrorsAreSaniti
 				delta["gateway_id"] = "ryzen1-cpa" // Wrapper publication scope is not native origin.
 			case "after_noncanonical":
 				delta["after_id"] = "00"
+			case "after_negative":
+				delta["after_id"] = "-1"
+			case "after_fractional":
+				delta["after_id"] = "0.5"
+			case "after_overflow":
+				delta["after_id"] = "9223372036854775808"
+			case "through_negative":
+				delta["through_id"] = "-1"
+			case "through_fractional":
+				delta["through_id"] = "1.5"
 			case "through_overflow":
 				delta["through_id"] = "9223372036854775808"
+			case "through_before_after":
+				delta["after_id"], delta["through_id"] = "2", "1"
 			case "bootstrap_jump":
 				delta["after_id"], delta["through_id"], row["id"] = "1", "2", 2
 			case "row_id_absent":
 				delete(row, "id")
 			case "row_id_string":
 				row["id"] = "1"
+			case "row_id_zero":
+				row["id"] = 0
+			case "row_id_negative":
+				row["id"] = -1
 			case "row_order":
 				delta["rows"] = []any{row, row}
+			case "row_reversed":
+				delta["rows"] = []any{incrementalTestRow(t, 2, "2026-11-06T12:00:00Z", "12"), row}
+				delta["through_id"], delta["caught_up"] = "2", false
 			case "row_scope":
 				row["auth_index"] = producerTestAuthB
 			case "row_provider":
 				row["provider"] = "claude"
 			case "raw_not_sql_text":
 				row["quota_json"] = map[string]any{"private": producerTestSecret}
-			case "not_caught_up_empty":
-				delta["rows"], delta["caught_up"] = []any{}, false
-			case "not_caught_up_wrong_through":
-				delta["through_id"], delta["caught_up"] = "2", false
+			case "not_caught_up_no_progress":
+				delta["rows"], delta["through_id"], delta["caught_up"] = []any{}, "0", false
+			case "row_above_through":
+				row["id"], delta["caught_up"] = 2, false
 			case "bad_roster":
 				incrementalTestWrite(t, chain.roster, map[string]any{"routes": []any{producerTestRoute("duplicate", producerTestAuthA, "gpt-6-luna", "low"), producerTestRoute("duplicate", producerTestAuthA, "gpt-6-luna", "max")}})
 			case "bad_health":
