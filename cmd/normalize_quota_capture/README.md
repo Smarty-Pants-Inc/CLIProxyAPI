@@ -462,21 +462,30 @@ Both cursors are canonical nonnegative signed-int64 decimal **strings** (`0` or
 `[1-9][0-9]*`, maximum `9223372036854775807`). Row `id` is a required positive
 int64 JSON **integer**, strictly ascending, greater than after_id and at most
 through_id; no duplicates/conflicting ID reuse are accepted. Read row IDs with
-an int64-capable decoder; do not round them through JavaScript Number. Gaps are
-valid. after_id must equal checkpoint-IN's through_id. For caught_up=false the
-page must contain rows and through_id must be its last row ID. For caught_up=true
-through_id may include the exhausted range's gaps. A missing/malformed checkpoint
-is an error, never a reset to empty state.
+an int64-capable decoder; do not round them through JavaScript Number.
+Row-ID gaps are valid. `after_id` must equal checkpoint-IN's `through_id`. For
+`caught_up=false`, `through_id` must strictly advance beyond `after_id`; `rows`
+may be empty, and any selected rows may end below `through_id`, because the
+cursor follows raw-page progress, not only selected Codex rows. For
+`caught_up=true`, `through_id` may include gaps in the exhausted raw range, and
+`rows` may also be empty. A missing/malformed checkpoint is an error, never a
+reset to empty state.
 
-The wrapper owns one SQLite read transaction: capture H, read `origin IS NULL`
-and the configured Codex auth scope with `id > after AND id <= H ORDER BY id`,
-and close it before HTTP/CLI work. No SQL value/clock/status/429 filter or
-highest-ID-per-auth selector is allowed. `captured_at` is the completed SQLite
-read receipt, diagnostic only. Then perform a fresh auth-files GET and supply
-its sanitized source receipt. On GET failure supply exactly the unavailable
-shape `{"gateway_id":"fleet-cliproxyapi-ryzen1","files":[]}` without a fabricated
-receipt. Never reuse the last successful health file as this tick's observation.
-The native command itself does not query SQLite or perform/verify the GET.
+The wrapper owns one SQLite read transaction: read the global maximum ID H and
+fetch one bounded raw `usage_events` page ordered by primary key from that same
+snapshot. Derive `through_id` and `caught_up` from all raw page rows and H, then
+filter fetched rows in application code to `origin IS NULL`, provider `codex`
+and the configured auth scope. Only the initial cold bootstrap may use a SQL
+lower bound above zero while wire `after_id` remains `"0"`; subsequent pages
+resume from the checkpoint cursor. Do not push the application scope or
+value/clock/status/429 filters into SQL, and do not select only the highest ID
+per auth. Close SQLite before HTTP/CLI work. `captured_at` is the completed
+SQLite read receipt, diagnostic only. Then perform a fresh auth-files GET and
+supply its sanitized source receipt. On GET failure supply exactly the
+unavailable shape `{"gateway_id":"fleet-cliproxyapi-ryzen1","files":[]}` without a
+fabricated receipt. Never reuse the last successful health file as this tick's
+observation. The native command itself does not query SQLite or perform/verify
+the GET.
 
 Only auths configured by matching Codex roster rows participate. An out-of-scope
 row/provider, invalid source/cursor/identity, malformed outer SQL-column type or
