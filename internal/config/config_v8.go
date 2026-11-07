@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
@@ -13,6 +12,8 @@ import (
 
 // Config remains the effective runtime/wire representation. Layout translation is
 // confined to YAML boundaries so older SDK and Home consumers keep their contract.
+// legacyConfig is encoding-only; decoding uses a method-free SDK alias so
+// SDKConfig's standalone validation hook cannot consume the full root document.
 type legacyConfig Config
 
 type configPath struct{ old, current string }
@@ -75,6 +76,7 @@ func buildV8Paths() []configPath {
 		{"github-token", "server.github-token"},
 		{"tls", "server.tls"}, {"commercial-mode", "server.commercial-mode"}, {"discovery", "server.discovery"},
 		{"remote-management", "management"}, {"api-keys", "access.api-keys"},
+		{"account-pools", "access.account-pools"},
 		{"api-key-policies", "access.api-key-policies"},
 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
 		{"force-model-prefix", "routing.force-model-prefix"},
@@ -249,14 +251,25 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
-	decoded := legacyConfig(*cfg)
-	if err = root.Decode(&decoded); err != nil {
+	if err = validateAccountPoolsNode(root); err != nil {
 		return err
 	}
-	if errValidate := decoded.Models.Validate(); errValidate != nil {
+	decodedConfig, err := decodeConfigNode(root, *cfg)
+	if err != nil {
+		return err
+	}
+	if errValidate := decodedConfig.Models.Validate(); errValidate != nil {
 		return errValidate
 	}
-	*cfg = Config(decoded)
+	// Legacy direct decodes may be partial SDK/server snapshots without load
+	// defaults. Only new pool configurations require policy validation here;
+	// ParseConfigBytes and LoadConfigBytes still validate every full config.
+	if decodedConfig.AccountPools != nil || hasPooledAPIKeyPolicy(decodedConfig.APIKeyPolicies) {
+		if errValidate := decodedConfig.ValidateAPIKeyPolicies(); errValidate != nil {
+			return errValidate
+		}
+	}
+	*cfg = decodedConfig
 	cfg.OAuthOnlyFields = nil
 	source := expandConfigAliases(node)
 	for _, path := range v8Paths {
@@ -907,15 +920,12 @@ func ValidateV8Config(data []byte) error {
 			}
 		}
 	}
-	encoded, err := yaml.Marshal(flat)
-	if err != nil {
+	if err := validateConfigNodeKnownFields(flat); err != nil {
 		return err
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
-	decoder.KnownFields(true)
-	var cfg legacyConfig
-	if errDecode := decoder.Decode(&cfg); errDecode != nil {
-		return errDecode
+	cfg, err := decodeConfigNode(flat, Config{})
+	if err != nil {
+		return err
 	}
 	return cfg.Models.Validate()
 }

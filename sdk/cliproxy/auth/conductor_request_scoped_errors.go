@@ -34,6 +34,10 @@ func isRequestStopError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var poolErr *Error
+	if errors.As(err, &poolErr) && poolErr != nil && strings.HasPrefix(poolErr.Code, "api_key_pool_") {
+		return true
+	}
 	type stopChecker interface {
 		IsRequestStop() bool
 	}

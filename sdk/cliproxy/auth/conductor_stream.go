@@ -155,7 +155,19 @@ func (m *Manager) wrapStreamResultWithCompletion(ctx context.Context, auth *Auth
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	streamStart := time.Now()
+	poolDone := func() {}
+	if op := KeyPolicyFromContext(ctx); op.IsPoolOperation() {
+		// This child is created while the public execution still owns work.
+		// Closing may already have begun; retain its cleanup before handing off.
+		op.mu.Lock()
+		if !op.pool.finished {
+			op.pool.work.Add(1)
+			poolDone = op.pool.work.Done
+		}
+		op.mu.Unlock()
+	}
 	go func() {
+		defer poolDone()
 		defer close(out)
 		defer cancelProducer()
 		var failed, completed bool
@@ -393,7 +405,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		producerCtx, cancelAttempt := context.WithCancel(ctx)
 		execOpts.StreamResultValidation = true
 		m.beginExecutionAttempt(execOpts)
-		streamResult, errStream := executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
+		streamResult, errStream := m.streamNativePoolAware(producerCtx, cancelAttempt, executor, auth, execReq, execOpts)
 		cancelAttempt = streamAttemptCancel(cancelAttempt, streamResult)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
@@ -418,7 +430,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					producerCtx, cancelAttempt = context.WithCancel(ctx)
 					startRetry := time.Now()
 					m.beginExecutionAttempt(execOpts)
-					streamResult, errStream = executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
+					streamResult, errStream = m.streamNativePoolAware(producerCtx, cancelAttempt, executor, auth, execReq, execOpts)
 					cancelAttempt = streamAttemptCancel(cancelAttempt, streamResult)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
@@ -505,7 +517,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					producerCtx, cancelAttempt = context.WithCancel(ctx)
 					startRetry := time.Now()
 					m.beginExecutionAttempt(execOpts)
-					retryStream, retryErr := executor.ExecuteStream(producerCtx, auth, execReq, execOpts)
+					retryStream, retryErr := m.streamNativePoolAware(producerCtx, cancelAttempt, executor, auth, execReq, execOpts)
 					cancelAttempt = streamAttemptCancel(cancelAttempt, retryStream)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)

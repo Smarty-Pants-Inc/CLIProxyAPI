@@ -127,10 +127,15 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx, finishPoolExecution, errPool := m.beginPoolExecution(ctx, providers, req.Model, false, false, opts)
+	if errPool != nil {
+		return cliproxyexecutor.Response{}, errPool
+	}
+	defer finishPoolExecution()
 	if m.MissingKeyPolicy(ctx) {
 		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
 	}
-	if op := KeyPolicyFromContext(ctx); op != nil {
+	if op := KeyPolicyFromContext(ctx); op != nil && !op.IsPoolOperation() {
 		a, exec, opts, err := op.selectWithCompaction(ctx, req, opts)
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
@@ -214,7 +219,12 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if m.MissingKeyPolicy(ctx) || KeyPolicyFromContext(ctx) != nil {
+	ctx, finishPoolExecution, errPool := m.beginPoolExecution(ctx, providers, req.Model, true, false, opts)
+	if errPool != nil {
+		return cliproxyexecutor.Response{}, errPool
+	}
+	defer finishPoolExecution()
+	if m.MissingKeyPolicy(ctx) || (KeyPolicyFromContext(ctx) != nil && !KeyPolicyFromContext(ctx).IsPoolOperation()) {
 		return cliproxyexecutor.Response{}, policyError("api_key_policy_unavailable", 503)
 	}
 	ctx = withSelectionProgress(cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL))
@@ -278,10 +288,15 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx, finishPoolExecution, errPool := m.beginPoolExecution(ctx, providers, req.Model, false, true, opts)
+	if errPool != nil {
+		return nil, errPool
+	}
+	defer finishPoolExecution()
 	if m.MissingKeyPolicy(ctx) {
 		return nil, policyError("api_key_policy_unavailable", 503)
 	}
-	if op := KeyPolicyFromContext(ctx); op != nil {
+	if op := KeyPolicyFromContext(ctx); op != nil && !op.IsPoolOperation() {
 		a, exec, opts, err := op.selectWithCompaction(ctx, req, opts)
 		if err != nil {
 			return nil, err
@@ -691,6 +706,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
+			if isLocalPoolStop(execCtx, errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
@@ -737,7 +755,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
 			m.beginExecutionAttempt(execOpts)
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			resp, errExec := m.executeNativePoolAware(execCtx, executor, auth, execReq, execOpts, false)
+			if isLocalPoolStop(execCtx, errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -756,7 +777,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
 					m.beginExecutionAttempt(execOpts)
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.executeNativePoolAware(execCtx, executor, auth, execReq, execOpts, false)
+					if isLocalPoolStop(execCtx, errExec) {
+						return cliproxyexecutor.Response{}, errExec
+					}
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -918,6 +942,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
+			if isLocalPoolStop(execCtx, errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, SkipQuotaObservation: true, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
@@ -963,7 +990,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			resp, errExec := m.executeNativePoolAware(execCtx, executor, auth, execReq, execOpts, true)
+			if isLocalPoolStop(execCtx, errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -980,7 +1010,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.executeNativePoolAware(execCtx, executor, auth, execReq, execOpts, true)
+					if isLocalPoolStop(execCtx, errExec) {
+						return cliproxyexecutor.Response{}, errExec
+					}
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -1267,6 +1300,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			if isLocalPoolStop(execCtx, errPrepare) {
+				return nil, errPrepare
+			}
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
 				if homeSameAuthRetries[auth.ID] > 0 {
@@ -1737,6 +1773,21 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 // PrepareRequestAuth prepares a registered credential using the same serialization
 // and lifecycle checks as normal request execution. Management tools use this path too.
 func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (*Auth, error) {
+	if m != nil && (m.PoolMode() || KeyPolicyFromContext(ctx).IsPoolOperation()) {
+		if err := m.checkPoolAdmission(ctx); err != nil {
+			return auth, wrapRequestStopError(err)
+		}
+		if auth == nil {
+			return nil, wrapRequestStopError(poolError("identity_unverified", 503))
+		}
+		executor, ok := preparer.(ProviderExecutor)
+		m.poolRuntime.mu.Lock()
+		trusted := ok && m.poolRuntime.registrations[auth.Provider].executor == executor
+		m.poolRuntime.mu.Unlock()
+		if !trusted {
+			return auth, wrapRequestStopError(poolError("identity_unverified", 503))
+		}
+	}
 	if m == nil || preparer == nil || auth == nil || !preparer.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
 	}
@@ -2193,6 +2244,9 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 // If the registered executor for the auth provider implements RequestPreparer,
 // it will be invoked to modify the request (e.g., add headers).
 func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
+	if m.PoolMode() {
+		return poolError("admission_required", 503)
+	}
 	if req != nil && (m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(req.Context()) != nil) {
 		return policyError("api_key_policy_unavailable", 503)
 	}
@@ -2217,6 +2271,9 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 
 // PrepareHttpRequest injects provider credentials into the supplied HTTP request.
 func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.Request) error {
+	if m.PoolMode() {
+		return poolError("admission_required", 503)
+	}
 	if m == nil {
 		return &Error{Code: "provider_not_found", Message: "manager is nil"}
 	}
@@ -2249,6 +2306,9 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 
 // NewHttpRequest constructs a new HTTP request and injects provider credentials into it.
 func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, targetURL string, body []byte, headers http.Header) (*http.Request, error) {
+	if m.PoolMode() {
+		return nil, poolError("admission_required", 503)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2275,6 +2335,9 @@ func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, target
 
 // HttpRequest injects provider credentials into the supplied HTTP request and executes it.
 func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	if m.PoolMode() {
+		return nil, poolError("admission_required", 503)
+	}
 	if m.MissingKeyPolicy(ctx) || KeyPolicyFromContext(ctx) != nil || (req != nil && (m.MissingKeyPolicy(req.Context()) || KeyPolicyFromContext(req.Context()) != nil)) {
 		return nil, policyError("api_key_policy_unavailable", 503)
 	}

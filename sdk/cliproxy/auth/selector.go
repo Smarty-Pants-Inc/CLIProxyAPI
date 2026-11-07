@@ -670,7 +670,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		failover, _ = ctx.Value(selectionFailoverKey{}).(bool)
 		progress, _ = ctx.Value(selectionProgressKey{}).(*selectionProgress)
 	}
-	key := provider + ":" + canonicalModelKey(model)
+	key := poolScopedProvider(ctx, provider) + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastPicked == nil {
@@ -757,7 +757,7 @@ func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model s
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	stateModel := weightedSelectorStateModel(ctx, model)
-	key := provider + ":" + canonicalModelKey(stateModel)
+	key := poolScopedProvider(ctx, provider) + ":" + canonicalModelKey(stateModel)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1086,6 +1086,7 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	provider = poolScopedProvider(ctx, provider)
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)

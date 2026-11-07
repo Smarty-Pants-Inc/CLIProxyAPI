@@ -61,6 +61,7 @@ type SDKConfig struct {
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys        []string       `yaml:"api-keys" json:"api-keys"`
+	AccountPools   *[]AccountPool `yaml:"account-pools,omitempty" json:"account-pools,omitempty"`
 	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
 
 	// PolicyReloadState is process-local history, including removed keys. Never persist it.
