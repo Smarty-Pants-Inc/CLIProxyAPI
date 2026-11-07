@@ -89,6 +89,13 @@ func quotaWindowsNumber(t *testing.T, name string, got *float64, want float64) {
 	}
 }
 
+func quotaWindowsNumberPrecise(t *testing.T, name string, got *float64, want float64) {
+	t.Helper()
+	if got == nil || math.Abs(*got-want) > 1e-12 {
+		t.Fatalf("%s = %v, want %v", name, got, want)
+	}
+}
+
 func quotaWindowsDiagnostic(t *testing.T, window QuotaWindowView, code string) QuotaWindowDiagnostic {
 	t.Helper()
 	for _, diagnostic := range window.Diagnostics {
@@ -437,9 +444,13 @@ func TestNormalizeQuotaWindowsResetEvidence(t *testing.T) {
 		{"legacy_relative", "", "3600", "unknown", "missing_reset", "unresolved_relative_timing", false, nil},
 		{"agrees", "1793859550.25", "3600", "known", "", "relative_reset_agrees", true, quotaWindowsFloatPointer(1793859550.25)},
 		{"one_second", "1793859551.25", "3600", "known", "", "relative_reset_agrees", true, quotaWindowsFloatPointer(1793859551.25)},
-		{"just_over_one_second", "1793859551.250000001", "3600", "unknown", "relative_reset_conflict", "relative_reset_conflict", true, quotaWindowsFloatPointer(1793859551.25)},
-		{"fractional_conflict", "1793859551.5", "3600", "unknown", "relative_reset_conflict", "relative_reset_conflict", true, quotaWindowsFloatPointer(1793859551.5)},
-		{"negative_conflict", "1793859549", "3600", "unknown", "relative_reset_conflict", "relative_reset_conflict", true, quotaWindowsFloatPointer(1793859549)},
+		{"just_over_one_second", "1793859551.250000001", "3600", "known", "", "relative_reset_agrees", true, quotaWindowsFloatPointer(1793859551.250000001)},
+		{"fractional_difference", "1793859551.5", "3600", "known", "", "relative_reset_agrees", true, quotaWindowsFloatPointer(1793859551.5)},
+		{"negative_difference", "1793859549", "3600", "known", "", "relative_reset_agrees", true, quotaWindowsFloatPointer(1793859549)},
+		{"exact_positive_ten_seconds", "1793859560.25", "3600", "known", "", "relative_reset_agrees", true, quotaWindowsFloatPointer(1793859560.25)},
+		{"exact_negative_ten_seconds", "1793859540.25", "3600", "known", "", "relative_reset_agrees", true, quotaWindowsFloatPointer(1793859540.25)},
+		{"positive_ten_seconds_plus_one_ns", "1793859560.250000001", "3600", "known", "", "relative_reset_disagreement", true, quotaWindowsFloatPointer(1793859560.250000001)},
+		{"negative_ten_seconds_minus_one_ns", "1793859540.249999999", "3600", "known", "", "relative_reset_disagreement", true, quotaWindowsFloatPointer(1793859540.249999999)},
 		{"legacy_dual", "1793859559", "3600", "unknown", "unverified_observation_time", "unresolved_relative_timing", false, quotaWindowsFloatPointer(1793859559)},
 		{"bad_absolute_no_fallback", "NaN", "3600", "unknown", "invalid_absolute_reset", "invalid_absolute_reset", true, nil},
 		{"negative_absolute", "-1", "3600", "unknown", "invalid_absolute_reset", "invalid_absolute_reset", true, nil},
@@ -479,15 +490,101 @@ func TestNormalizeQuotaWindowsResetEvidence(t *testing.T) {
 			}
 			if tc.diagnostic != "" {
 				d := quotaWindowsDiagnostic(t, w, tc.diagnostic)
-				if tc.diagnostic == "relative_reset_conflict" || tc.diagnostic == "relative_reset_agrees" {
+				if tc.diagnostic == "relative_reset_disagreement" || tc.diagnostic == "relative_reset_agrees" || tc.diagnostic == "unresolved_relative_timing" {
 					quotaWindowsNumber(t, "relative seconds", d.RelativeResetSeconds, 3600)
 					quotaWindowsNumber(t, "implied reset", d.ImpliedResetAt, 1793859550.25)
-					if d.ResetDeltaSeconds == nil {
-						t.Fatal("dual reset comparison lost delta")
+					if tc.absolute != "" {
+						absolute, ok := quotaWindowTimestamp(tc.absolute)
+						if !ok || d.ResetDeltaSeconds == nil {
+							t.Fatalf("dual reset comparison lost valid delta: %+v", d)
+						}
+						wantDelta := absolute.Sub(acquired.Add(time.Hour)).Seconds()
+						quotaWindowsNumberPrecise(t, "signed reset delta", d.ResetDeltaSeconds, wantDelta)
+					}
+					if tc.diagnostic == "relative_reset_disagreement" && w.State == "unknown" {
+						t.Fatalf("relative disagreement alone made absolute evidence unknown: %+v", w)
 					}
 				}
 			}
 		})
+	}
+}
+
+func TestNormalizeQuotaWindowsCodexAbsoluteResetRow20198112(t *testing.T) {
+	acquired := time.Date(2026, 11, 6, 11, 33, 52, 196199291, time.UTC)
+	headers := http.Header{
+		"X-Codex-Primary-Used-Percent":          {"15"},
+		"X-Codex-Primary-Window-Minutes":        {"10080"},
+		"X-Codex-Primary-Reset-At":              {"1794379849"},
+		"X-Codex-Primary-Reset-After-Seconds":   {"415019"},
+		"X-Codex-Secondary-Used-Percent":        {"0"},
+		"X-Codex-Secondary-Window-Minutes":      {"0"},
+		"X-Codex-Secondary-Reset-At":            {""},
+		"X-Codex-Secondary-Reset-After-Seconds": {"0"},
+	}
+	observation := quotaWindowsAcquired(collectQuotaSignals("codex", headers), acquired)
+	// Preserve the explicit acquisition for the supplied blank absolute field;
+	// collection correctly omits its empty value as a quota signal.
+	observation.SignalObservedAt["X-Codex-Secondary-Reset-At"] = acquired
+	for key, at := range observation.SignalObservedAt {
+		if !at.Equal(acquired) {
+			t.Fatalf("field %q has acquisition %s, want %s", key, at, acquired)
+		}
+	}
+
+	provenance := QuotaWindowProvenance{Source: "usage_events", TimestampBasis: "header_acquisition"}
+	view := NormalizeQuotaWindows("codex", observation, acquired, provenance)
+	if view.State != "known" {
+		t.Fatalf("fresh absolute-reset evidence was not known: %+v", view)
+	}
+	primary := quotaWindowsFind(t, view, "x-codex", "primary")
+	if primary.State != "known" || primary.DurationSeconds == nil || *primary.DurationSeconds != 604800 {
+		t.Fatalf("unexpected primary window: %+v", primary)
+	}
+	quotaWindowsNumber(t, "used", primary.UsedPercent, 15)
+	quotaWindowsNumber(t, "headroom", primary.HeadroomPercent, 85)
+	quotaWindowsNumber(t, "absolute reset", primary.ResetAt, 1794379849)
+	diagnostic := quotaWindowsDiagnostic(t, primary, "relative_reset_agrees")
+	quotaWindowsNumber(t, "relative seconds", diagnostic.RelativeResetSeconds, 415019)
+	implied := acquired.Add(415019 * time.Second)
+	quotaWindowsNumber(t, "implied reset", diagnostic.ImpliedResetAt, quotaWindowEpoch(implied))
+	quotaWindowsNumberPrecise(t, "signed reset delta", diagnostic.ResetDeltaSeconds, -2.196199291)
+	for _, diagnostic := range primary.Diagnostics {
+		if diagnostic.Code == "relative_reset_disagreement" {
+			t.Fatalf("sub-threshold difference was reported as a disagreement: %+v", primary)
+		}
+	}
+	secondary := quotaWindowsFind(t, view, "x-codex", "secondary")
+	if secondary.State != "not_applicable" || secondary.Reason != "upstream_absent" || secondary.DurationSeconds != nil || secondary.UsedPercent != nil || secondary.HeadroomPercent != nil || secondary.ResetAt != nil {
+		t.Fatalf("explicitly absent secondary became capacity: %+v", secondary)
+	}
+
+	for _, tc := range []struct {
+		name, primaryState, primaryReason, secondaryState, secondaryReason string
+		age                                                                time.Duration
+	}{
+		{"exactly_300_seconds", "known", "", "not_applicable", "upstream_absent", 300 * time.Second},
+		{"over_300_seconds_by_1ns", "stale", "observation_expired", "stale", "observation_expired", 300*time.Second + time.Nanosecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizeQuotaWindows("codex", observation, acquired.Add(tc.age), provenance)
+			primary := quotaWindowsFind(t, got, "x-codex", "primary")
+			secondary := quotaWindowsFind(t, got, "x-codex", "secondary")
+			if primary.State != tc.primaryState || primary.Reason != tc.primaryReason {
+				t.Fatalf("primary got %s/%s, want %s/%s: %+v", primary.State, primary.Reason, tc.primaryState, tc.primaryReason, primary)
+			}
+			if secondary.State != tc.secondaryState || secondary.Reason != tc.secondaryReason {
+				t.Fatalf("secondary got %s/%s, want %s/%s: %+v", secondary.State, secondary.Reason, tc.secondaryState, tc.secondaryReason, secondary)
+			}
+		})
+	}
+
+	// Replaying this historical acquisition at a later date cannot make it
+	// current capacity even though the recorded reset remains in the future.
+	later := NormalizeQuotaWindows("codex", observation, acquired.Add(24*time.Hour), provenance)
+	primary = quotaWindowsFind(t, later, "x-codex", "primary")
+	if primary.State != "stale" || primary.Reason != "observation_expired" {
+		t.Fatalf("historical replay became current capacity: %+v", primary)
 	}
 }
 
