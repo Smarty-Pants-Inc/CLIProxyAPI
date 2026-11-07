@@ -84,6 +84,9 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 		return false, nil
 	}
 
+	if errValidate := newCfg.ValidateAPIKeyRoutes(); errValidate != nil {
+		return false, errValidate
+	}
 	if errValidate := newCfg.ValidateAPIKeyPolicies(); errValidate != nil {
 		return false, errValidate
 	}
@@ -99,7 +102,8 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 		return false, fmt.Errorf("reconciling access providers: %w", err)
 	}
 
-	manager.SetProviders(providers)
+	routesChanged := oldCfg == nil && len(newCfg.APIKeyRoutes) != 0 || oldCfg != nil && !reflect.DeepEqual(oldCfg.APIKeyRoutes, newCfg.APIKeyRoutes)
+	manager.SetProvidersAndAPIKeyRoutes(providers, newCfg.APIKeyRoutes)
 
 	if len(added)+len(updated)+len(removed) > 0 {
 		log.Debugf("auth providers reconciled (added=%d updated=%d removed=%d)", len(added), len(updated), len(removed))
@@ -108,7 +112,7 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 	}
 
 	log.Debug("auth providers unchanged after config update")
-	return false, nil
+	return routesChanged, nil
 }
 
 func identifierFromProvider(provider sdkaccess.Provider) string {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
 
 const (
@@ -38,7 +39,13 @@ type ClientSecretAuthorization struct {
 	Principal       string
 	IssuerPrincipal string
 	IssuerProvider  string
-	Session         json.RawMessage
+	// IssuerRouteKeyDigests retains verified key attribution independently of a
+	// plugin's mapped principal. It is internal and never part of a token response.
+	IssuerRouteKeyDigests []string `json:"-"`
+	// IssuerRouteKeyAttributionKnown distinguishes verified no-key attribution
+	// from legacy callers that did not supply manager attribution at all.
+	IssuerRouteKeyAttributionKnown bool `json:"-"`
+	Session                        json.RawMessage
 }
 
 type clientSecretEntry struct {
@@ -73,7 +80,7 @@ func newClientSecretStore() *clientSecretStore {
 	}
 }
 
-func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string) (string, ClientSecretAuthorization, time.Time, error) {
+func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string, issuerRouteKeyDigests ...[]string) (string, ClientSecretAuthorization, time.Time, error) {
 	if s == nil {
 		return "", ClientSecretAuthorization{}, time.Time{}, errors.New("Realtime client secret store unavailable")
 	}
@@ -90,6 +97,10 @@ func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Durati
 		IssuerPrincipal: strings.TrimSpace(issuerPrincipal),
 		IssuerProvider:  strings.TrimSpace(issuerProvider),
 		Session:         append(json.RawMessage(nil), session...),
+	}
+	if len(issuerRouteKeyDigests) != 0 {
+		authorization.IssuerRouteKeyAttributionKnown = true
+		authorization.IssuerRouteKeyDigests = append([]string(nil), issuerRouteKeyDigests[0]...)
 	}
 	now := s.currentTime()
 	expiresAt := now.Add(lifetime)
@@ -113,6 +124,7 @@ func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Durati
 	}
 	s.entries[token] = clientSecretEntry{authorization: authorization, expiresAt: expiresAt}
 	s.mu.Unlock()
+	authorization.IssuerRouteKeyDigests = append([]string(nil), authorization.IssuerRouteKeyDigests...)
 	return token, authorization, expiresAt, nil
 }
 
@@ -130,6 +142,7 @@ func (s *clientSecretStore) authenticate(token string) (ClientSecretAuthorizatio
 	}
 	s.mu.Unlock()
 	entry.authorization.Session = append(json.RawMessage(nil), entry.authorization.Session...)
+	entry.authorization.IssuerRouteKeyDigests = append([]string(nil), entry.authorization.IssuerRouteKeyDigests...)
 	return entry.authorization, nil
 }
 
@@ -275,7 +288,12 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 	issuerProvider, _ := c.Get("accessProvider")
 	issuerPrincipalValue, _ := issuerPrincipal.(string)
 	issuerProviderValue, _ := issuerProvider.(string)
-	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue)
+	issuerRouteKeyDigestsValue, _ := c.Get(sdkaccess.RouteKeyDigestsContextKey)
+	var issuerAttribution [][]string
+	if issuerRouteKeyDigests, known := issuerRouteKeyDigestsValue.([]string); known {
+		issuerAttribution = append(issuerAttribution, issuerRouteKeyDigests)
+	}
+	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue, issuerAttribution...)
 	if errCreate != nil {
 		if errors.Is(errCreate, errClientSecretCapacity) {
 			c.Header("Retry-After", "1")
