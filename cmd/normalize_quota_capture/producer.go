@@ -71,11 +71,12 @@ type producerAuthObservation struct {
 }
 
 type producerHealth struct {
-	GatewayID    string `json:"gateway_id"`
-	Active       *bool  `json:"active,omitempty"`
-	Cooldown     *bool  `json:"cooldown,omitempty"`
-	LimitReached *bool  `json:"limit_reached,omitempty"`
-	ObservedAt   string `json:"observed_at"`
+	GatewayID         string `json:"gateway_id"`
+	Active            *bool  `json:"active,omitempty"`
+	Cooldown          *bool  `json:"cooldown,omitempty"`
+	LimitReached      *bool  `json:"limit_reached,omitempty"`
+	LimitReachedBasis string `json:"limit_reached_basis,omitempty"`
+	ObservedAt        string `json:"observed_at"`
 }
 
 type producerVerification struct {
@@ -358,20 +359,22 @@ func (context *producerContext) provenance(view normalizedCapture, output []byte
 				projection[routeID] = producerProjection{SeatIndex: index, OriginRouteID: routeID, Origin: origin}
 			}
 		}
-		file, exists := context.authFiles[seat.AuthIndex]
-		if !exists || file.Provider != "codex" || context.authObservedAt.IsZero() {
-			continue
+		var file *producerAuthFile
+		var active, cooldown *bool
+		var observed time.Time
+		if source, exists := context.authFiles[seat.AuthIndex]; exists && source.Provider == "codex" && !context.authObservedAt.IsZero() {
+			file = &source
+			active, cooldown = authFileActive(source), authFileCooldown(source.Cooldowns)
+			observed = context.authObservedAt
 		}
-		active, cooldown := authFileActive(file), authFileCooldown(file.Cooldowns)
-		limit, limitAt := producerLimitReached(row.captureSeat, seat.Quota, now)
+		limit, limitAt, _, basis := producerLimitReachedWithFallback(row.captureSeat, seat.Quota, file, observed, true, now)
 		if active == nil && cooldown == nil && limit == nil {
 			continue
 		}
-		observed := context.authObservedAt
 		if limit != nil {
 			observed = oldestTime(observed, limitAt)
 		}
-		health[seat.AuthIndex] = producerHealth{GatewayID: producerGateway, Active: active, Cooldown: cooldown, LimitReached: limit, ObservedAt: observed.UTC().Format(time.RFC3339Nano)}
+		health[seat.AuthIndex] = producerHealth{GatewayID: producerGateway, Active: active, Cooldown: cooldown, LimitReached: limit, LimitReachedBasis: basis, ObservedAt: observed.UTC().Format(time.RFC3339Nano)}
 	}
 	sidecar := struct {
 		ArtifactFile    string                        `json:"artifact_file"`
@@ -443,26 +446,38 @@ func authFileCooldown(raw json.RawMessage) *bool {
 	return &value
 }
 
-// Only approved default-window booleans contribute to auth-wide health. Numeric
-// exhaustion, credits, aggregate and opaque namespace signals cannot grant it.
-// Native LimitSignals and window classification retain native conflict refusal.
+// This explicit-only helper retains the original default-window flag policy.
+// Producer health adds the approved missing-flag fallback separately; native
+// LimitSignals and window classification retain native conflict refusal.
 func producerLimitReached(row captureSeat, quota auth.QuotaWindowsView, now time.Time) (*bool, time.Time) {
 	value, at, _ := producerLimitReachedEvidence(row, quota, now)
 	return value, at
 }
 
-// The additional keys expose exactly the flag/membership clocks used by v2;
-// the v1 policy and its timestamps remain unchanged.
+// The additional keys expose exactly the flag/membership clocks used by v2.
 func producerLimitReachedEvidence(row captureSeat, quota auth.QuotaWindowsView, now time.Time) (*bool, time.Time, []string) {
+	value, at, keys, _ := producerLimitEvidence(row, quota, now, false, false)
+	return value, at, keys
+}
+
+func producerLimitEvidence(row captureSeat, quota auth.QuotaWindowsView, now time.Time, fallback, authSafe bool) (*bool, time.Time, []string, string) {
 	windows := make(map[string]auth.QuotaWindowView)
 	for _, window := range quota.Windows {
 		if window.LimitKey == "x-codex" {
 			windows[window.UpstreamWindow] = window
 		}
 	}
-	var rejectedAt, affirmativeAt time.Time
-	var rejectedKeys, affirmativeKeys []string
-	required, allAffirmative := 0, true
+	// Aggregate flags are present evidence, not window attribution or absent
+	// flags. Raw presence survives collector rejection of malformed values.
+	aggregateFlagsPresent := false
+	for _, key := range []string{"X-Codex-Allowed", "X-Codex-Limit-Reached"} {
+		_, present := quota.LimitSignals[key]
+		_, sourcePresent := producerHeaderValue(row.Headers, key)
+		aggregateFlagsPresent = aggregateFlagsPresent || present || sourcePresent
+	}
+	var rejectedAt, affirmativeAt, percentAt, fallbackRejectedAt time.Time
+	var rejectedKeys, affirmativeKeys, percentKeys, fallbackRejectedKeys []string
+	required, allAffirmative, allBelowLimit, usedFallback := 0, true, true, false
 	for _, slot := range []string{"primary", "secondary"} {
 		window, exists := windows[slot]
 		prefix := "X-Codex-" + slot + "-"
@@ -475,11 +490,16 @@ func producerLimitReachedEvidence(row captureSeat, quota auth.QuotaWindowsView, 
 			}
 		}
 		required++
-		positive, valid := false, exists
+		positive, valid, flagsPresent := false, exists, false
 		for _, suffix := range []string{"Allowed", "Limit-Reached"} {
 			key := http.CanonicalHeaderKey(prefix + suffix)
 			raw, present := quota.LimitSignals[key]
+			_, sourcePresent := producerHeaderValue(row.Headers, key)
+			flagsPresent = flagsPresent || present || sourcePresent
 			if !present {
+				if sourcePresent {
+					valid = false // A dropped malformed flag is present, not absent.
+				}
 				continue
 			}
 			at := headerAcquisition(row, key)
@@ -498,17 +518,49 @@ func producerLimitReachedEvidence(row captureSeat, quota auth.QuotaWindowsView, 
 				affirmativeKeys = append(affirmativeKeys, key)
 			}
 		}
+		if fallback {
+			key := http.CanonicalHeaderKey(prefix + "Used-Percent")
+			raw, present := producerHeaderValue(row.Headers, key)
+			used, parsed := auth.ParseCodexQuotaUsedPercent(raw)
+			at := headerAcquisition(row, key)
+			freshPercent := exists && present && parsed && freshAcquisition(at, now)
+			allBelowLimit = allBelowLimit && freshPercent && used < 100
+			if freshPercent {
+				percentAt = oldestTime(percentAt, at)
+				percentKeys = append(percentKeys, key)
+				if used >= 100 {
+					fallbackRejectedAt = oldestTime(fallbackRejectedAt, at)
+					fallbackRejectedKeys = append(fallbackRejectedKeys, key)
+				}
+			}
+			if !flagsPresent {
+				usedFallback = true
+				positive = !aggregateFlagsPresent && freshPercent && used < 100
+			}
+		}
 		allAffirmative = allAffirmative && valid && positive
 	}
 	if !rejectedAt.IsZero() {
 		value := true
 		sort.Strings(rejectedKeys)
-		return &value, rejectedAt, rejectedKeys
+		return &value, rejectedAt, rejectedKeys, ""
 	}
-	if required > 0 && allAffirmative && !affirmativeAt.IsZero() {
-		value := false
+	if usedFallback && !fallbackRejectedAt.IsZero() {
+		value := true
+		sort.Strings(fallbackRejectedKeys)
+		return &value, fallbackRejectedAt, fallbackRejectedKeys, producerFallbackBasis
+	}
+	if usedFallback {
+		affirmativeAt = oldestTime(affirmativeAt, percentAt)
+		affirmativeKeys = append(affirmativeKeys, percentKeys...)
+	}
+	if required > 0 && allAffirmative && !affirmativeAt.IsZero() && (!usedFallback || (authSafe && allBelowLimit)) {
+		value, basis := false, ""
+		if usedFallback {
+			basis = producerFallbackBasis
+		}
 		sort.Strings(affirmativeKeys)
-		return &value, affirmativeAt, affirmativeKeys
+		return &value, affirmativeAt, affirmativeKeys, basis
 	}
-	return nil, time.Time{}, nil
+	return nil, time.Time{}, nil, ""
 }

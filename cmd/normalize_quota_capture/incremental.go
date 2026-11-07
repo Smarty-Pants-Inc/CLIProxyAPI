@@ -99,6 +99,7 @@ type incrementalHealthSignals struct {
 	Cooldown           *bool              `json:"cooldown"`
 	CooldownObservedAt *string            `json:"cooldown_observed_at"`
 	LimitReached       *bool              `json:"limit_reached"`
+	LimitReachedBasis  string             `json:"limit_reached_basis,omitempty"`
 	LimitUsedKeys      []string           `json:"limit_used_keys"`
 	LimitAcquiredAt    map[string]*string `json:"limit_acquired_at"`
 }
@@ -756,11 +757,12 @@ func buildIncrementalView(checkpoint quotaCheckpoint, inputs *incrementalInputs,
 
 func incrementalHealth(identity string, inputs *incrementalInputs, capture captureSeat, quota auth.QuotaWindowsView, quotaSelected bool, now time.Time) (incrementalHealthSignals, *producerHealth) {
 	signals := incrementalHealthSignals{Status: "unavailable", SourceObservedAt: inputs.receipt, LimitUsedKeys: make([]string, 0), LimitAcquiredAt: make(map[string]*string)}
-	file, exists := inputs.authFiles[identity]
-	if !exists || file.Provider != "codex" || inputs.validReceipt.IsZero() {
-		return signals, nil
+	var file *producerAuthFile
+	var authAt time.Time
+	if source, exists := inputs.authFiles[identity]; exists && source.Provider == "codex" && !inputs.validReceipt.IsZero() {
+		file, authAt = &source, inputs.validReceipt
+		signals.Active, signals.Cooldown = authFileActive(source), authFileCooldown(source.Cooldowns)
 	}
-	signals.Active, signals.Cooldown = authFileActive(file), authFileCooldown(file.Cooldowns)
 	if signals.Active != nil {
 		signals.ActiveObservedAt = inputs.receipt
 	}
@@ -768,14 +770,12 @@ func incrementalHealth(identity string, inputs *incrementalInputs, capture captu
 		signals.CooldownObservedAt = inputs.receipt
 	}
 	var limitAt time.Time
-	if quotaSelected {
-		var keys []string
-		signals.LimitReached, limitAt, keys = producerLimitReachedEvidence(capture, quota, now)
-		for _, key := range keys {
-			signals.LimitUsedKeys = append(signals.LimitUsedKeys, key)
-			text := capture.ResponseHeadersObservedAt[key]
-			signals.LimitAcquiredAt[key] = &text
-		}
+	var keys []string
+	signals.LimitReached, limitAt, keys, signals.LimitReachedBasis = producerLimitReachedWithFallback(capture, quota, file, authAt, quotaSelected, now)
+	for _, key := range keys {
+		signals.LimitUsedKeys = append(signals.LimitUsedKeys, key)
+		text := capture.ResponseHeadersObservedAt[key]
+		signals.LimitAcquiredAt[key] = &text
 	}
 	if signals.Active == nil && signals.Cooldown == nil && signals.LimitReached == nil {
 		return signals, nil
@@ -784,11 +784,11 @@ func incrementalHealth(identity string, inputs *incrementalInputs, capture captu
 	if signals.Active != nil && signals.Cooldown != nil && signals.LimitReached != nil {
 		signals.Status = "complete"
 	}
-	at := inputs.validReceipt
+	at := authAt
 	if signals.LimitReached != nil {
 		at = oldestTime(at, limitAt)
 	}
-	return signals, &producerHealth{GatewayID: producerGateway, Active: signals.Active, Cooldown: signals.Cooldown, LimitReached: signals.LimitReached, ObservedAt: at.UTC().Format(time.RFC3339Nano)}
+	return signals, &producerHealth{GatewayID: producerGateway, Active: signals.Active, Cooldown: signals.Cooldown, LimitReached: signals.LimitReached, LimitReachedBasis: signals.LimitReachedBasis, ObservedAt: at.UTC().Format(time.RFC3339Nano)}
 }
 
 func incrementalProvenance(view incrementalView, projection map[string]producerProjection, health map[string]producerHealth, output []byte, options incrementalOptions, now time.Time) ([]byte, error) {

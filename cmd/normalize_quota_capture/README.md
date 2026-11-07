@@ -181,30 +181,77 @@ or untyped flags stay unknown. Cooldowns are credential/auth-wide only: explicit
 `scope: "model"` entries do not become credential gates. Missing/null lists or
 unknown entry scope cannot grant false. Model keys and errors are never emitted.
 
-Native auth-files rows have **no auth-wide `limit_reached` Boolean**. The approved
-producer-only policy uses native SDK `Quota.LimitSignals` and default-window
-classification, with the original per-header acquisition map:
+Native auth-files rows have **no auth-wide `limit_reached` Boolean**. Both
+producer versions use native SDK `Quota.LimitSignals`, default-window membership
+and the original per-header acquisition map. Existing explicit-only results
+retain their flag precedence and omit the optional fallback basis:
 
 - True if any fresh required-window signal has `Limit-Reached=true` or
-  `Allowed=false`.
-- False only if **every** required window affirmatively supplies fresh
-  `Allowed=true` or `Limit-Reached=false`, without an invalid/stale present status
-  counterpart. Missing signals are unknown, never false.
+  `Allowed=false`. Explicit refusal wins over affirmative siblings.
+- With flags on every required window, false requires fresh `Allowed=true` or
+  `Limit-Reached=false` on **every** required window, without an invalid/stale
+  present status counterpart. Numeric quota classification does not replace
+  this explicit-only policy.
 - Primary and secondary are required except genuinely fresh native
-  `not_applicable/upstream_absent` evidence. Any absence used to exclude a sibling
-  contributes its acquisition. An empty required set is unknown, not vacuous false.
-- Each used flag has its own inclusive 0..300-second acquisition check. Global
-  or namespaced signals cannot grant this default auth-wide false. Percentages,
-  credits, resets, absence alone and quota `state == "exhausted"` are not Boolean
-  health evidence: 98% local exhaustion is distinct from provider refusal.
-  Native header-conflict handling is not bypassed.
+  `not_applicable/upstream_absent` duration-zero membership. Any absence used to
+  exclude a sibling contributes its acquisition. Missing, unknown or stale
+  membership does not exclude a window. An empty required set is unknown, not
+  vacuous false.
+
+For a required window with **neither explicit flag present**, the approved
+missing-flag fallback is:
+
+- False only if a fresh auth-files receipt proves typed active, not disabled,
+  not unavailable and no quota cooldown, **and every required window** supplies
+  fresh native `used_percent < 100`. In a mixed explicit/missing-flag pack, the
+  explicit windows must still have valid affirmative flags as well as fresh
+  below-100 percentages; missing sibling flags are not implicitly affirmative.
+- True if any required window has fresh native `used_percent >= 100` while the
+  missing-flag fallback participates, or a fresh matching auth-files read has
+  a known quota cooldown. These are independent vetoes: missing other evidence
+  cannot grant false. An auth quota-cooldown veto also survives uncertain,
+  catching-up or absent quota, and can veto otherwise affirmative flags.
+- Otherwise unknown/HOLD. A present malformed, stale or unclocked flag is **not
+  absent** and cannot be replaced by a percentage to grant false. Native header
+  conflicts are never bypassed. No retained hidden anchor or old health file is
+  used as a substitute.
+
+Quota-cooldown evidence reads the raw typed `reason` separately from the existing
+credential-vs-model `cooldown` Boolean. Exact exporter reasons `quota` and
+`credential_quota` veto even if scope is unknown. Explicit `[]` proves no quota
+cooldown. Known credential/model scope with a known nonquota reason
+(`cloudflare_challenge`, `invalid_grant`, `unauthorized`, `payment_required`,
+`not_found`, `model_not_supported`, `transient_error`) does not become a quota
+veto. Missing/null/malformed lists or missing/unknown scope or reason cannot
+prove no quota cooldown. There is no invented `usage` reason or coercion of
+strings/numbers to typed evidence. Known model nonquota entries remain non-global
+for the independent `cooldown` Boolean.
+
+Each used flag, percentage and exclusion membership has its **own** inclusive
+`0 <= evaluation - acquisition <= 300 seconds` check; the auth-files receipt is
+checked independently. No reset, row, request, collection or evaluation time
+supplies a missing acquisition. The SDK's public
+`auth.ParseCodexQuotaUsedPercent` reuses its existing finite nonnegative decimal
+grammar, including valid values above 100 for a veto. Normalized windows still
+cap their numeric percentages at 100 and retain their existing exhaustion
+threshold: **99 is below 100 for this fallback predicate**, even when the SDK
+window independently classifies it as exhausted. Global/opaque namespace flags,
+credits, resets and absence alone do not grant the fallback.
+
+Fallback-derived true/false results carry
+`"limit_reached_basis":"fallback:auth-files+used_percent"` in `auth_health` and
+v2 health signals. Unknown results may omit it; explicit-only results omit it.
+A cooldown-only true uses its actual auth-files receipt and no fabricated
+percentage key. A fresh percentage veto can remain partial when auth-files is
+unavailable; it cannot complete admission health or promote its clock.
 
 Partial health fields are omitted when unknown. A complete admission record
 requires all three typed booleans, not omitted defaults. Health `observed_at` is
-independently the **oldest auth-files receipt and flag/membership acquisition
-actually used**, never restamped as source `as_of`, evaluation time or now.
-Historical roster health is ignored. Frozen real examples missing flags remain
-unknown/HOLD even if quota numbers exist.
+independently the **oldest auth-files receipt and flag/percentage/membership
+acquisition actually used**, never restamped as source `as_of`, evaluation time
+or now. Historical roster health is ignored. Historical captures without the
+required fresh independent evidence remain unknown/HOLD; replay does not invent
+that evidence.
 
 ### Existing sidecar slots, exact schema
 
@@ -253,6 +300,9 @@ The sidecar has these fields (hashes and counts below are schematic):
   }
 }
 ```
+
+The health object may additionally contain the optional `limit_reached_basis`
+marker described above; it is omitted for explicit-only results.
 
 Projection objects have **exactly** `seat_index`, `origin_route_id`, `origin`;
 origin objects have **exactly** `gateway_id`, `provider`, `auth_index`, `model`,
@@ -585,16 +635,25 @@ quota_acquired_at; raw evidence is still lossless in current_pack.
 quota_observed_at is the oldest whole selected quota acquisition only when
 complete/caught up. No timestamp is reconstructed from SDK float seconds.
 
-The EXACT `health` fields are `status`, `source_observed_at: string|null`,
+The required `health` fields are `status`, `source_observed_at: string|null`,
 `active: bool|null`, `active_observed_at: string|null`, `cooldown: bool|null`,
 `cooldown_observed_at: string|null`, `limit_reached: bool|null`,
 `limit_used_keys: sorted string[]`,
-`limit_acquired_at: object of key -> original string|null`. Original valid source
-receipt strings are retained even if stale; only fresh typed evidence supplies
-flags. The existing auth-wide flag/membership helper supplies limit_used_keys;
-model cooldown is not widened to credential cooldown. Uncertain/catching-up
-quota cannot grant `limit_reached=false`. Failed GET is unavailable, never last-
-success or fabricated false. Partial independent active/cooldown facts survive.
+`limit_acquired_at: object of key -> original string|null`. Optional
+`limit_reached_basis` is exactly `fallback:auth-files+used_percent` for a fallback
+result and is omitted for explicit-only results. Original valid source receipt
+strings are retained even if stale; only fresh typed evidence supplies auth
+facts. The native helper records exactly the flag, used-percent and exclusion
+membership keys actually used, with their original independent acquisition
+strings. A cooldown-only true has empty limit_used_keys/limit_acquired_at and
+uses the source auth receipt, not a fabricated percentage clock.
+
+Model cooldown is not widened to credential cooldown. Uncertain/catching-up
+quota cannot grant `limit_reached=false` or supply fallback percentages. A fresh
+independent quota-cooldown true may survive it. Failed GET never reuses previous
+health or fabricates false; independent active/cooldown facts become unavailable,
+while a fresh selected percentage veto may remain partial. Partial independent
+auth facts survive when the current GET actually supplies them.
 
 Authoritative publication `observed_at` (in signals/status/seat) is the oldest
 actually used native quota PLUS independent health acquisition, or null unless
@@ -608,8 +667,9 @@ request/insert time becomes SourceClock.
 The sidecar has EXACT root fields `schema_version: seat_quota_provenance.v2`,
 `artifact_file`, `artifact_sha256`, `verification`, `route_projection`,
 `auth_health`, `auth_statuses`, `signals`. The last two exactly mirror stdout.
-`route_projection`/`origin` and partial `auth_health` retain their existing EXACT
-v1 object shapes above, not a new consumer schema. Only selected/caught-up
+`route_projection`/`origin` retain their existing EXACT v1 shapes. Partial
+`auth_health` retains its v1 shape plus the optional fallback basis above, not
+a new consumer schema. Only selected/caught-up
 same-row gateway/provider/auth/allowlisted-model/qualified-effort tuples with one
 exact supplied roster match gain projection. No model fanout or unobserved seat
 projection is invented. Health may independently be partial for any configured
@@ -694,9 +754,11 @@ the source task. Link-dependent subcases explicitly skip only when that platform
 cannot create the required hardlink/symlink; they do not prove alias coverage on
 such a platform. Main owns execution and independent review on the frozen bytes.
 
-The source implementation task runs only gofmt on its own Go files and
-`git diff --check`, not tests/builds. The parent owns all test/build execution
-after source writers are terminal:
+The fallback source implementation task runs only gofmt on its own Go files
+and source diff/whitespace inspection, not tests, builds, syntax/import checks or
+runtime probes. The separate test author owns fallback regression tests and
+native percent-parser coverage. The parent owns all test/build execution after
+source writers are terminal:
 
 ```sh
 go test ./cmd/normalize_quota_capture

@@ -454,6 +454,13 @@ func quotaWindowReset(w *QuotaWindowView, signals map[string]string, observation
 	return resetAt, reason
 }
 
+// ParseCodexQuotaUsedPercent accepts the native finite, nonnegative decimal
+// grammar without the window projection's 100-percent ceiling. Values above
+// 100 can prove a limit veto without changing normalized window semantics.
+func ParseCodexQuotaUsedPercent(raw string) (float64, bool) {
+	return quotaWindowFloat(raw, math.MaxFloat64)
+}
+
 func quotaWindowFloat(raw string, maximum float64) (float64, bool) {
 	raw = strings.TrimSpace(raw)
 	if !quotaWindowDecimal.MatchString(raw) {

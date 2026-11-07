@@ -483,11 +483,11 @@ func TestProducerWindowLimitSignalRequiresAffirmativeFreshMembership(t *testing.
 			t.Fatalf("99%% utilization did not remain independently exhausted: %+v", primary)
 		}
 	})
-	t.Run("missing_required_sibling_signal_is_unknown", func(t *testing.T) {
+	t.Run("missing_required_sibling_uses_fresh_percent_fallback", func(t *testing.T) {
 		seat := producerTestSeat(producerTestAuthA, "gpt-6-luna", "low", 1, "2026-11-06T12:00:30Z", "20", true)
 		producerTestAddSecondary(t, seat, "2026-11-06T12:00:30Z", "", "")
 		files := producerTestSingleAuthScenario(t, seat, producerTestAuthRow(producerTestAuthA), "2026-11-06T12:00:45Z")
-		producerTestAssertLimitUnknown(t, files, producerTestAuthA, producerTestEvaluation)
+		producerTestAssertLimitReached(t, files, producerTestAuthA, false, producerTestEvaluation)
 	})
 	t.Run("aggregate_only_signal_is_not_window_attribution", func(t *testing.T) {
 		seat := producerTestSeat(producerTestAuthA, "gpt-6-luna", "low", 1, "2026-11-06T12:00:30Z", "20", false)
@@ -531,12 +531,12 @@ func TestProducerWindowLimitSignalRequiresAffirmativeFreshMembership(t *testing.
 			producerTestAssertLimitUnknown(t, files, producerTestAuthA, producerTestEvaluation)
 		})
 	}
-	t.Run("percentages_and_credits_without_flags_do_not_imply_false", func(t *testing.T) {
+	t.Run("fresh_percent_without_flags_allows_fallback_false", func(t *testing.T) {
 		seat := producerTestSeat(producerTestAuthA, "gpt-6-luna", "low", 1, "2026-11-06T12:00:30Z", "25", false)
 		producerTestSetHeader(t, seat, "X-Codex-Credits-Balance", "0", "2026-11-06T12:00:30Z")
 		producerTestSetHeader(t, seat, "X-Codex-Credits-Has-Credits", "false", "2026-11-06T12:00:30Z")
 		files := producerTestSingleAuthScenario(t, seat, producerTestAuthRow(producerTestAuthA), "2026-11-06T12:00:45Z")
-		producerTestAssertLimitUnknown(t, files, producerTestAuthA, producerTestEvaluation)
+		producerTestAssertLimitReached(t, files, producerTestAuthA, false, producerTestEvaluation)
 	})
 	t.Run("canonical_header_conflict_cannot_be_bypassed", func(t *testing.T) {
 		seat := producerTestSeat(producerTestAuthA, "gpt-6-luna", "low", 1, "2026-11-06T12:00:30Z", "20", true)
