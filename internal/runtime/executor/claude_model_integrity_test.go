@@ -56,8 +56,8 @@ func TestClaudeMessagesModelIntegrity(t *testing.T) {
 			t.Fatalf("outermost error = %T %v, want status 502", err, err)
 		}
 		requestScoped, ok := err.(core.RequestScopedError)
-		if !ok || !requestScoped.IsRequestScoped() {
-			t.Fatalf("outermost error = %T %v, want request scope", err, err)
+		if !ok || requestScoped.IsRequestScoped() {
+			t.Fatalf("outermost error = %T %v, want auth failover eligibility", err, err)
 		}
 		if !strings.Contains(err.Error(), "model_mismatch") || len(response.Payload) != 0 || attempts != 1 {
 			t.Fatalf("want one failed identity attempt without output, got attempts=%d payload=%q error=%v", attempts, response.Payload, err)
@@ -171,8 +171,8 @@ func TestClaudeMessagesModelIntegrity(t *testing.T) {
 							}
 						} else {
 							var mismatch *helps.ClaudeModelMismatchError
-							if !errors.As(err, &mismatch) || mismatch.StatusCode() != http.StatusBadGateway || !mismatch.IsRequestScoped() {
-								t.Fatalf("want request-scoped 502 model_mismatch, got %v", err)
+							if !errors.As(err, &mismatch) || mismatch.StatusCode() != http.StatusBadGateway || mismatch.IsRequestScoped() {
+								t.Fatalf("want auth-failover-eligible 502 model_mismatch, got %v", err)
 							}
 							if payload.Len() != 0 {
 								t.Fatalf("unverified payload escaped: %s", payload.String())

@@ -2922,8 +2922,8 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testin
 	// EOF before message_start cannot establish model identity. The integrity
 	// guard must reject it before the translated-stream completeness check.
 	var mismatch *helps.ClaudeModelMismatchError
-	if !errors.As(err, &mismatch) || mismatch.StatusCode() != http.StatusBadGateway || !mismatch.IsRequestScoped() {
-		t.Fatalf("Execute error = %v, want request-scoped 502 model_mismatch", err)
+	if !errors.As(err, &mismatch) || mismatch.StatusCode() != http.StatusBadGateway || mismatch.IsRequestScoped() {
+		t.Fatalf("Execute error = %v, want auth-failover-eligible 502 model_mismatch", err)
 	}
 	assertStatusErr(t, err, http.StatusBadGateway)
 	// No message_start identifies the upstream model: fail closed before parsing payload/error content.

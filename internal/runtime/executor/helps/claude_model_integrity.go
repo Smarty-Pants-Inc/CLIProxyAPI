@@ -10,13 +10,14 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// ClaudeModelMismatchError stops the request rather than trying a different model.
+// ClaudeModelMismatchError rejects unverified output while allowing auth failover
+// to retry the same requested model on another credential.
 type ClaudeModelMismatchError struct{ cause *cliproxyauth.Error }
 
 func (e *ClaudeModelMismatchError) Error() string       { return e.cause.Error() }
 func (e *ClaudeModelMismatchError) StatusCode() int     { return e.cause.StatusCode() }
 func (e *ClaudeModelMismatchError) Unwrap() error       { return e.cause }
-func (*ClaudeModelMismatchError) IsRequestScoped() bool { return true }
+func (*ClaudeModelMismatchError) IsRequestScoped() bool { return false }
 
 // Preserve the identity guard's fail-closed API for non-stream callers while
 // exposing EOF to streaming callers, which report it as an incomplete stream.
