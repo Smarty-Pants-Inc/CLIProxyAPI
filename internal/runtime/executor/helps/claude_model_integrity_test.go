@@ -47,6 +47,12 @@ func TestClaudeModelJSONIdentity(t *testing.T) {
 			if (err == nil) != tc.ok {
 				t.Fatalf("validation = %v, want success %t", err, tc.ok)
 			}
+			if !tc.ok {
+				var mismatch *ClaudeModelMismatchError
+				if !errors.As(err, &mismatch) || mismatch.StatusCode() != http.StatusBadGateway || !mismatch.IsRequestScoped() {
+					t.Fatalf("want request-scoped 502 model_mismatch, got %v", err)
+				}
+			}
 		})
 	}
 }
