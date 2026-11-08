@@ -14,6 +14,7 @@ const (
 	AuthErrorCodeInvalidCredential AuthErrorCode = "invalid_credential"
 	AuthErrorCodeNotHandled        AuthErrorCode = "not_handled"
 	AuthErrorCodeInternal          AuthErrorCode = "internal_error"
+	AuthErrorCodeAPIKeyRouteDenied AuthErrorCode = "api_key_route_denied"
 )
 
 // AuthError carries authentication failure details and HTTP status.
@@ -68,6 +69,10 @@ func NewNoCredentialsError() *AuthError {
 
 func NewInvalidCredentialError() *AuthError {
 	return newAuthError(AuthErrorCodeInvalidCredential, "Invalid API key", http.StatusUnauthorized, nil)
+}
+
+func NewAPIKeyRouteDeniedError() *AuthError {
+	return newAuthError(AuthErrorCodeAPIKeyRouteDenied, "API key is not allowed to access this route", http.StatusForbidden, nil)
 }
 
 func NewNotHandledError() *AuthError {

@@ -105,6 +105,21 @@ access:
     - "your-api-key-2"
     - "your-api-key-3"
 
+  # Optional exact route allowlists for selected client keys; keys without an entry stay unrestricted.
+  # key-sha256 is the lowercase hex SHA256 of the configured API key after trimming whitespace.
+  # Each allow entry is an exact absolute path, optionally prefixed by an uppercase HTTP method
+  # (GET, HEAD, POST, PUT, PATCH, DELETE, CONNECT, OPTIONS, TRACE) and one space.
+  # A path without a method allows every method. Paths are case-sensitive; trailing slashes
+  # are ignored, but subpaths/prefixes do not match. Wildcards, URLs, queries, fragments,
+  # and whitespace inside paths are invalid. The allow list must not be empty.
+  # Additions, changes and removals take effect on reload. Routes work with plugins/Home
+  # and do not require ws-auth: true. They are independent of the policies below;
+  # when both are present, both restrictions apply. Legacy root api-key-routes is accepted.
+  # The example digest below belongs to the placeholder key "your-api-key-1" above.
+  # api-key-routes:
+  #   - key-sha256: "e8c072187ce8773a2be6736f997d3d31442a48c8ab35510f17462e882729c0c3"
+  #     allow: ['GET /v1/models', '/v1/live']
+
   # Optional client-key policies (SHA256 of the configured key; exact runtime auth IDs).
   # Codex Responses HTTP/SSE only; other paths, Home/plugins, redirects/retries fail closed.
   # oauth.providers.aistudio.ws-auth must stay true. Nil models/caps are unlimited;

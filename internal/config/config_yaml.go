@@ -89,10 +89,13 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
-	// Policy arrays/zeros must survive the general default-pruning merge unchanged.
-	removeMapKey(original.Content[0], "api-key-policies")
-	if i := findMapKeyIndex(generated.Content[0], "api-key-policies"); i >= 0 {
-		original.Content[0].Content = append(original.Content[0].Content, deepCopyNode(generated.Content[0].Content[i]), deepCopyNode(generated.Content[0].Content[i+1]))
+	// Security arrays must replace old values, including when omitted on removal.
+	// Policy arrays/zeros must also survive the default-pruning merge unchanged.
+	for _, key := range []string{"api-key-policies", "api-key-routes"} {
+		removeMapKey(original.Content[0], key)
+		if i := findMapKeyIndex(generated.Content[0], key); i >= 0 {
+			original.Content[0].Content = append(original.Content[0].Content, deepCopyNode(generated.Content[0].Content[i]), deepCopyNode(generated.Content[0].Content[i+1]))
+		}
 	}
 	if err = restoreV8Layout(original.Content[0], layout, data, generated.Content[0]); err != nil {
 		return err
