@@ -39,6 +39,7 @@ type mediaRelaySession interface {
 	SetCloseHandler(func(string))
 	Close() error
 	CloseWithReason(string) error
+	WaitClosed() error
 }
 
 type mediaRelayFactory interface {
@@ -49,6 +50,8 @@ type mediaSessionRoute struct {
 	proxyURL   string
 	credential string
 	authIndex  string
+	poolLive   bool
+	onClose    func(string)
 }
 
 type pionMediaRelay struct {
@@ -81,6 +84,9 @@ type pionMediaSession struct {
 	mediaSessionID string
 	callID         string
 	releaseSlot    func()
+	workers        mediaWorkerGroup
+	closed         chan struct{}
+	poolLive       bool
 
 	proxyDialer       proxy.ContextDialer
 	proxyScheme       string
@@ -110,14 +116,16 @@ type dataChannelPipe struct {
 }
 
 type dataChannelBridge struct {
-	done         <-chan struct{}
-	downToUp     *dataChannelPipe
-	upToDown     *dataChannelPipe
-	closeOnce    sync.Once
-	downstreamMu sync.Mutex
-	downstream   *webrtc.DataChannel
-	upstreamMu   sync.Mutex
-	upstream     *webrtc.DataChannel
+	done               <-chan struct{}
+	downToUp           *dataChannelPipe
+	upToDown           *dataChannelPipe
+	closeOnce          sync.Once
+	downstreamMu       sync.Mutex
+	downstream         *webrtc.DataChannel
+	upstreamMu         sync.Mutex
+	upstream           *webrtc.DataChannel
+	workers            *mediaWorkerGroup
+	validateDownstream func([]byte, bool) error
 }
 
 func newPionMediaRelay(relayConfig config.CodexLiveMediaRelayConfig) (*pionMediaRelay, error) {
@@ -305,6 +313,8 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, rou
 		downstream:     downstream,
 		upstream:       upstream,
 		done:           make(chan struct{}),
+		closed:         make(chan struct{}),
+		poolLive:       route.poolLive,
 		mediaSessionID: uuid.NewString(),
 		releaseSlot:    releaseSlot,
 		proxyDialer:    proxyDialer,
@@ -314,7 +324,13 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, rou
 	}
 	session.bridge = newDataChannelBridge(session.done, func(err error) {
 		session.fail("data_channel_failed", err)
-	})
+	}, &session.workers)
+	if route.poolLive {
+		session.bridge.validateDownstream = validatePoolLiveControl
+	}
+	if route.onClose != nil {
+		session.SetCloseHandler(route.onClose)
+	}
 	session.installStateHandlers()
 	log.WithFields(session.logFields("session")).Info("codex live WebRTC media session created")
 
@@ -336,7 +352,7 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, rou
 		_ = session.Close()
 		return nil, "", fmt.Errorf("add downstream audio track: %w", errTrack)
 	}
-	go drainRTCP("downstream", downstreamSender, session.done)
+	session.workers.start(func() { drainRTCP("downstream", downstreamSender, session.done) })
 
 	toOpenAI, errTrack := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "codex-live")
 	if errTrack != nil {
@@ -348,21 +364,27 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, rou
 		_ = session.Close()
 		return nil, "", fmt.Errorf("add upstream audio track: %w", errTrack)
 	}
-	go drainRTCP("upstream", upstreamSender, session.done)
+	session.workers.start(func() { drainRTCP("upstream", upstreamSender, session.done) })
 
 	downstream.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
 			return
 		}
-		go relayRTP("downstream-to-upstream", track, toOpenAI, session.done)
+		session.workers.start(func() { relayRTP("downstream-to-upstream", track, toOpenAI, session.done) })
 	})
 	upstream.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
 			return
 		}
-		go relayRTP("upstream-to-downstream", track, toDesktop, session.done)
+		session.workers.start(func() { relayRTP("upstream-to-downstream", track, toDesktop, session.done) })
 	})
 	downstream.OnDataChannel(func(channel *webrtc.DataChannel) {
+		done, ok := session.workers.enter()
+		if !ok {
+			_ = channel.Close()
+			return
+		}
+		defer done()
 		if channel.Label() != realtimeDataChannelLabel {
 			if errClose := channel.Close(); errClose != nil {
 				log.WithError(errClose).Debug("codex live media: close unsupported downstream DataChannel")
@@ -564,34 +586,69 @@ func (s *pionMediaSession) CloseWithReason(reason string) error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
-		fields := s.logFields("session")
-		fields["reason"] = reason
-		log.WithFields(fields).Info("codex live WebRTC media session closing")
-		close(s.done)
-		if s.bridge != nil {
-			s.bridge.close()
+		if s.closed == nil {
+			s.closed = make(chan struct{})
 		}
-		var closeErrors []error
-		if errClose := s.closeCandidateTunnels(); errClose != nil {
-			closeErrors = append(closeErrors, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
+		s.workers.stop()
+		s.handlerMu.Lock()
+		if s.failureReason == "" {
+			s.failureReason = reason
 		}
-		if errClose := s.closePeerConnection("local", s.downstream); errClose != nil {
-			closeErrors = append(closeErrors, fmt.Errorf("close downstream PeerConnection: %w", errClose))
+		handler := s.onClose
+		callHandler := handler != nil && !s.handlerCalled
+		if callHandler {
+			s.handlerCalled = true
 		}
-		if errClose := s.closePeerConnection("remote", s.upstream); errClose != nil {
-			closeErrors = append(closeErrors, fmt.Errorf("close upstream PeerConnection: %w", errClose))
-		}
-		if s.releaseSlot != nil {
-			s.releaseSlot()
-		}
-		s.closeErr = errors.Join(closeErrors...)
-		if s.closeErr != nil {
-			log.WithFields(fields).WithError(s.closeErr).Warn("codex live WebRTC media session closed with errors")
-		} else {
-			log.WithFields(fields).Info("codex live WebRTC media session closed")
+		s.handlerMu.Unlock()
+		go s.closeMedia(reason)
+		if callHandler {
+			go handler(reason)
 		}
 	})
+	return s.WaitClosed()
+}
+
+func (s *pionMediaSession) WaitClosed() error {
+	if s == nil {
+		return nil
+	}
+	<-s.closed
 	return s.closeErr
+}
+
+func (s *pionMediaSession) closeMedia(reason string) {
+	defer close(s.closed)
+	fields := s.logFields("session")
+	fields["reason"] = reason
+	log.WithFields(fields).Info("codex live WebRTC media session closing")
+	close(s.done)
+	var closeErrors []error
+	// Close the peers first: closing SCTP/DTLS also unblocks a DataChannel
+	// sender before any channel/tunnel completion barrier can wait on it.
+	if errClose := s.closePeerConnection("local", s.downstream); errClose != nil {
+		closeErrors = append(closeErrors, fmt.Errorf("close downstream PeerConnection: %w", errClose))
+	}
+	if errClose := s.closePeerConnection("remote", s.upstream); errClose != nil {
+		closeErrors = append(closeErrors, fmt.Errorf("close upstream PeerConnection: %w", errClose))
+	}
+	if s.bridge != nil {
+		s.bridge.close()
+	}
+	if errClose := s.closeCandidateTunnels(); errClose != nil {
+		closeErrors = append(closeErrors, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
+	}
+	// Closing peers/DC/tunnels unblocks native RTP/RTCP reads. Never wait
+	// on those readers before initiating the transport closes above.
+	s.workers.wait()
+	if s.releaseSlot != nil {
+		s.releaseSlot()
+	}
+	s.closeErr = errors.Join(closeErrors...)
+	if s.closeErr != nil {
+		log.WithFields(fields).WithError(s.closeErr).Warn("codex live WebRTC media session closed with errors")
+	} else {
+		log.WithFields(fields).Info("codex live WebRTC media session closed")
+	}
 }
 
 func (s *pionMediaSession) closePeerConnection(peer string, connection *webrtc.PeerConnection) error {
@@ -650,9 +707,6 @@ func (s *pionMediaSession) fail(reason string, err error) {
 		if err != nil {
 			log.WithFields(s.logFields("session")).WithField("reason", reason).WithError(err).Warn("codex live WebRTC media session failed")
 		}
-		if errClose := s.CloseWithReason(reason); errClose != nil {
-			log.WithError(errClose).Debug("codex live media: close failed session")
-		}
 		s.handlerMu.Lock()
 		s.failureReason = reason
 		handler := s.onClose
@@ -661,9 +715,20 @@ func (s *pionMediaSession) fail(reason string, err error) {
 			s.handlerCalled = true
 		}
 		s.handlerMu.Unlock()
-		if callHandler {
-			handler(reason)
-		}
+		// Never close/join on a Pion callback or a tracked pipe worker stack.
+		go func() {
+			if callHandler {
+				handler(reason)
+			}
+			// Pooled calls have an explicit finalizer which first joins bootstrap
+			// and raw sideband work. Do not bypass that teardown order here.
+			if s.poolLive {
+				return
+			}
+			if errClose := s.CloseWithReason(reason); errClose != nil {
+				log.WithError(errClose).Debug("codex live media: close failed session")
+			}
+		}()
 	})
 }
 
@@ -715,14 +780,18 @@ func isClosedMediaError(err error, done <-chan struct{}) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
 }
 
-func newDataChannelBridge(done <-chan struct{}, onError func(error)) *dataChannelBridge {
-	bridge := &dataChannelBridge{done: done}
-	bridge.downToUp = newDataChannelPipe("downstream-to-upstream", done, onError)
-	bridge.upToDown = newDataChannelPipe("upstream-to-downstream", done, onError)
+func newDataChannelBridge(done <-chan struct{}, onError func(error), groups ...*mediaWorkerGroup) *dataChannelBridge {
+	workers := &mediaWorkerGroup{}
+	if len(groups) > 0 && groups[0] != nil {
+		workers = groups[0]
+	}
+	bridge := &dataChannelBridge{done: done, workers: workers}
+	bridge.downToUp = newDataChannelPipe("downstream-to-upstream", done, onError, workers)
+	bridge.upToDown = newDataChannelPipe("upstream-to-downstream", done, onError, workers)
 	return bridge
 }
 
-func newDataChannelPipe(name string, done <-chan struct{}, onError func(error)) *dataChannelPipe {
+func newDataChannelPipe(name string, done <-chan struct{}, onError func(error), groups ...*mediaWorkerGroup) *dataChannelPipe {
 	pipe := &dataChannelPipe{
 		name:     name,
 		done:     done,
@@ -731,12 +800,23 @@ func newDataChannelPipe(name string, done <-chan struct{}, onError func(error)) 
 		writable: make(chan struct{}, 1),
 		onError:  onError,
 	}
-	go pipe.run()
+	workers := &mediaWorkerGroup{}
+	if len(groups) > 0 && groups[0] != nil {
+		workers = groups[0]
+	}
+	workers.start(pipe.run)
 	return pipe
 }
 
 func (b *dataChannelBridge) attachDownstream(channel *webrtc.DataChannel) {
 	b.downstreamMu.Lock()
+	select {
+	case <-b.done:
+		b.downstreamMu.Unlock()
+		_ = channel.Close()
+		return
+	default:
+	}
 	if b.downstream != nil {
 		b.downstreamMu.Unlock()
 		if errClose := channel.Close(); errClose != nil {
@@ -752,6 +832,13 @@ func (b *dataChannelBridge) attachDownstream(channel *webrtc.DataChannel) {
 
 func (b *dataChannelBridge) attachUpstream(channel *webrtc.DataChannel) {
 	b.upstreamMu.Lock()
+	select {
+	case <-b.done:
+		b.upstreamMu.Unlock()
+		_ = channel.Close()
+		return
+	default:
+	}
 	if b.upstream != nil {
 		b.upstreamMu.Unlock()
 		if errClose := channel.Close(); errClose != nil {
@@ -767,6 +854,17 @@ func (b *dataChannelBridge) attachUpstream(channel *webrtc.DataChannel) {
 
 func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination *dataChannelPipe) {
 	channel.OnMessage(func(message webrtc.DataChannelMessage) {
+		done, ok := b.workers.enter()
+		if !ok {
+			return
+		}
+		defer done()
+		if destination == b.downToUp && b.validateDownstream != nil {
+			if err := b.validateDownstream(message.Data, message.IsString); err != nil {
+				destination.reportError(err)
+				return
+			}
+		}
 		if len(message.Data) > mediaDataMessageMaxSize {
 			destination.reportError(fmt.Errorf("%s DataChannel message exceeds %d bytes", destination.name, mediaDataMessageMaxSize))
 			return

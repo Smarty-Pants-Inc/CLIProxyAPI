@@ -181,6 +181,11 @@ func randomRealtimeID(prefix string, size int) (string, error) {
 
 // AuthenticateClientSecret validates a local ephemeral key when the request carries one.
 func (h *Handler) AuthenticateClientSecret(request *http.Request) (ClientSecretAuthorization, bool, error) {
+	// Pool mode has no ephemeral-secret route, even for a previously minted key.
+	// Let native access authentication reject it without consulting secret state.
+	if h.poolModeEnabled() {
+		return ClientSecretAuthorization{}, false, nil
+	}
 	token := bearerToken(request)
 	if !strings.HasPrefix(token, clientSecretPrefix) {
 		return ClientSecretAuthorization{}, false, nil

@@ -79,6 +79,9 @@ type tcpCandidateTunnel struct {
 	onForwardingStarted func()
 	ctx                 context.Context
 	cancel              context.CancelFunc
+	workers             mediaWorkerGroup
+	closeDone           chan struct{}
+	closeErr            error
 }
 
 type tcpCandidatePlan struct {
@@ -314,8 +317,9 @@ func newTCPCandidateTunnel(target netip.AddrPort, dialer proxy.ContextDialer, ex
 		validationSlots: make(chan struct{}, maxUnauthenticatedTCPConns),
 		ctx:             tunnelContext,
 		cancel:          cancelTunnel,
+		closeDone:       make(chan struct{}),
 	}
-	go tunnel.accept()
+	tunnel.workers.start(tunnel.accept)
 	return tunnel, nil
 }
 
@@ -336,10 +340,13 @@ func (t *tcpCandidateTunnel) accept() {
 		}
 		select {
 		case t.validationSlots <- struct{}{}:
-			go func() {
+			if !t.workers.start(func() {
 				defer func() { <-t.validationSlots }()
 				t.handleConnection(connection)
-			}()
+			}) {
+				<-t.validationSlots
+				t.untrackAndClose(connection)
+			}
 		default:
 			t.untrackAndClose(connection)
 			log.Warn("codex live TCP proxy: rejected excess unauthenticated candidate connection")
@@ -454,10 +461,16 @@ func (t *tcpCandidateTunnel) Close() error {
 	}
 	t.mu.Lock()
 	if t.closed {
+		done := t.closeDone
 		t.mu.Unlock()
-		return nil
+		<-done
+		return t.closeErr
 	}
 	t.closed = true
+	if t.closeDone == nil {
+		t.closeDone = make(chan struct{})
+	}
+	t.workers.stop()
 	cancel := t.cancel
 	connections := make([]net.Conn, 0, len(t.connections))
 	for connection := range t.connections {
@@ -480,7 +493,10 @@ func (t *tcpCandidateTunnel) Close() error {
 			closeErrors = append(closeErrors, errClose)
 		}
 	}
-	return errors.Join(closeErrors...)
+	t.workers.wait()
+	t.closeErr = errors.Join(closeErrors...)
+	close(t.closeDone)
+	return t.closeErr
 }
 
 func readValidatedICEBindingFrame(connection io.Reader, expectedUser, remotePassword string) ([]byte, error) {

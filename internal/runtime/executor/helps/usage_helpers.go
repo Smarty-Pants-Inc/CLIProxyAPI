@@ -749,8 +749,12 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if err := cliproxyauth.CheckKeyPolicySend(req); err != nil {
-		return nil, err
+	// Pool sends are fenced by the native factory transport beneath all mutators,
+	// including count-tokens paths with no usage reporter. Keep the legacy guard.
+	if op := cliproxyauth.KeyPolicyFromContext(req.Context()); !op.IsPoolOperation() {
+		if err := cliproxyauth.CheckKeyPolicySend(req); err != nil {
+			return nil, err
+		}
 	}
 	if cliproxyauth.KeyPolicyFromContext(req.Context()) != nil {
 		req.GetBody = nil

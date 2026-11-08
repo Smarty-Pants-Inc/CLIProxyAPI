@@ -46,6 +46,7 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	var toReschedule []string
 	m.mu.Lock()
 	replaced = m.executors[provider]
+	m.clearNativePoolTrustLocked(provider)
 	m.executors[provider] = executor
 	for id, auth := range m.auths {
 		if auth != nil && strings.EqualFold(executorKeyFromAuth(auth), provider) {
@@ -74,6 +75,7 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	}
 	m.mu.Lock()
 	delete(m.executors, provider)
+	m.clearNativePoolTrustLocked(provider)
 	m.mu.Unlock()
 }
 
