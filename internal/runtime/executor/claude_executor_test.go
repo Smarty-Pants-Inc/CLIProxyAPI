@@ -1049,8 +1049,8 @@ func TestClaudeExecutor_ConfirmedCLIForwardsNativeOpus55Shape(t *testing.T) {
 	if blocks[1].Get("text").String() != "native identity" || blocks[2].Get("text").String() != "native model block" {
 		t.Error("native system prompt blocks were rebuilt")
 	}
-	if got := gjson.GetBytes(seenBody, "fallbacks.0.model").String(); got != "claude-opus-4-8" {
-		t.Errorf("native fallback = %q, want claude-opus-4-8", got)
+	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Errorf("pinned native request forwarded fallbacks: %s", seenBody)
 	}
 }
 
@@ -5510,7 +5510,7 @@ func TestApplyCloaking_Opus55FallbackOnlyForUnconfirmedClients(t *testing.T) {
 	}
 }
 
-func TestClaudeExecutor_CloakedOpus55PairsFallbackAndBetas(t *testing.T) {
+func TestClaudeExecutor_CloakedOpus55StripsFallbackAndAutomaticBetas(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5532,15 +5532,18 @@ func TestClaudeExecutor_CloakedOpus55PairsFallbackAndBetas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(seenBody, "fallbacks.0.model").String(); got != "claude-opus-4-8" {
-		t.Errorf("fallback model = %q", got)
+	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Errorf("pinned cloaked request forwarded fallbacks: %s", seenBody)
+	}
+	for _, beta := range []string{claudeServerSideFallbackBeta, claudeFallbackCreditBeta} {
+		if strings.Contains(seenHeaders.Get("Anthropic-Beta"), beta) {
+			t.Errorf("unexpected automatic %s beta without fallbacks", beta)
+		}
 	}
 	for _, beta := range []string{
 		claudePerTurnControlBeta,
 		claudeMidConvSystemClearAtBeta,
 		claudeThinkingBindingBeta,
-		claudeServerSideFallbackBeta,
-		claudeFallbackCreditBeta,
 	} {
 		if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), beta) {
 			t.Errorf("missing %s beta", beta)
@@ -5999,8 +6002,8 @@ func TestClaudeExecutor_PayloadOverrideFableModelLeavesBuiltinsUnchanged(t *test
 		t.Fatalf("model = %q, want claude-sonnet-5", got)
 	}
 
-	if gjson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
-		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
+	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Fatalf("pinned request forwarded built-in fallbacks: %s", seenBody)
 	}
 	if !strings.Contains(strings.ReplaceAll(gjson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
@@ -6064,7 +6067,7 @@ func TestClaudeExecutor_PayloadOverrideNonFableModelDoesNotInjectFableBuiltins(t
 
 }
 
-func TestClaudeExecutor_PayloadOverridePreservesExplicitFallbacks(t *testing.T) {
+func TestClaudeExecutor_PayloadOverrideCannotRestoreFallbacks(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6109,17 +6112,16 @@ func TestClaudeExecutor_PayloadOverridePreservesExplicitFallbacks(t *testing.T) 
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	// Explicit payload fallback override must be preserved!
-	fallbacks := gjson.GetBytes(seenBody, "fallbacks").Array()
-	if len(fallbacks) != 1 || fallbacks[0].Get("model").String() != "claude-opus-5" {
-		t.Fatalf("explicit payload fallback override must be preserved, got: %s", gjson.GetBytes(seenBody, "fallbacks").Raw)
+	// Model pinning applies after explicit payload rules too.
+	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Fatalf("payload override restored fallbacks on pinned request: %s", seenBody)
 	}
-	if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), "server-side-fallback") {
-		t.Fatalf("server-side-fallback beta must be present for explicit fallback, got: %s", seenHeaders.Get("Anthropic-Beta"))
+	if strings.Contains(seenHeaders.Get("Anthropic-Beta"), "server-side-fallback") {
+		t.Fatalf("automatic fallback beta without fallbacks: %s", seenHeaders.Get("Anthropic-Beta"))
 	}
 }
 
-func TestClaudeExecutor_PayloadUnrelatedRuleLeavesBuiltinFallbacksUnchanged(t *testing.T) {
+func TestClaudeExecutor_PayloadUnrelatedRuleCannotRestoreBuiltinFallbacks(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenBody, _ = io.ReadAll(r.Body)
@@ -6171,8 +6173,8 @@ func TestClaudeExecutor_PayloadUnrelatedRuleLeavesBuiltinFallbacksUnchanged(t *t
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if gjson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
-		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
+	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Fatalf("pinned request forwarded built-in fallbacks: %s", seenBody)
 	}
 	if gjson.GetBytes(seenBody, "model").String() != "claude-sonnet-5" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
@@ -6276,8 +6278,8 @@ func TestClaudeExecutor_PayloadFableProbeOverrideKeepsBuiltinAdditions(t *testin
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if gjson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
-		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
+	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Fatalf("pinned request forwarded built-in fallbacks: %s", seenBody)
 	}
 	if !strings.Contains(strings.ReplaceAll(gjson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
@@ -7247,7 +7249,7 @@ func TestClaudeExecutor_UserTitlePromptWithoutSchemaTreatedAsNormalTurn(t *testi
 	}
 }
 
-func TestClaudeExecutor_PayloadOverrideRawPreservesExplicitFallbacks(t *testing.T) {
+func TestClaudeExecutor_PayloadOverrideRawCannotRestoreFallbacks(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -7292,13 +7294,12 @@ func TestClaudeExecutor_PayloadOverrideRawPreservesExplicitFallbacks(t *testing.
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	// Raw payload override setting fallbacks must be preserved!
-	fallbacks := gjson.GetBytes(seenBody, "fallbacks").Array()
-	if len(fallbacks) != 1 || fallbacks[0].Get("model").String() != "claude-opus-5" {
-		t.Fatalf("explicit raw payload fallback override must be preserved, got: %s", gjson.GetBytes(seenBody, "fallbacks").Raw)
+	// Model pinning applies after raw payload rules too.
+	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Fatalf("raw payload override restored fallbacks on pinned request: %s", seenBody)
 	}
-	if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), "server-side-fallback") {
-		t.Fatalf("server-side-fallback beta must be present for explicit raw fallback, got: %s", seenHeaders.Get("Anthropic-Beta"))
+	if strings.Contains(seenHeaders.Get("Anthropic-Beta"), "server-side-fallback") {
+		t.Fatalf("automatic fallback beta without fallbacks: %s", seenHeaders.Get("Anthropic-Beta"))
 	}
 }
 
