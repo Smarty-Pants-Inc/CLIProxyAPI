@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
@@ -151,14 +152,19 @@ func corsMiddleware() gin.HandlerFunc {
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
 func AuthMiddleware(manager *sdkaccess.Manager, core ...*auth.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, false, core...)
+	return accessAuthMiddleware(manager, false, nil, core...)
+}
+
+// Use the server's handler so policy admission sees loaded and reloaded SDK settings.
+func (s *Server) authMiddleware() gin.HandlerFunc {
+	return accessAuthMiddleware(s.accessManager, false, s.handlers, s.handlers.AuthManager)
 }
 
 func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager, core ...*auth.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, true, core...)
+	return accessAuthMiddleware(manager, true, nil, core...)
 }
 
-func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core ...*auth.Manager) gin.HandlerFunc {
+func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, base *handlers.BaseAPIHandler, core ...*auth.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
 			c.Next()
@@ -178,7 +184,7 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core .
 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
 				c.Request = c.Request.WithContext(reqCtx)
 			}
-			done, allowed := admitKeyPolicy(c, core)
+			done, allowed := admitKeyPolicy(c, core, base)
 			if !allowed {
 				return
 			}
@@ -243,7 +249,7 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		c.Request = c.Request.WithContext(reqCtx)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
-		done, allowed := admitKeyPolicy(c, core)
+		done, allowed := admitKeyPolicy(c, core, nil)
 		if !allowed {
 			return
 		}

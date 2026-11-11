@@ -162,7 +162,7 @@ func isManagedClaudeBeta(beta string) bool {
 //	15 advanced-tool-use-2025-11-20       requests using tool search or another advanced tool-use feature
 //	16 mid-conversation-system-clear-at-2026-08-21  messages with clear_at, or requested
 //	17 dangerous-tool-use-2026-09-03      safeguards body, or requested
-//	18 effort-2025-11-24                  effort-supporting models with active thinking
+//	18 effort-2025-11-24                  first-party upstream, effort-supporting models with active thinking
 //	19 server-side-fallback-2026-06-01    requests with fallbacks or requested
 //	20 fallback-credit-2026-06-01         requests with fallback tokens, fallbacks, or requested
 //	21 structured-outputs-2025-12-15      structured output requests
@@ -177,7 +177,7 @@ func isManagedClaudeBeta(beta string) bool {
 //
 // An empty body keeps the optimistic role=system default, matching the cloaking
 // policy for unknown and future model IDs.
-func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool) string {
+func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken, anthropicUpstream bool) string {
 	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+10)
 	betas = append(betas, claudeCodeBeta)
 	if oauthToken {
@@ -229,7 +229,7 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if requested[claudeDangerousToolUseBeta] || gjson.GetBytes(body, "safeguards").Exists() {
 		betas = append(betas, claudeDangerousToolUseBeta)
 	}
-	if claudeRequestSupportsEffort(body, requested) {
+	if anthropicUpstream && claudeRequestSupportsEffort(body, requested) {
 		betas = append(betas, claudeEffortBeta)
 	}
 	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(body)
@@ -1144,7 +1144,7 @@ func applyClaudeHeadersWithNativeProfile(
 
 	baseBetas := incomingBetas
 	if !preserveCallerFingerprint {
-		baseBetas = claudeCodeCLIBetas(body, requestedMap, useOAuthBetas)
+		baseBetas = claudeCodeCLIBetas(body, requestedMap, useOAuthBetas, isAnthropicBase)
 		if countTokens {
 			baseBetas = claudeCountTokensBetasForCredential(useOAuthBetas)
 			if advisorNeeded {
@@ -1181,7 +1181,7 @@ func applyClaudeHeadersWithNativeProfile(
 	if preserveCallerFingerprint && advisorNeeded {
 		baseBetas = withClaudeAdvisorToolBeta(baseBetas)
 	}
-	if !claudeRequestSupportsEffort(body, nil) {
+	if !isAnthropicBase || !claudeRequestSupportsEffort(body, nil) {
 		baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
 	}
 	existingSet := make(map[string]bool)
@@ -1244,8 +1244,8 @@ func applyClaudeHeadersWithNativeProfile(
 		appendBeta(helps.ClaudeCompactionBeta)
 	}
 	applyBetaHeader := func() {
-		// Enforce strict native Claude Code 2.1.280 model & turn beta gating:
-		if !claudeRequestSupportsEffort(body, nil) {
+		// Enforce upstream, model, and turn gating after caller betas are merged.
+		if !isAnthropicBase || !claudeRequestSupportsEffort(body, nil) {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
 		}
 		reqProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(body)

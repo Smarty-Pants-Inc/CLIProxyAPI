@@ -3,6 +3,8 @@ package helps
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -857,7 +859,10 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 				}
 			}
 		}
-		if _, value := auth.AccountInfo(); value != "" {
+		if kind, value := auth.AccountInfo(); value != "" {
+			if kind == "api_key" {
+				return usageAPIKeySource(value)
+			}
 			return strings.TrimSpace(value)
 		}
 		if trimmed := strings.TrimSpace(auth.MetadataString("email")); trimmed != "" {
@@ -865,7 +870,7 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 		}
 		if auth.Attributes != nil {
 			if key := strings.TrimSpace(auth.Attributes["api_key"]); key != "" {
-				return key
+				return usageAPIKeySource(key)
 			}
 		}
 	}
@@ -873,6 +878,13 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 		return trimmed
 	}
 	return ""
+}
+
+// usageAPIKeySource labels an upstream API-key credential without its secret:
+// usage records reach external sinks (for example the Redis usage queue).
+func usageAPIKeySource(key string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return "api-key:" + hex.EncodeToString(digest[:4])
 }
 
 func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
@@ -887,6 +899,9 @@ type StreamUsageBuffer struct {
 	detail        usage.Detail
 	ok            bool
 	responseModel string
+	// A Claude stream reports usage before it ends (message_start, message_delta);
+	// without message_stop the last count is partial, so it is marked Incomplete.
+	claude, claudeStopped bool
 }
 
 var (
@@ -958,11 +973,15 @@ func (b *StreamUsageBuffer) ObserveClaudeStream(line []byte) {
 	if b == nil {
 		return
 	}
-	if b.responseModel == "" {
-		if payload := jsonPayload(line); len(payload) > 0 {
+	b.claude = true
+	if payload := jsonPayload(line); len(payload) > 0 {
+		if b.responseModel == "" {
 			if model, _ := extractClaudeResponseModelEvent(payload); model != "" {
 				b.responseModel = model
 			}
+		}
+		if bytes.Contains(payload, []byte("message_stop")) && gjson.GetBytes(payload, "type").String() == "message_stop" {
+			b.claudeStopped = true
 		}
 	}
 	if detail, ok := ParseClaudeStreamUsage(line); ok {
@@ -978,8 +997,17 @@ func (b *StreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter
 	if b.responseModel != "" && reporter.ResponseModel() == "" {
 		reporter.SetResponseModel(b.responseModel)
 	}
-	reporter.Publish(ctx, b.detail)
+	reporter.Publish(ctx, b.publishedDetail())
 	return true
+}
+
+// publishedDetail marks partial Claude stream usage as unknown, not final.
+func (b *StreamUsageBuffer) publishedDetail() usage.Detail {
+	detail := b.detail
+	if b.claude && !b.claudeStopped {
+		detail.Incomplete = true
+	}
+	return detail
 }
 
 // PublishFailure emits the latest observed usage detail together with failure details.
@@ -990,7 +1018,7 @@ func (b *StreamUsageBuffer) PublishFailure(ctx context.Context, reporter *UsageR
 	if b.responseModel != "" && reporter.ResponseModel() == "" {
 		reporter.SetResponseModel(b.responseModel)
 	}
-	reporter.PublishFailureWithDetail(ctx, b.detail, errs...)
+	reporter.PublishFailureWithDetail(ctx, b.publishedDetail(), errs...)
 	return true
 }
 

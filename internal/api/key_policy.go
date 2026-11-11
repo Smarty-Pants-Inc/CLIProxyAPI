@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	ex "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -16,7 +17,7 @@ import (
 
 // Intercept only policied clients. A private built-in handler has no plugin host,
 // including if configuration changes while this admitted request is running.
-func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
+func admitKeyPolicy(c *gin.Context, managers []*auth.Manager, base *handlers.BaseAPIHandler) (func(), bool) {
 	key := c.GetString("userApiKey")
 	var policies []config.APIKeyPolicy
 	if metadata, ok := c.Get("accessMetadata"); ok {
@@ -47,7 +48,8 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	}
 	unavailable := &auth.Error{HTTPStatus: 503, Message: "api_key_policy_unavailable"}
 	path := c.Request.URL.Path
-	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses") {
+	messages, chat := path == "/v1/messages", path == "/v1/chat/completions"
+	if m == nil || c.Request.Method != http.MethodPost || (path != "/v1/responses" && path != "/backend-api/codex/responses" && !messages && !chat) {
 		return fail(unavailable)
 	}
 	// F32: bound encoded and decoded bytes before model checks or admission.
@@ -68,9 +70,22 @@ func admitKeyPolicy(c *gin.Context, managers []*auth.Manager) (func(), bool) {
 	c.Request = c.Request.WithContext(ctx)
 	c.Request.Header.Del("Content-Encoding")
 	c.Request.Body = io.NopCloser(bytes.NewReader(body))
-	// Keep protocol/error handling and SSE delivery, but no plugins/bootstrap retries.
-	clean := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, m)
-	openai.NewOpenAIResponsesAPIHandler(clean).Responses(c)
+	// Retain loaded SDK behavior without mutating shared settings. A fresh
+	// handler has no plugin/router hosts, and policy sends never bootstrap-retry.
+	var sdkCfg config.SDKConfig
+	if base != nil && base.Cfg != nil {
+		sdkCfg = *base.Cfg
+	}
+	sdkCfg.Streaming.BootstrapRetries = 0
+	clean := handlers.NewBaseAPIHandlers(&sdkCfg, m)
+	switch {
+	case messages:
+		claude.NewClaudeCodeAPIHandler(clean).ClaudeMessages(c)
+	case chat:
+		openai.NewOpenAIAPIHandler(clean).ChatCompletions(c)
+	default:
+		openai.NewOpenAIResponsesAPIHandler(clean).Responses(c)
+	}
 	c.Abort()
 	return func() {}, false
 }
