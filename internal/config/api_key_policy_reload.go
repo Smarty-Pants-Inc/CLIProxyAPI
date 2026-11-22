@@ -32,6 +32,9 @@ func PreserveAPIKeyPolicies(previous, next *Config) *Config {
 	}
 	if previous != nil {
 		old := previous.CloneForRuntime()
+		// Pool mode, definitions, caps, and ownership are frozen until restart.
+		// A new key may still reference one of these cloned frozen pools.
+		out.AccountPools = old.AccountPools
 		for digest, state := range old.PolicyReloadState {
 			history[digest] = state
 		}
@@ -80,7 +83,7 @@ func PreserveAPIKeyPolicies(previous, next *Config) *Config {
 		history = nil
 	}
 	out.PolicyReloadState = history
-	if reflect.DeepEqual(out.APIKeyPolicies, next.APIKeyPolicies) && reflect.DeepEqual(out.PolicyReloadState, next.PolicyReloadState) {
+	if reflect.DeepEqual(out.AccountPools, next.AccountPools) && reflect.DeepEqual(out.APIKeyPolicies, next.APIKeyPolicies) && reflect.DeepEqual(out.PolicyReloadState, next.PolicyReloadState) {
 		return next
 	}
 	return out

@@ -70,6 +70,12 @@ func (m *Manager) degradeCompactionInput(ctx context.Context, req cliproxyexecut
 	if m == nil {
 		return req, opts, nil
 	}
+	// Pool membership and the original signer pin must both hold. Degrading
+	// an unknown (including foreign-pool) signer would erase that pin before
+	// PrepareCompactionRequest can enforce it. Legacy degradation stays intact.
+	if KeyPolicyFromContext(ctx).IsPoolOperation() {
+		return req, opts, nil
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

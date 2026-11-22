@@ -7,6 +7,14 @@ package config
 import internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 
 type APIKeyPolicy = internalconfig.APIKeyPolicy
+type PoolClass = internalconfig.PoolClass
+type PoolAccount = internalconfig.PoolAccount
+type AccountPool = internalconfig.AccountPool
+
+const (
+	PoolClassHuman = internalconfig.PoolClassHuman
+	PoolClassAgent = internalconfig.PoolClassAgent
+)
 
 type SDKConfig = internalconfig.SDKConfig
 

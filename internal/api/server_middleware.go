@@ -161,12 +161,24 @@ func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager, core ...*auth.Ma
 func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core ...*auth.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
+			for _, m := range core {
+				if m != nil && m.PoolMode() {
+					c.AbortWithStatusJSON(403, gin.H{"error": gin.H{"message": "api_key_pool_unclassified", "code": "api_key_pool_unclassified"}})
+					return
+				}
+			}
 			c.Next()
 			return
 		}
 
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
+			for _, m := range core {
+				if m != nil && m.PoolMode() && (result == nil || !coreusage.IsNativeAccessProvider(result.Provider) || strings.TrimSpace(result.Principal) == "") {
+					c.AbortWithStatusJSON(403, gin.H{"error": gin.H{"message": "api_key_pool_unclassified", "code": "api_key_pool_unclassified"}})
+					return
+				}
+			}
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
@@ -213,6 +225,14 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, core .
 func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler, core ...*auth.Manager) gin.HandlerFunc {
 	fallback := realtimeStandardAuthMiddleware(manager, core...)
 	return func(c *gin.Context) {
+		// Pool aliases/client-secret surfaces are refused by ordinary authenticated
+		// classification before client-secret material is even inspected.
+		for _, m := range core {
+			if m != nil && m.PoolMode() {
+				fallback(c)
+				return
+			}
+		}
 		authorization, matched, errAuthenticate := handler.AuthenticateClientSecret(c.Request)
 		if !matched {
 			fallback(c)

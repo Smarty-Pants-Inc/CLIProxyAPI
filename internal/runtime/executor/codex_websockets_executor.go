@@ -77,6 +77,9 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
 	}
+	if cliproxyauth.KeyPolicyFromContext(ctx).IsPoolOperation() {
+		return e.httpExec.Execute(ctx, auth, req, opts)
+	}
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
 		return e.wsExec.Execute(ctx, auth, req, opts)
 	}
@@ -90,6 +93,9 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
+	if cliproxyauth.KeyPolicyFromContext(ctx).IsPoolOperation() {
+		return e.httpExec.ExecuteStream(ctx, auth, req, opts)
+	}
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
@@ -97,6 +103,13 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
+}
+
+func (e *CodexAutoExecutor) AcquirePoolIdentity(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, cliproxyauth.NativePoolIdentity, error) {
+	if e == nil || e.httpExec == nil {
+		return nil, cliproxyauth.NativePoolIdentity{}, fmt.Errorf("native codex HTTP executor unavailable")
+	}
+	return e.httpExec.AcquirePoolIdentity(ctx, auth)
 }
 
 func (e *CodexAutoExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {

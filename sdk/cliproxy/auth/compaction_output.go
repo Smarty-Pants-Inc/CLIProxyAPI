@@ -42,6 +42,9 @@ func (s *SessionAffinitySelector) recordCompactionOutputKeys(authID string, opts
 	// authoritative even when a handled scheduler bypassed selector.Pick.
 	primaryID, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	namespace, _ := opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey].(string)
+	if namespace != "" {
+		namespace = poolScopedProvider(ctx, namespace)
+	}
 	model, _ := opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string)
 	if primaryID != "" && namespace != "" {
 		primaryKey := namespace + "::" + cliproxysession.BoundSessionIdentity(primaryID) + "::" + canonicalModelKey(model)
