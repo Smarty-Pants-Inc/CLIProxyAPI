@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -917,6 +918,22 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
+	}
+}
+
+// Pi keeps its cache-prefix effort high; OAuth cloaking appends caller guidance
+// after the per-turn low directive. Reporting must not rewrite the upstream body.
+func TestUsageReporterClaudePerTurnEffortBeforeCloaking(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"},{"role":"system","content":[],"output_config":{"effort":"low"}},{"role":"system","content":[{"type":"text","text":"You are a helpful assistant.","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
+	before := bytes.Clone(payload)
+	reporter := NewUsageReporter(usage.WithReasoningEffort(context.Background(), "high"), "claude", "claude-opus-5-5", nil)
+	reporter.SetTranslatedReasoningEffort(payload, "claude")
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false)
+	if !bytes.Equal(payload, before) {
+		t.Fatal("usage reporting changed the upstream body")
+	}
+	if record.ReasoningEffort != "low" {
+		t.Fatalf("reasoning effort = %q, want low", record.ReasoningEffort)
 	}
 }
 
