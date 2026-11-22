@@ -62,6 +62,8 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys        []string       `yaml:"api-keys" json:"api-keys"`
 	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
+	// APIKeyRoutes restricts selected client keys to exact request routes.
+	APIKeyRoutes []APIKeyRoute `yaml:"api-key-routes,omitempty" json:"api-key-routes,omitempty"`
 
 	// PolicyReloadState is process-local history, including removed keys. Never persist it.
 	PolicyReloadState map[string]APIKeyPolicyReloadState `yaml:"-" json:"-"`

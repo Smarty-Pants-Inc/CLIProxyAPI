@@ -4,12 +4,15 @@ import (
 	"context"
 	"net/http"
 	"sync"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // Manager coordinates authentication providers.
 type Manager struct {
 	mu        sync.RWMutex
 	providers []Provider
+	routes    map[string]config.APIKeyRoute
 }
 
 // NewManager constructs an empty manager.
@@ -46,9 +49,12 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 	if m == nil {
 		return nil, nil
 	}
-	providers := m.Providers()
+	m.mu.RLock()
+	providers, routes := m.providers, m.routes
+	m.mu.RUnlock()
 	if len(providers) == 0 {
-		return nil, nil
+		_, authErr := authorizeRequestRoutes(routes, "", r, false)
+		return nil, authErr
 	}
 
 	var (
@@ -62,6 +68,19 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 		}
 		res, authErr := provider.Authenticate(ctx, r)
 		if authErr == nil {
+			principal := ""
+			if res != nil {
+				principal = res.Principal
+			}
+			digests, routeErr := authorizeRequestRoutes(routes, principal, r, provider.Identifier() == DefaultAccessProviderName)
+			if routeErr != nil {
+				return nil, routeErr
+			}
+			if res != nil {
+				cloned := *res
+				cloned.RouteKeyDigests = digests
+				res = &cloned
+			}
 			return res, nil
 		}
 		if IsAuthErrorCode(authErr, AuthErrorCodeNotHandled) {
