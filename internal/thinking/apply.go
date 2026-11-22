@@ -678,25 +678,31 @@ func extractThinkingConfigForUsage(body []byte, provider string) ThinkingConfig 
 	}
 }
 
-// claudePerTurnEffortConfig reads the mid-conversation effort that clients such as Pi
-// send as a trailing {role:"system", output_config:{effort}} message. It overrides the
-// top-level output_config.effort for usage reporting only; the request body is not changed.
+// claudePerTurnEffortConfig reads the latest system-message effort directive.
+// Later messages without effort (including appended cloaking guidance) do not reset it.
+// It overrides top-level effort for usage reporting only; the request body is not changed.
 func claudePerTurnEffortConfig(body []byte) (ThinkingConfig, bool) {
-	last := gjson.GetBytes(body, "messages.@reverse.0")
-	if last.Get("role").String() != "system" {
+	messages := gjson.GetBytes(body, "messages").Array()
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Get("role").String() != "system" {
+			continue
+		}
+		effort := messages[i].Get("output_config.effort")
+		if !effort.Exists() {
+			continue
+		}
+		if effort.Type != gjson.String {
+			return ThinkingConfig{}, false
+		}
+		switch level := ThinkingLevel(strings.ToLower(strings.TrimSpace(effort.String()))); level {
+		case LevelNone:
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}, true
+		case LevelAuto:
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}, true
+		case LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax:
+			return ThinkingConfig{Mode: ModeLevel, Level: level}, true
+		}
 		return ThinkingConfig{}, false
-	}
-	effort := last.Get("output_config.effort")
-	if effort.Type != gjson.String {
-		return ThinkingConfig{}, false
-	}
-	switch level := ThinkingLevel(strings.ToLower(strings.TrimSpace(effort.String()))); level {
-	case LevelNone:
-		return ThinkingConfig{Mode: ModeNone, Budget: 0}, true
-	case LevelAuto:
-		return ThinkingConfig{Mode: ModeAuto, Budget: -1}, true
-	case LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax:
-		return ThinkingConfig{Mode: ModeLevel, Level: level}, true
 	}
 	return ThinkingConfig{}, false
 }
